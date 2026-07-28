@@ -90,6 +90,18 @@ st.markdown("""
           color:white;flex-shrink:0;margin-top:1px;width:44px;text-align:center}
 .chk-name{width:330px;flex-shrink:0;color:#333}
 .chk-detail{color:#777;font-size:12px}
+.legend{background:white;border-radius:10px;padding:14px 18px;margin:2px 0 14px;
+        box-shadow:0 2px 8px rgba(0,0,0,0.06)}
+.leg-row{display:flex;align-items:flex-start;gap:12px;padding:6px 0;
+         border-bottom:0.5px solid #f4f4f4;font-size:12.5px}
+.leg-row:last-child{border-bottom:none}
+.leg-chip{font-size:10px;font-weight:700;letter-spacing:0.04em;padding:3px 10px;
+          border-radius:11px;color:white;flex-shrink:0;width:76px;text-align:center;
+          margin-top:1px}
+.leg-rule{width:290px;flex-shrink:0;color:#555;font-family:monospace;font-size:11.5px}
+.leg-do{color:#333}
+.leg-head{font-size:11px;font-weight:700;color:#8A8A8A;letter-spacing:0.1em;
+          text-transform:uppercase;margin-bottom:8px}
 .stTabs [data-baseweb="tab-list"]{gap:4px}
 .stTabs [data-baseweb="tab"]{font-size:13px;font-weight:600;padding:8px 16px}
 </style>
@@ -280,8 +292,9 @@ st.markdown(f"""<div class='commentary'>
 
 # ── four KPIs, nothing else ──────────────────────────────────────────
 KPI = [("orders", "Orders", "demand"), ("revenue", "Revenue", "financial"),
-       ("spend", "Budget spent", "financial"), ("roas", "ROAS", "efficiency")]
-cols = st.columns(4)
+       ("spend", "Budget spent", "financial"), ("roas", "ROAS", "efficiency"),
+       ("cac", "CAC", "efficiency")]
+cols = st.columns(5)
 for col, (key, label, family) in zip(cols, KPI):
     ln = snap.line(key)
     if ln is None:
@@ -306,62 +319,58 @@ st.markdown(f"<div class='note'>Paced plan = month plan x {cov.days_elapsed}/{co
             "ROAS and CAC judge whether it bought anything. The arrow is the last 7 days "
             "against the 7 before.</div>", unsafe_allow_html=True)
 
-# ── where the gap is ─────────────────────────────────────────────────
-st.markdown("#### Where the gap is")
-if GAP.empty:
-    st.caption("No plan available to attribute a gap against.")
-else:
-    show = GAP_SCOPED
-    # Recompute share within the current scope. Filtering a group-level share to
-    # one market leaves a number that answers a question nobody asked.
-    if sel_mkt != "All":
-        behind_total = show[show["Gap (orders)"] > 0]["Gap (orders)"].sum()
-        show["Share of shortfall"] = show["Gap (orders)"].apply(
-            lambda g: (g / behind_total * 100) if behind_total > 0 and g > 0 else 0.0)
-    scope_word = "group" if sel_mkt == "All" else sel_mkt
-    disp = show.copy()
-    disp["vs paced"] = disp["vs paced"].apply(lambda v: "n/a" if v is None else f"{v:.0f}%")
-    disp["Share of shortfall"] = disp["Share of shortfall"].apply(
-        lambda v: "—" if v <= 0 else f"{v:.0f}%")
-    disp["Gap (AED rev)"] = disp["Gap (AED rev)"].apply(
-        lambda v: "n/a" if v is None else f"{v:,.0f}")
-    disp = disp.rename(columns={
-        "Actual": "Actual orders",
-        "Paced plan": f"Paced plan (D{cov.days_elapsed})",
-        "Gap (orders)": "Behind by (orders)",
-        "Gap (AED rev)": "Behind by (AED rev)",
-        "Spend": "Spend (AED)",
-        "Share of shortfall": f"Share of {scope_word} shortfall"})
-    table(disp,
-          "Paced plan is the month's plan pro-rated to today: month plan x days elapsed / "
-          "days in month. 'Behind by' is paced plan minus actual, so a negative figure means "
-          "that cell is running ahead of pace. Share is calculated within the current "
-          "selection, so it always totals 100% across the cells that are behind — cells "
-          "running ahead show a dash. Meta is consolidated because targets are set at Meta "
-          "level, not per platform.")
+# ── where the next dirham should go ──────────────────────────────────
+st.markdown("#### Where the next dirham should go")
+ALLOC = E.allocation_view(t2, t3, sel_mo, sel_year, cov, sel_mkt)
 
-    behind = show[show["Share of shortfall"] > 0]
-    ahead = show[show["Gap (orders)"] < 0]
-    if len(behind):
-        t = behind.iloc[0]
-        n_others = len(behind) - 1
-        rest = behind["Share of shortfall"].iloc[1:].sum()
-        if n_others == 0:
-            tail = ("It is the only cell behind pace"
-                    + (f"; {', '.join(ahead['Market'] + ' ' + ahead['Channel'])} "
-                       f"{'is' if len(ahead)==1 else 'are'} ahead." if len(ahead) else "."))
-        else:
-            tail = (f"The other {n_others} cell{'s' if n_others > 1 else ''} behind pace "
-                    f"account for the remaining {rest:.0f}%.")
+if ALLOC.empty:
+    st.caption("No channel plan available to allocate against.")
+else:
+    disp = pd.DataFrame({
+        "Market": ALLOC["Market"],
+        "Channel": ALLOC["Channel"],
+        "Orders": ALLOC["Orders"].map(lambda v: f"{v:,.0f}"),
+        "vs paced": ALLOC["vs paced"].map(lambda v: "n/a" if v is None else f"{v:.0f}%"),
+        "Budget used": ALLOC["Budget used"].map(lambda v: "n/a" if v is None else f"{v:.0f}%"),
+        "Unspent (AED)": ALLOC["Headroom"].map(
+            lambda v: "over" if v is None or v < 0 else f"{v:,.0f}"),
+        "CAC": ALLOC["CAC"].map(lambda v: "n/a" if v is None else f"{v:.1f}"),
+        "Plan CAC": ALLOC["Plan CAC"].map(lambda v: "n/a" if v is None else f"{v:.1f}"),
+        "Cost vs plan": ALLOC["Cost index"].map(
+            lambda v: "n/a" if v is None else f"{v:.2f}x"),
+        "ROAS": ALLOC["ROAS"].map(lambda v: "n/a" if v is None else f"{v:.1f}x"),
+        "Read": ALLOC["Read"],
+    })
+    table(disp,
+          "Sorted by what an order actually costs, cheapest first — so the table reads in "
+          "the order money should flow. Cost vs plan is actual CAC divided by the CAC the "
+          "plan implied, so 1.00x is on budget and 3.00x is three times what each order was "
+          "costed at. Budget used is spend against the paced budget: it separates a channel "
+          "that has stopped working from one that simply has not spent its money, which look "
+          "identical on pace alone. Read is written from that row's own figures and changes "
+          "as the data does.")
+
+    # headline: idle money first, then the swap
+    rec = E.reallocation_estimate(ALLOC)
+    idle = ALLOC[ALLOC["Headroom"] > 0]
+    if len(idle):
+        top_idle = idle.loc[idle["Headroom"].idxmax()]
         st.markdown(
-            f"<div class='banner banner-warn'><b>{t['Market']} {t['Channel']} is "
-            f"{t['Share of shortfall']:.0f}% of the {scope_word} shortfall</b> — "
-            f"{t['Actual']:,} orders against {t['Paced plan']:,} paced by day "
-            f"{cov.days_elapsed}, on AED {t['Spend']:,} of spend. {tail}</div>",
+            f"<div class='banner banner-warn'><b>AED "
+            f"{idle['Headroom'].sum():,.0f} of paced budget has not gone out</b>, "
+            f"AED {top_idle['Headroom']:,.0f} of it in {top_idle['Market']} "
+            f"{top_idle['Channel']} — which is at {top_idle['vs paced']:.0f}% of paced "
+            f"orders on {top_idle['Budget used']:.0f}% of its budget. With "
+            f"{cov.days_remaining} days left, that is the constraint, not the channel.</div>",
             unsafe_allow_html=True)
-    elif len(show):
-        st.markdown("<div class='banner banner-ok'>Every channel in this selection is at or "
-                    "ahead of paced plan.</div>", unsafe_allow_html=True)
+    if rec:
+        st.markdown(
+            f"<div class='banner banner-bad'><b>AED {rec['freed']:,.0f} in "
+            f"{rec['from']} bought {rec['current_orders']:,} orders.</b> The same money at "
+            f"{rec['to']}'s current CAC of {rec['to_cac']:.1f} would buy roughly "
+            f"{rec['would_buy']:,} — about {rec['delta']:,} more. A ceiling, not a forecast: "
+            f"it assumes the cheaper channel absorbs the budget without its cost rising, "
+            f"which no channel does indefinitely.</div>", unsafe_allow_html=True)
 
 # ── will we land it ──────────────────────────────────────────────────
 st.markdown("#### Will we land the month?")

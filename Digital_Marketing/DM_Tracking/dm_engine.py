@@ -1116,3 +1116,163 @@ def financial_summary(t2, t3, market, month, year, cov: Coverage) -> pd.DataFram
                     "vs plan": fmt_pct(act, plan),
                     "Status": v.label})
     return pd.DataFrame(out)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v7.1 — CAPITAL ALLOCATION VIEW
+# ─────────────────────────────────────────────────────────────────────
+
+# Bands that decide the verdict. The rule lives here, not in a UI comment.
+PACE_AHEAD, PACE_BEHIND = 100.0, 90.0
+COST_CHEAP, COST_DEAR = 1.00, 1.50
+BUDGET_IDLE, BUDGET_HEAVY = 0.70, 1.50
+
+
+def _row_read(vs_pace, used, cost_idx, cac, spend, orders, headroom) -> str:
+    """One sentence describing this cell, built from its own figures.
+
+    Written instead of a verdict word because a code word needs a legend and a
+    rule the reader has to hold in their head, while a sentence carries its own
+    justification.
+    """
+    if None in (vs_pace, used, cost_idx):
+        return "No channel plan to compare against."
+
+    if cost_idx < 1:
+        cost = f"costing {(1 - cost_idx) * 100:.0f}% less than planned"
+    elif cost_idx < 1.1:
+        cost = "costing about what was planned"
+    elif cost_idx < 2:
+        cost = f"costing {(cost_idx - 1) * 100:.0f}% more than planned"
+    else:
+        cost = f"costing {cost_idx:.1f}x what was planned"
+
+    # the case worth naming: behind pace only because the money never went out
+    if used < 70 and vs_pace < 90 and cost_idx < 1.3 and headroom and headroom > 0:
+        return (f"Behind because AED {headroom:,.0f} never went out, not because it "
+                f"stopped working — {cost}.")
+    if used < 70 and cost_idx <= 1:
+        return f"{cost.capitalize()}, and only {used:.0f}% of its budget has gone out."
+    if cost_idx >= 1.5 and vs_pace < 90:
+        return (f"Spent {used:.0f}% of budget {cost} and returned {vs_pace:.0f}% "
+                f"of paced orders.")
+    if used > 150:
+        return f"{vs_pace:.0f}% of paced orders, but {used:.0f}% of budget spent, {cost}."
+    if vs_pace < 90:
+        return f"{vs_pace:.0f}% of paced orders on {used:.0f}% of budget, {cost}."
+    return f"On pace at {vs_pace:.0f}%, {cost}."
+
+
+def allocation_view(t2, t3, month, year, cov: Coverage,
+                    market: str = "All") -> pd.DataFrame:
+    """Market x channel ranked by what to do with the next dirham.
+
+    Pace alone says where the miss is, not what to do. Three readings together
+    say that: how much of the paced budget has actually gone out, what each
+    order cost against what it was costed at, and how far off pace it is.
+
+    Without budget utilisation two cells at the same pace look identical when
+    they need opposite action - one has not spent its money, the other has spent
+    it and has nothing to show.
+    """
+    rows = []
+    mkts = sorted(_scope(t2, None, month, year)["Market"].unique())
+    if market != "All":
+        mkts = [m for m in mkts if m == market]
+    for m in mkts:
+        for ch in CHANNEL_ORDER:
+            act = _chan_orders(t2, m, ch, month, year) or 0.0
+            spend = _chan_metric(t2, SPEND, m, ch, month, year) or 0.0
+            rev = _chan_metric(t2, REVENUE, m, ch, month, year) or 0.0
+            plan_o = target(t3, TGT_ORDERS, m, month, year, ch)
+            plan_b = target(t3, TGT_BUDGET, m, month, year, ch)
+            if plan_o is None:
+                continue
+            paced_o, paced_b = _pace(plan_o, cov), _pace(plan_b, cov)
+            vs_pace = pct(act, paced_o)
+            used = pct(spend, paced_b)
+            cac = safe_div(spend, act)
+            plan_cac = safe_div(plan_b, plan_o)
+            cost_idx = safe_div(cac, plan_cac)
+            headroom = (paced_b - spend) if paced_b is not None else None
+
+            read = _row_read(vs_pace, used, cost_idx, cac, spend, act, headroom)
+            if vs_pace is None or cost_idx is None or used is None:
+                verdict, why = "n/a", "no plan to compare against"
+            elif cost_idx <= COST_CHEAP and (used < BUDGET_IDLE * 100
+                                             or vs_pace >= PACE_AHEAD):
+                verdict, why = ("SCALE",
+                                "buying below planned cost with budget still unspent"
+                                if used < BUDGET_IDLE * 100
+                                else "ahead of pace and below planned cost")
+            elif used < BUDGET_IDLE * 100 and cost_idx <= 1.3:
+                verdict, why = ("DEPLOY",
+                                "behind pace because the budget has not gone out, "
+                                "not because it stopped working")
+            elif cost_idx >= COST_DEAR and vs_pace < PACE_BEHIND:
+                verdict, why = ("CUT",
+                                "budget spent, orders not delivered, cost well above plan")
+            elif cost_idx >= 1.3 and used > BUDGET_HEAVY * 100:
+                verdict, why = ("RESTRAIN",
+                                "delivering, but overspending to buy above-plan cost volume")
+            elif cost_idx >= COST_DEAR:
+                verdict, why = "WATCH", "delivering, but well above planned cost"
+            elif vs_pace < PACE_BEHIND:
+                verdict, why = "FIX", "spending to plan but not converting it into orders"
+            else:
+                verdict, why = "HOLD", "on pace at roughly planned cost"
+
+            rows.append({
+                "Market": m, "Channel": ch,
+                # Full precision kept here; rounding belongs to the display
+                # layer. Truncating per cell made six cells drift from the total.
+                "Orders": act, "vs paced": vs_pace,
+                "Spend": spend, "Budget used": used,
+                "Headroom": headroom,
+                "CAC": cac, "Plan CAC": plan_cac, "Cost index": cost_idx,
+                "ROAS": safe_div(rev, spend),
+                "Read": read,
+                "Verdict": verdict, "_why": why,
+                "_rank": {"SCALE": 0, "DEPLOY": 1, "HOLD": 2, "FIX": 3,
+                          "RESTRAIN": 4, "WATCH": 5, "CUT": 6}.get(verdict, 7),
+            })
+    if not rows:
+        return pd.DataFrame()
+    # Sorted by what an order actually costs, cheapest first, because that is the
+    # allocation question. Cost index answers a different one - whether the
+    # channel is performing against its own plan - and stays as a column.
+    df = pd.DataFrame(rows).sort_values("CAC", na_position="last").reset_index(drop=True)
+    if len(df) and df.loc[0, "CAC"]:
+        df.loc[0, "Read"] = "Cheapest orders here. " + df.loc[0, "Read"]
+    return df
+
+
+def reallocation_estimate(alloc: pd.DataFrame) -> Optional[dict]:
+    """What the money currently in CUT cells would buy at the best available cost.
+
+    A ceiling, not a forecast: it assumes the cheap channel absorbs the budget at
+    its current cost, which no channel does indefinitely.
+    """
+    if alloc.empty:
+        return None
+    cut = alloc[alloc["Verdict"].isin(["CUT", "RESTRAIN"])]
+    dest = alloc[alloc["Verdict"] == "SCALE"]
+    if cut.empty or dest.empty:
+        return None
+    freed = float(cut["Spend"].sum())
+    best = dest.loc[dest["CAC"].idxmin()]
+    if not best["CAC"] or best["CAC"] <= 0:
+        return None
+    current = int(cut["Orders"].sum())
+    would_buy = int(freed / best["CAC"])
+    idle = float(alloc[alloc["Headroom"] > 0]["Headroom"].sum())
+    return {
+        "idle": idle,
+        "freed": freed,
+        "from": ", ".join(f"{r['Market']} {r['Channel']}" for _, r in cut.iterrows()),
+        "to": f"{best['Market']} {best['Channel']}",
+        "to_cac": float(best["CAC"]),
+        "current_orders": current,
+        "would_buy": would_buy,
+        "delta": would_buy - current,
+    }

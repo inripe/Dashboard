@@ -251,3 +251,91 @@ if fails:
         print("   -", f)
     sys.exit(1)
 print(f"RESULT: ALL v7 LOGIC CHECKS PASS ({len(warns)} warnings)")
+
+
+# ─────────────────────────────────────────────────────────────────────
+print("\n=== 12. ALLOCATION VIEW ===")
+alloc = E.allocation_view(t2, t3, M, Y, cov)
+
+for _, a_ in alloc.iterrows():
+    m, ch = a_["Market"], a_["Channel"]
+    ia = (J[(J.Market == m) & (J.Platform.isin(E.CHANNEL_GROUPS[ch]))
+            & (J.Metric.isin(["Total Orders", "Orders"]))].Value.sum())
+    isp = (J[(J.Market == m) & (J.Platform.isin(E.CHANNEL_GROUPS[ch]))
+             & (J.Metric == "Budget Spent")].Value.sum())
+    ipo = TJ[(TJ.Market == m) & (TJ.Platform == ch)
+             & (TJ.Metric == "Target Orders")]["Target Value"].sum()
+    ipb = TJ[(TJ.Market == m) & (TJ.Platform == ch)
+             & (TJ.Metric == "Budget")]["Target Value"].sum()
+    ck(f"{m} {ch} orders", float(a_["Orders"]), ia)
+    ck(f"{m} {ch} spend", float(a_["Spend"]), isp, 1.0)
+    ck(f"{m} {ch} CAC", a_["CAC"], isp / ia if ia else None, 0.01)
+    ck(f"{m} {ch} plan CAC", a_["Plan CAC"], ipb / ipo if ipo else None, 0.01)
+    ck(f"{m} {ch} cost index", a_["Cost index"],
+       (isp / ia) / (ipb / ipo) if ia and ipo else None, 0.01)
+    ck(f"{m} {ch} budget used", a_["Budget used"],
+       isp / (ipb * DAYS / DIM) * 100 if ipb else None, 0.1)
+    ck(f"{m} {ch} headroom", float(a_["Headroom"]),
+       round(ipb * DAYS / DIM - isp), 1.0)
+
+print("\n--- sort order and read sentence ---")
+ck_true("sorted by CAC ascending",
+        list(alloc["CAC"]) == sorted(alloc["CAC"]),
+        f"{[round(c,1) for c in alloc['CAC']]}")
+ck_true("cheapest label on the lowest-CAC row only",
+        sum("Cheapest orders here" in r for r in alloc["Read"]) == 1)
+ck_true("cheapest label sits on row 0",
+        "Cheapest orders here" in alloc.iloc[0]["Read"])
+ck_true("every row has a read sentence",
+        alloc["Read"].notna().all() and (alloc["Read"].str.len() > 10).all())
+ck_true("read sentences are distinct", alloc["Read"].nunique() == len(alloc))
+for _, rr in alloc.iterrows():
+    ci = rr["Cost index"]
+    txt = rr["Read"]
+    if ci < 1:
+        want = f"{(1-ci)*100:.0f}% less than planned"
+    elif ci < 1.1:
+        want = "about what was planned"
+    elif ci < 2:
+        want = f"{(ci-1)*100:.0f}% more than planned"
+    else:
+        want = f"{ci:.1f}x what was planned"
+    ck_true(f"{rr['Market']} {rr['Channel']} read states cost correctly",
+            want in txt, f"expected '{want}'")
+for mk in sorted(t2.Market.unique()):
+    av = E.allocation_view(t2, t3, M, Y, cov, mk)
+    ck_true(f"{mk} scoped: cheapest label follows the selection",
+            sum("Cheapest orders here" in r for r in av["Read"]) == 1)
+ck_true("every row has a verdict", alloc["Verdict"].notna().all())
+ck_true("no row left unclassified", (alloc["Verdict"] != "n/a").all())
+ck_true("allocation orders = KPI orders",
+        abs(alloc["Orders"].sum() - snap.line("orders").actual) < 0.5,
+        f"{alloc['Orders'].sum()} vs {snap.line('orders').actual}")
+ck_true("allocation spend = KPI spend",
+        abs(alloc["Spend"].sum() - snap.line("spend").actual) < 1.0,
+        f"{alloc['Spend'].sum()} vs {snap.line('spend').actual}")
+
+rec = E.reallocation_estimate(alloc)
+if rec:
+    ck_true("reallocation arithmetic",
+            abs(rec["would_buy"] - rec["freed"] / rec["to_cac"]) < 1.0)
+    ck_true("reallocation destination is a SCALE cell",
+            rec["to"] in [f"{r['Market']} {r['Channel']}"
+                          for _, r in alloc[alloc.Verdict == "SCALE"].iterrows()])
+    ck_true("reallocation delta = would_buy - current",
+            rec["delta"] == rec["would_buy"] - rec["current_orders"])
+
+for mk in ["All"] + sorted(t2.Market.unique()):
+    try:
+        av = E.allocation_view(t2, t3, M, Y, cov, mk)
+        ck_true(f"{mk} allocation builds", not av.empty or mk not in t2.Market.unique())
+    except Exception as ex:
+        ck_true(f"{mk} allocation builds", False, str(ex))
+
+print("\n" + "=" * 62)
+if fails:
+    print(f"FINAL: {len(fails)} FAILURE(S)")
+    for f in fails:
+        print("   -", f)
+    sys.exit(1)
+print("FINAL: ALL v7.1 LOGIC CHECKS PASS")
