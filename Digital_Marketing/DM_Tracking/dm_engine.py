@@ -68,6 +68,13 @@ TGT_API_REVENUE = "API Revenue (AED)"
 TGT_UNITS = "Target Units"
 TGT_BUDGET = "Budget"
 TGT_MESSAGES = "Messages Required"
+
+# ── CURRENCY ──────────────────────────────────────────────────────────
+# Revenue is entered in the market's own currency; budget spend is entered in
+# AED. Reporting currency is AED, so revenue converts and spend does not.
+FX_SHEET = "T5. FX Rates"
+REVENUE_METRICS = {REVENUE}
+TARGET_REVENUE_METRICS = {TGT_REVENUE, TGT_API_REVENUE}
 TGT_CR = "CR%"
 
 # RAG thresholds. (green_at, amber_at) as fractions of the comparison basis.
@@ -233,6 +240,87 @@ def corr_band(r: Optional[float]) -> str:
 # LOAD
 # ─────────────────────────────────────────────────────────────────────
 
+def load_fx(path) -> tuple[dict, str]:
+    """Read T5. FX Rates -> {(market, 'YYYY-MM' or None): rate}.
+
+    A missing sheet is not an error - the workbook predates it. Every market
+    falls back to 1.0 and the integrity check reports that revenue was read as
+    already being in AED, so the assumption is visible rather than silent.
+    """
+    try:
+        fx = pd.read_excel(path, sheet_name=FX_SHEET)
+    except Exception:
+        return {}, "no FX sheet"
+    cols = {str(c).strip().lower(): c for c in fx.columns}
+    mc = cols.get("market")
+    rc = next((cols[k] for k in cols if "rate" in k), None)
+    if mc is None or rc is None:
+        return {}, "FX sheet found but Market / Rate columns not recognised"
+    moc = cols.get("month")
+    out = {}
+    for _, row in fx.iterrows():
+        m = row[mc]
+        if pd.isna(m):
+            continue
+        try:
+            rate = float(row[rc])
+        except (TypeError, ValueError):
+            continue
+        if rate <= 0:
+            continue
+        key_month = None
+        if moc is not None and not pd.isna(row[moc]):
+            try:
+                key_month = pd.to_datetime(row[moc]).strftime("%Y-%m")
+            except Exception:
+                key_month = str(row[moc]).strip()
+        out[(str(m).strip(), key_month)] = rate
+    return out, "ok"
+
+
+def fx_rate(fx: dict, market: str, month: int, year: int) -> float:
+    """Month-specific rate first, then the market default, then 1.0.
+
+    A pegged currency never needs a month row. A floating one - EGP - does, and
+    this lets both live in the same table.
+    """
+    if not fx:
+        return 1.0
+    key = f"{year:04d}-{month:02d}"
+    if (market, key) in fx:
+        return fx[(market, key)]
+    if (market, None) in fx:
+        return fx[(market, None)]
+    return 1.0
+
+
+def apply_fx(t2: pd.DataFrame, t3: pd.DataFrame, fx: dict) -> tuple:
+    """Convert revenue to AED. Budget and spend are already AED and untouched.
+
+    The rates used are recorded on the returned frames, so anything downstream
+    can state which conversion was applied rather than assume none was.
+    """
+    if not fx:
+        return t2, t3
+    t2 = t2.copy()
+    mask = t2["Metric"].isin(REVENUE_METRICS)
+    if mask.any():
+        rates = np.array([fx_rate(fx, m, mo, yr) for m, mo, yr in
+                          zip(t2.loc[mask, "Market"], t2.loc[mask, "Month"],
+                              t2.loc[mask, "Year"])])
+        t2.loc[mask, "Value"] = t2.loc[mask, "Value"].to_numpy() * rates
+    t3 = t3.copy()
+    mask = t3["Metric"].isin(TARGET_REVENUE_METRICS)
+    if mask.any():
+        rates = np.array([fx_rate(fx, m, mo, yr) for m, mo, yr in
+                          zip(t3.loc[mask, "Market"], t3.loc[mask, "MonthNum"],
+                              t3.loc[mask, "Year"])])
+        t3.loc[mask, "Value"] = t3.loc[mask, "Value"].to_numpy() * rates
+    t2.attrs["fx"], t3.attrs["fx"] = fx, fx
+    t2.attrs.setdefault("fx_note", "ok")
+    return t2, t3
+
+
 def load_data(path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Read T2. Actuals and T3. Targets. Header sits on sheet row 2."""
     t2 = pd.read_excel(path, sheet_name="T2. Actuals", skiprows=1)
@@ -260,6 +348,16 @@ def load_data(path) -> tuple[pd.DataFrame, pd.DataFrame]:
         t3[c] = t3[c].astype(str)
     t3["MonthNum"] = t3["Month"].dt.month
     t3["Year"] = t3["Month"].dt.year
+
+    try:
+        if hasattr(path, "seek"):
+            path.seek(0)
+        fx, note = load_fx(path)
+    except Exception:
+        fx, note = {}, "FX sheet could not be read"
+    t2, t3 = apply_fx(t2, t3, fx)
+    t2.attrs["fx"], t2.attrs["fx_note"] = fx, note
+    t3.attrs["fx"] = fx
     return t2, t3
 
 
@@ -644,7 +742,21 @@ def run_integrity(t2, t3, market, month, year, raw, cov: Coverage) -> list:
         add("BASKET", "Basket size near plan", ok,
             f"{raw['basket']:.2f} vs plan {raw['plan_basket']:.2f}", severity="medium")
 
-    # 6. Targets exist for every market carrying actuals
+    # 6. Currency
+    fx = t2.attrs.get("fx", {})
+    act_m0 = set(_scope(t2, None, month, year)["Market"].unique())
+    if not fx:
+        add("FX", "Revenue converted to AED", False,
+            "no FX table - revenue read as if already in AED. Add a "
+            "'T5. FX Rates' sheet with Market, Currency and Rate to AED columns.")
+    else:
+        miss = sorted(m for m in act_m0
+                      if (m, None) not in fx and (m, f"{year:04d}-{month:02d}") not in fx)
+        add("FX", "Revenue converted to AED", not miss,
+            ", ".join(f"{m} x{fx_rate(fx, m, month, year):.4f}" for m in sorted(act_m0))
+            if not miss else "no rate for " + ", ".join(miss) + " - read as 1.0")
+
+    # 7. Targets exist for every market carrying actuals
     act_mkts = set(_scope(t2, None, month, year)["Market"].unique())
     tgt_mkts = set(_scope(t3, None, month, year)[
         lambda x: x["Metric"] == TGT_ORDERS]["Market"].unique())
@@ -652,7 +764,7 @@ def run_integrity(t2, t3, market, month, year, raw, cov: Coverage) -> list:
     add("TARGETS", "Targets present for all active markets", not missing,
         "complete" if not missing else "missing: " + ", ".join(missing))
 
-    # 7. Plan internal consistency: channel targets should roll up to Total
+    # 8. Plan internal consistency: channel targets should roll up to Total
     for m in sorted(act_mkts):
         tot = target(t3, TGT_ORDERS, m, month, year, "Total")
         parts = _nsum(*[target(t3, TGT_ORDERS, m, month, year, p)

@@ -332,10 +332,56 @@ for mk in ["All"] + sorted(t2.Market.unique()):
     except Exception as ex:
         ck_true(f"{mk} allocation builds", False, str(ex))
 
+print("\n=== 13. CURRENCY ===")
+_FX = {("UAE", None): 1.000, ("KSA", None): 0.979, ("Qatar", None): 1.009,
+       ("Egypt", None): 0.072, ("Egypt", "2026-08"): 0.070}
+fx_live = t2.attrs.get("fx", {})
+print(f"  workbook FX table: {t2.attrs.get('fx_note')} "
+      f"({len(fx_live)} row(s))")
+
+b2, b3 = E.apply_fx(t2, t3, _FX)
+for m in sorted(t2.Market.unique()):
+    r_before = E.actual(t2, E.REVENUE, market=m, month=M, year=Y)
+    r_after = E.actual(b2, E.REVENUE, market=m, month=M, year=Y)
+    s_before = E.actual(t2, E.SPEND, market=m, month=M, year=Y)
+    s_after = E.actual(b2, E.SPEND, market=m, month=M, year=Y)
+    rate = E.fx_rate(_FX, m, M, Y)
+    ck(f"{m} revenue x{rate}", r_after, r_before * rate, 1.0)
+    ck_true(f"{m} spend untouched by FX", abs(s_before - s_after) < 1e-9,
+            f"{s_before:,.2f} vs {s_after:,.2f}")
+
+pr_b = E.target(t3, E.TGT_REVENUE, "KSA", M, Y, "Total")
+pr_a = E.target(b3, E.TGT_REVENUE, "KSA", M, Y, "Total")
+ck("KSA target revenue converts", pr_a, pr_b * 0.979, 1.0)
+pb_b = E.target(t3, E.TGT_BUDGET, "KSA", M, Y, "Total")
+pb_a = E.target(b3, E.TGT_BUDGET, "KSA", M, Y, "Total")
+ck_true("target budget untouched by FX", abs(pb_b - pb_a) < 1e-9)
+
+ck_true("month override beats default", E.fx_rate(_FX, "Egypt", 8, 2026) == 0.070)
+ck_true("default used when no month row", E.fx_rate(_FX, "Egypt", 7, 2026) == 0.072)
+ck_true("unknown market falls back to 1.0", E.fx_rate(_FX, "Oman", 7, 2026) == 1.0)
+ck_true("empty FX table is a no-op", E.fx_rate({}, "KSA", 7, 2026) == 1.0)
+n2, n3 = E.apply_fx(t2, t3, {})
+ck_true("no FX table leaves data unchanged",
+        abs(E.actual(n2, E.REVENUE, month=M, year=Y)
+            - E.actual(t2, E.REVENUE, month=M, year=Y)) < 1e-9)
+
+sb_ = E.build_snapshot(b2, b3, "All", M, Y)
+ck_true("CAC unaffected by FX (spend is already AED)",
+        abs(sb_.raw["cac"] - snap.raw["cac"]) < 1e-9,
+        f"{snap.raw['cac']:.4f} vs {sb_.raw['cac']:.4f}")
+fxchk = next(f for f in sb_.integrity if f["id"] == "FX")
+ck_true("FX integrity check passes when rates cover every market", fxchk["pass"],
+        fxchk["detail"])
+fxchk0 = next(f for f in snap.integrity if f["id"] == "FX")
+ck_true("FX integrity check fails loudly when the table is missing",
+        (not fxchk0["pass"]) if not fx_live else fxchk0["pass"],
+        fxchk0["detail"][:70])
+
 print("\n" + "=" * 62)
 if fails:
     print(f"FINAL: {len(fails)} FAILURE(S)")
     for f in fails:
         print("   -", f)
     sys.exit(1)
-print("FINAL: ALL v7.1 LOGIC CHECKS PASS")
+print("FINAL: ALL v7.2 LOGIC CHECKS PASS")
