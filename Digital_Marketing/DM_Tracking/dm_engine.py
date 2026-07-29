@@ -1388,3 +1388,307 @@ def reallocation_estimate(alloc: pd.DataFrame) -> Optional[dict]:
         "would_buy": would_buy,
         "delta": would_buy - current,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v7.3 — PERIOD COMPARISON
+# ─────────────────────────────────────────────────────────────────────
+
+# How each metric should be read when it moves. Spend and message volume are
+# inputs: they report magnitude and never a verdict.
+CMP_POLARITY = {
+    "orders": "up", "units": "up", "revenue": "up", "roas": "up",
+    "cr": "up", "aov": "up", "daily": "up",
+    "cac": "down",
+    "spend": "neutral", "messages": "neutral",
+}
+CMP_LABEL = {
+    "orders": "Orders", "units": "Units", "revenue": "Revenue", "spend": "Spend",
+    "cac": "CAC", "roas": "ROAS", "aov": "AOV", "cr": "CR%",
+    "daily": "Orders/day", "messages": "Messages",
+}
+CMP_FMT = {
+    "orders": ("", "", 0), "units": ("", "", 0), "revenue": ("AED ", "", 0),
+    "spend": ("AED ", "", 0), "cac": ("AED ", "", 1), "roas": ("", "x", 1),
+    "aov": ("AED ", "", 0), "cr": ("", "%", 2), "daily": ("", "", 0),
+    "messages": ("", "", 0),
+}
+
+
+def _platforms_for(channels, split_meta: bool) -> Optional[list]:
+    """Resolve a channel selection to the platform names T2 actually uses."""
+    if not channels:
+        return None
+    out = []
+    for c in channels:
+        if c in CHANNEL_GROUPS and not split_meta:
+            out += CHANNEL_GROUPS[c]
+        elif c in CHANNEL_GROUPS:
+            out += CHANNEL_GROUPS[c]
+        else:
+            out.append(c)
+    return sorted(set(out))
+
+
+def cmp_block(t2, start, end, markets=None, platforms=None) -> dict:
+    """Every comparison metric for one window, one scope.
+
+    CR% is deliberately channel-aware: API converts messages sent, Meta converts
+    messages received. Mixing the two produces a rate that means nothing.
+    """
+    d = t2[(t2["Date"] >= pd.Timestamp(start)) & (t2["Date"] <= pd.Timestamp(end))]
+    if markets:
+        d = d[d["Market"].isin(markets)]
+    if platforms:
+        d = d[d["Platform"].isin(platforms)]
+
+    orders = d[d["Metric"].isin(ORDER_METRICS_ALL)]["Value"].sum()
+    units = d[d["Metric"] == UNITS]["Value"].sum()
+    rev = d[d["Metric"] == REVENUE]["Value"].sum()
+    spend = d[d["Metric"] == SPEND]["Value"].sum()
+
+    api_msg = d[(d["Platform"] == "API")
+                & (d["Metric"].isin([MSG_CUST, MSG_LEAD]))]["Value"].sum()
+    meta_msg = d[(d["Platform"] == "Meta API") & (d["Metric"] == MSG_RECV)]["Value"].sum()
+    api_ord = d[(d["Platform"] == "API") & (d["Metric"] == "Total Orders")]["Value"].sum()
+    meta_ord = d[(d["Platform"] == "Meta API") & (d["Metric"] == "Orders")]["Value"].sum()
+
+    msgs = api_msg + meta_msg
+    conv = api_ord + meta_ord
+    days = max((pd.Timestamp(end) - pd.Timestamp(start)).days + 1, 1)
+
+    return {
+        "orders": orders, "units": units, "revenue": rev, "spend": spend,
+        "messages": msgs,
+        "roas": safe_div(rev, spend), "cac": safe_div(spend, orders),
+        "aov": safe_div(rev, orders), "cr": pct(conv, msgs),
+        "daily": safe_div(orders, days), "days": days,
+        "reported_days": int(d["Day"].nunique()) if not d.empty else 0,
+    }
+
+
+def cmp_change(a, b, key) -> dict:
+    """Delta plus how to read it. 'new' when B is nothing and A is something."""
+    va, vb = a.get(key), b.get(key)
+    pol = CMP_POLARITY.get(key, "up")
+    if va is None and vb is None:
+        return {"delta": None, "pct": None, "read": "n/a", "polarity": pol}
+    va = va or 0.0
+    if not vb:
+        return {"delta": va, "pct": None,
+                "read": "new" if va else "n/a", "polarity": pol}
+    d = va - vb
+    p = d / vb * 100
+    if pol == "neutral":
+        read = "higher" if p > 1 else "lower" if p < -1 else "flat"
+    elif abs(p) < 1:
+        read = "flat"
+    else:
+        good = (p > 0) if pol == "up" else (p < 0)
+        read = "better" if good else "worse"
+    return {"delta": d, "pct": p, "read": read, "polarity": pol}
+
+
+CMP_HEADLINE_KEYS = ["orders", "units", "revenue", "spend",
+                     "cac", "roas", "aov", "cr", "daily"]
+
+
+def cmp_headline(t2, a_range, b_range, markets=None, channels=None,
+                 split_meta=False) -> pd.DataFrame:
+    plats = _platforms_for(channels, split_meta)
+    A = cmp_block(t2, *a_range, markets, plats)
+    B = cmp_block(t2, *b_range, markets, plats)
+    rows = []
+    for k in CMP_HEADLINE_KEYS:
+        pfx, sfx, dec = CMP_FMT[k]
+        ch = cmp_change(A, B, k)
+        rows.append({
+            "Metric": CMP_LABEL[k],
+            "Period A": fmt(A[k], pfx, sfx, dec),
+            "Period B": fmt(B[k], pfx, sfx, dec),
+            "Change": ("n/a" if ch["delta"] is None
+                       else fmt(ch["delta"], pfx, sfx, dec) if ch["pct"] is not None
+                       else "new"),
+            "Δ%": "n/a" if ch["pct"] is None else f"{ch['pct']:+.1f}%",
+            "Direction": ch["read"],
+        })
+    return pd.DataFrame(rows)
+
+
+def cmp_hierarchy(t2, a_range, b_range, markets=None, channels=None,
+                  split_meta=False) -> pd.DataFrame:
+    """Group, then each market, then each channel inside it.
+
+    Markets are ordered by how much they moved, so whatever drove the change is
+    at the top rather than wherever the alphabet puts it.
+    """
+    mkts = markets or sorted(t2["Market"].unique())
+    units = (["API", "Meta API", "Meta Ecom"] if split_meta else list(CHANNEL_ORDER))
+    if channels:
+        chosen = set(channels)
+        units = [u for u in units
+                 if u in chosen
+                 or any(u in CHANNEL_GROUPS.get(c, []) for c in chosen)]
+
+    def row(label, level, mkt_scope, plats):
+        A = cmp_block(t2, *a_range, mkt_scope, plats)
+        B = cmp_block(t2, *b_range, mkt_scope, plats)
+        o = cmp_change(A, B, "orders")
+        return {
+            "_level": level, "Scope": label,
+            "A orders": A["orders"], "B orders": B["orders"],
+            "Δ orders": o["delta"],
+            "Δ%": o["pct"], "_read": o["read"],
+            "A revenue": A["revenue"], "B revenue": B["revenue"],
+            "A spend": A["spend"], "B spend": B["spend"],
+            "A CAC": A["cac"], "B CAC": B["cac"],
+            "A ROAS": A["roas"], "B ROAS": B["roas"],
+            "A AOV": A["aov"], "B AOV": B["aov"],
+            "_abs": abs(o["delta"] or 0),
+        }
+
+    all_plats = _platforms_for(units, split_meta)
+    out = [row("All markets", 0, mkts, all_plats)]
+    mrows = [row(m, 1, [m], all_plats) for m in mkts]
+    mrows.sort(key=lambda r: -r["_abs"])
+    for mr in mrows:
+        out.append(mr)
+        for u in units:
+            plats = CHANNEL_GROUPS[u] if u in CHANNEL_GROUPS else [u]
+            cr = row(u, 2, [mr["Scope"]], plats)
+            if cr["A orders"] or cr["B orders"] or cr["A spend"] or cr["B spend"]:
+                out.append(cr)
+    df = pd.DataFrame(out)
+    total = df[df["_level"] == 1]["_abs"].sum()
+    df["Share of change"] = df.apply(
+        lambda r: (r["_abs"] / total * 100) if total and r["_level"] == 1 else None, axis=1)
+    return df
+
+
+def cmp_daily(t2, a_range, b_range, markets=None, channels=None,
+              split_meta=False) -> pd.DataFrame:
+    """Both periods on a shared day index, so day 1 of A sits against day 1 of B.
+
+    Aligning on calendar date would leave the shorter period padded with blanks
+    and make two ranges of different length impossible to read together.
+    """
+    plats = _platforms_for(channels, split_meta)
+
+    def series(rng):
+        d = t2[(t2["Date"] >= pd.Timestamp(rng[0])) & (t2["Date"] <= pd.Timestamp(rng[1]))]
+        if markets:
+            d = d[d["Market"].isin(markets)]
+        if plats:
+            d = d[d["Platform"].isin(plats)]
+        d = d[d["Metric"].isin(ORDER_METRICS_ALL)]
+        s = d.groupby("Date")["Value"].sum()
+        idx = pd.date_range(rng[0], rng[1], freq="D")
+        return s.reindex(idx, fill_value=0.0)
+
+    sa, sb = series(a_range), series(b_range)
+    n = max(len(sa), len(sb))
+    return pd.DataFrame({
+        "Day": [f"d{i+1}" for i in range(n)],
+        "Period A": [float(sa.iloc[i]) if i < len(sa) else None for i in range(n)],
+        "Period B": [float(sb.iloc[i]) if i < len(sb) else None for i in range(n)],
+        "A date": [sa.index[i].strftime("%d %b") if i < len(sa) else "" for i in range(n)],
+        "B date": [sb.index[i].strftime("%d %b") if i < len(sb) else "" for i in range(n)],
+    })
+
+
+def cmp_summary(t2, a_range, b_range, markets=None, channels=None,
+                split_meta=False) -> list:
+    """Sentences built from the deltas. Returns [(severity, text)]."""
+    plats = _platforms_for(channels, split_meta)
+    A = cmp_block(t2, *a_range, markets, plats)
+    B = cmp_block(t2, *b_range, markets, plats)
+    out = []
+
+    o, s = cmp_change(A, B, "orders"), cmp_change(A, B, "spend")
+    if o["pct"] is None:
+        out.append(("info", "No orders in period B, so there is nothing to compare against."))
+        return out
+
+    sev = "good" if o["pct"] > 1 else "risk" if o["pct"] < -1 else "info"
+    spend_txt = (f" on {abs(s['pct']):.0f}% {'more' if s['pct'] > 0 else 'less'} spend"
+                 if s["pct"] is not None and abs(s["pct"]) >= 1 else " on flat spend")
+    if abs(o["pct"]) < 1:
+        # A change of under a percent is noise. Saying "fell 0%" reads as a
+        # finding when nothing happened.
+        out.append((sev, f"Orders held flat at {A['orders']:,.0f}{spend_txt}."))
+    else:
+        out.append((sev, f"Orders {'rose' if o['pct'] > 0 else 'fell'} "
+                         f"{abs(o['pct']):.0f}% to {A['orders']:,.0f}{spend_txt}."))
+
+    cac, roas = cmp_change(A, B, "cac"), cmp_change(A, B, "roas")
+    if cac["pct"] is not None and roas["pct"] is not None:
+        if abs(cac["pct"]) < 1 and abs(roas["pct"]) < 1:
+            out.append(("info", f"Efficiency was unchanged: CAC "
+                                f"{fmt(A['cac'], 'AED ', dec=1)}, "
+                                f"ROAS {A['roas']:.1f}x."))
+        else:
+            out.append(("good" if cac["read"] == "better" else "warn",
+                        f"CAC {'fell' if cac['pct'] < 0 else 'rose'} from "
+                        f"{fmt(B['cac'], 'AED ', dec=1)} to {fmt(A['cac'], 'AED ', dec=1)} "
+                        f"and ROAS moved {B['roas']:.1f}x to {A['roas']:.1f}x."))
+
+    # which market moved it
+    mkts = markets or sorted(t2["Market"].unique())
+    if len(mkts) > 1:
+        moves = []
+        for m in mkts:
+            a_, b_ = cmp_block(t2, *a_range, [m], plats), cmp_block(t2, *b_range, [m], plats)
+            moves.append((m, (a_["orders"] or 0) - (b_["orders"] or 0)))
+        tot = sum(abs(x[1]) for x in moves)
+        moves.sort(key=lambda x: -abs(x[1]))
+        if tot and moves and abs(moves[0][1]) > 0:
+            top, d = moves[0]
+            out.append(("info", f"{top} accounts for {abs(d)/tot*100:.0f}% of the movement, "
+                                f"{'up' if d > 0 else 'down'} {abs(d):,.0f} orders."))
+
+    # a channel moving against the group is worth naming
+    if split_meta:
+        for p in ("Meta API", "Meta Ecom"):
+            a_, b_ = cmp_block(t2, *a_range, mkts, [p]), cmp_block(t2, *b_range, mkts, [p])
+            c = cmp_change(a_, b_, "orders")
+            if c["pct"] is not None and (c["pct"] < 0) != (o["pct"] < 0) and abs(c["pct"]) > 10:
+                out.append(("warn", f"{p} moved the other way: "
+                                    f"{c['pct']:+.0f}% to {a_['orders']:,.0f} orders, "
+                                    f"CAC {fmt(b_['cac'], 'AED ', dec=1)} to "
+                                    f"{fmt(a_['cac'], 'AED ', dec=1)}."))
+
+    # thin data invalidates the comparison before any of the above matters
+    for lbl, blk in (("A", A), ("B", B)):
+        if blk["reported_days"] < blk["days"]:
+            out.append(("warn", f"Period {lbl} has {blk['reported_days']} days of data "
+                                f"across a {blk['days']}-day window — the comparison is "
+                                f"not like for like."))
+    return out
+
+
+def cmp_presets(dates: list) -> dict:
+    """Named period pairs. Values are (a_start, a_end, b_start, b_end)."""
+    if not dates:
+        return {}
+    ds = sorted(dates)
+    last = ds[-1]
+    out = {}
+    if len(ds) >= 8:
+        a_s = last - _dt.timedelta(days=6)
+        b_e = a_s - _dt.timedelta(days=1)
+        out["Last 7 days vs prior 7"] = (a_s, last, b_e - _dt.timedelta(days=6), b_e)
+    if len(ds) >= 4:
+        n = min(len(ds) // 2, 14)
+        a_s = last - _dt.timedelta(days=n - 1)
+        b_e = a_s - _dt.timedelta(days=1)
+        out[f"Last {n} days vs prior {n}"] = (a_s, last, b_e - _dt.timedelta(days=n - 1), b_e)
+    m_start = last.replace(day=1)
+    prev_end = m_start - _dt.timedelta(days=1)
+    if prev_end >= ds[0]:
+        out["This month vs last month"] = (m_start, last, prev_end.replace(day=1), prev_end)
+        try:
+            same = prev_end.replace(day=min(last.day, prev_end.day))
+            out["Same period last month"] = (m_start, last, prev_end.replace(day=1), same)
+        except ValueError:
+            pass
+    return out

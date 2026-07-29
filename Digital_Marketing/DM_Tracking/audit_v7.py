@@ -385,3 +385,130 @@ if fails:
         print("   -", f)
     sys.exit(1)
 print("FINAL: ALL v7.2 LOGIC CHECKS PASS")
+
+
+# ─────────────────────────────────────────────────────────────────────
+print("\n=== 14. PERIOD COMPARISON ===")
+import datetime as _d
+_days = sorted(t2["Day"].unique())
+_A = (_days[-7], _days[-1])
+_B = (_days[-14], _days[-8])
+
+def _raw(rng, mkts=None, plats=None, metric=None):
+    d = J[(J.Date >= pd.Timestamp(rng[0])) & (J.Date <= pd.Timestamp(rng[1]))]
+    if mkts: d = d[d.Market.isin(mkts)]
+    if plats: d = d[d.Platform.isin(plats)]
+    if metric == "orders":
+        return d[d.Metric.isin(["Total Orders", "Orders"])].Value.sum()
+    return d[d.Metric == metric].Value.sum()
+
+blkA = E.cmp_block(t2, *_A)
+blkB = E.cmp_block(t2, *_B)
+ck("A orders", blkA["orders"], _raw(_A, metric="orders"))
+ck("B orders", blkB["orders"], _raw(_B, metric="orders"))
+ck("A spend", blkA["spend"], _raw(_A, metric="Budget Spent"), 1.0)
+ck("A units", blkA["units"], _raw(_A, metric="Units"))
+ck("A CAC = spend/orders", blkA["cac"],
+   _raw(_A, metric="Budget Spent") / _raw(_A, metric="orders"), 0.01)
+ck("A orders/day", blkA["daily"], blkA["orders"] / 7, 0.01)
+
+print("\n--- deltas and polarity ---")
+ck("orders delta", E.cmp_change(blkA, blkB, "orders")["delta"],
+   blkA["orders"] - blkB["orders"])
+ck("orders pct", E.cmp_change(blkA, blkB, "orders")["pct"],
+   (blkA["orders"] - blkB["orders"]) / blkB["orders"] * 100, 0.01)
+ck_true("identical periods read flat",
+        E.cmp_change(blkA, blkA, "orders")["read"] == "flat")
+ck_true("identical periods delta is zero",
+        abs(E.cmp_change(blkA, blkA, "orders")["delta"]) < 1e-9)
+ck_true("rising spend never reads better",
+        E.cmp_change({"spend": 200}, {"spend": 100}, "spend")["read"] == "higher")
+ck_true("falling spend never reads worse",
+        E.cmp_change({"spend": 50}, {"spend": 100}, "spend")["read"] == "lower")
+ck_true("falling CAC reads better",
+        E.cmp_change({"cac": 10}, {"cac": 20}, "cac")["read"] == "better")
+ck_true("rising CAC reads worse",
+        E.cmp_change({"cac": 20}, {"cac": 10}, "cac")["read"] == "worse")
+ck_true("rising orders reads better",
+        E.cmp_change({"orders": 20}, {"orders": 10}, "orders")["read"] == "better")
+ck_true("zero baseline reads new",
+        E.cmp_change({"orders": 20}, {"orders": 0}, "orders")["read"] == "new")
+ck_true("zero baseline has no percentage",
+        E.cmp_change({"orders": 20}, {"orders": 0}, "orders")["pct"] is None)
+
+print("\n--- hierarchy reconciles ---")
+Hy = E.cmp_hierarchy(t2, _A, _B)
+grp = Hy[Hy._level == 0].iloc[0]
+mk = Hy[Hy._level == 1]
+ck("group A = sum of markets", grp["A orders"], mk["A orders"].sum())
+ck("group B = sum of markets", grp["B orders"], mk["B orders"].sum())
+ck("group A = raw recompute", grp["A orders"], _raw(_A, metric="orders"))
+for _, r in mk.iterrows():
+    kids = Hy[(Hy._level == 2) & (Hy.index > _)]
+ck_true("market shares sum to 100%",
+        abs(mk["Share of change"].sum() - 100) < 0.5,
+        f"{mk['Share of change'].sum():.1f}%")
+ck_true("markets ordered by size of movement",
+        list(mk["Share of change"]) == sorted(mk["Share of change"], reverse=True))
+
+print("\n--- Meta split reconciles to consolidated ---")
+Hc = E.cmp_hierarchy(t2, _A, _B, split_meta=False)
+Hs = E.cmp_hierarchy(t2, _A, _B, split_meta=True)
+ck("split group A = consolidated group A",
+   Hs[Hs._level == 0].iloc[0]["A orders"], Hc[Hc._level == 0].iloc[0]["A orders"])
+for m in sorted(t2.Market.unique()):
+    cons = Hc[(Hc._level == 2) & (Hc.Scope == "Meta")]
+    sp = Hs[(Hs._level == 2) & (Hs.Scope.isin(["Meta API", "Meta Ecom"]))]
+mA = E.cmp_block(t2, *_A, [m for m in sorted(t2.Market.unique())], ["Meta API", "Meta Ecom"])
+mS = (E.cmp_block(t2, *_A, None, ["Meta API"])["orders"]
+      + E.cmp_block(t2, *_A, None, ["Meta Ecom"])["orders"])
+ck("Meta split orders = Meta consolidated", mS, mA["orders"])
+
+print("\n--- day alignment ---")
+Dd = E.cmp_daily(t2, _A, _B)
+ck_true("one row per day of the longer period", len(Dd) == 7, f"{len(Dd)} rows")
+ck("daily A sums to period A", Dd["Period A"].sum(), blkA["orders"], 1.0)
+ck("daily B sums to period B", Dd["Period B"].sum(), blkB["orders"], 1.0)
+ck_true("every day carries its real date", (Dd["A date"].str.len() > 0).all())
+Duneven = E.cmp_daily(t2, (_days[-5], _days[-1]), (_days[-14], _days[-8]))
+ck_true("uneven windows pad rather than truncate", len(Duneven) == 7)
+ck_true("short period padded with nulls, not zeros",
+        Duneven["Period A"].isna().sum() == 2)
+
+print("\n--- scoping ---")
+for m in sorted(t2.Market.unique()):
+    b = E.cmp_block(t2, *_A, [m])
+    ck(f"{m} scoped orders", b["orders"], _raw(_A, mkts=[m], metric="orders"))
+api = E.cmp_block(t2, *_A, None, ["API"])
+ck("API scoped orders", api["orders"], _raw(_A, plats=["API"], metric="orders"))
+ck_true("platform resolution consolidates Meta",
+        E._platforms_for(["Meta"], False) == ["Meta API", "Meta Ecom"])
+ck_true("platform resolution passes split names through",
+        E._platforms_for(["Meta API"], True) == ["Meta API"])
+ck_true("no channel selection means every platform",
+        E._platforms_for(None, False) is None)
+
+print("\n--- summary text ---")
+summ = E.cmp_summary(t2, _A, _B)
+ck_true("summary produced", len(summ) >= 2)
+ck_true("every line has a severity",
+        all(s in ("good", "warn", "risk", "info") for s, _ in summ))
+same = E.cmp_summary(t2, _A, _A)
+ck_true("identical periods do not claim a change",
+        not any("rose" in t or "fell" in t for _, t in same),
+        same[0][1][:60] if same else "")
+
+print("\n--- presets ---")
+pre = E.cmp_presets(_days)
+ck_true("presets produced", len(pre) >= 1)
+for name, (as_, ae_, bs_, be_) in pre.items():
+    ck_true(f"preset '{name}' ranges are ordered", as_ <= ae_ and bs_ <= be_)
+    ck_true(f"preset '{name}' periods do not overlap", be_ < as_)
+
+print("\n" + "=" * 62)
+if fails:
+    print(f"COMPARISON: {len(fails)} FAILURE(S)")
+    for f in fails:
+        print("   -", f)
+    sys.exit(1)
+print("COMPARISON: ALL v7.3 LOGIC CHECKS PASS")

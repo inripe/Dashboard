@@ -431,7 +431,7 @@ st.markdown("<div class='part'>Part B</div>"
             "<div class='part-title'>Operational detail</div>", unsafe_allow_html=True)
 
 TABS = st.tabs(["Demand", "Channels", "Efficiency", "Financial",
-                "Trends", "Data quality"])
+                "Comparison", "Trends", "Data quality"])
 
 # ── DEMAND ───────────────────────────────────────────────────────────
 with TABS[0]:
@@ -565,8 +565,107 @@ with TABS[3]:
           "'vs paced' on spend is reported without a verdict. Whether an overspend is a "
           "problem depends on the CAC and ROAS beside it, not on the overspend itself.")
 
-# ── TRENDS ───────────────────────────────────────────────────────────
+# ── COMPARISON ───────────────────────────────────────────────────────
 with TABS[4]:
+    all_days = sorted(t2["Day"].unique())
+    if len(all_days) < 4:
+        st.caption("At least 4 days of data are needed to compare two periods.")
+    else:
+        presets = E.cmp_presets(all_days)
+        pk = list(presets.keys())
+        p1, p2 = st.columns([1.4, 2.6])
+        preset = p1.selectbox("Preset", pk + ["Custom"], key="cmp_preset")
+        if preset != "Custom":
+            da_s, da_e, db_s, db_e = presets[preset]
+        else:
+            da_s, da_e, db_s, db_e = E.default_compare_periods(all_days)
+
+        d1, d2, d3, d4 = st.columns(4)
+        lo, hi = all_days[0], all_days[-1]
+        a_s = d1.date_input("A · from", value=da_s, min_value=lo, max_value=hi, key="cA1")
+        a_e = d2.date_input("A · to", value=da_e, min_value=lo, max_value=hi, key="cA2")
+        b_s = d3.date_input("B · from", value=db_s, min_value=lo, max_value=hi, key="cB1")
+        b_e = d4.date_input("B · to", value=db_e, min_value=lo, max_value=hi, key="cB2")
+
+        f1, f2, f3 = st.columns([2, 2, 1.2])
+        cmp_mkts = f1.multiselect("Markets", markets, default=markets, key="cmp_m")
+        cmp_split = f3.toggle("Split Meta", value=False, key="cmp_split")
+        chan_opts = (["API", "Meta API", "Meta Ecom"] if cmp_split else list(E.CHANNEL_ORDER))
+        cmp_chans = f2.multiselect("Channels", chan_opts, default=chan_opts, key="cmp_c")
+
+        AR, BR = (a_s, a_e), (b_s, b_e)
+        if a_s > a_e or b_s > b_e:
+            st.error("Each period's start date must fall on or before its end date.")
+        elif not cmp_mkts or not cmp_chans:
+            st.caption("Select at least one market and one channel.")
+        else:
+            kw = dict(markets=cmp_mkts, channels=cmp_chans, split_meta=cmp_split)
+
+            body_c = " ".join(f"<span class='c-{sev}'>{txt}</span>"
+                              for sev, txt in E.cmp_summary(t2, AR, BR, **kw))
+            st.markdown(f"""<div class='commentary'>
+<div class='commentary-title'>What changed · {a_s:%d %b} – {a_e:%d %b} vs {b_s:%d %b} – {b_e:%d %b}</div>
+<div class='commentary-text'>{body_c}</div></div>""", unsafe_allow_html=True)
+
+            st.markdown("##### Headline")
+            table(E.cmp_headline(t2, AR, BR, **kw),
+                  "Direction reads the move, not the size: a falling CAC is better, a rising "
+                  "one is worse. Spend reports higher or lower without a verdict, because "
+                  "spending more is neither good nor bad on its own.")
+
+            st.markdown("##### Market and channel detail")
+            H = E.cmp_hierarchy(t2, AR, BR, **kw)
+            ind = {0: "", 1: "", 2: "    · "}
+            disp = pd.DataFrame({
+                "Scope": [ind[l] + s for l, s in zip(H["_level"], H["Scope"])],
+                "A orders": H["A orders"].map(lambda v: f"{v:,.0f}"),
+                "B orders": H["B orders"].map(lambda v: f"{v:,.0f}"),
+                "Δ orders": H["Δ orders"].map(lambda v: f"{v:+,.0f}"),
+                "Δ%": H["Δ%"].map(lambda v: "new" if pd.isna(v) else f"{v:+.0f}%"),
+                "A revenue": H["A revenue"].map(lambda v: E.fmt(v, "AED ")),
+                "B revenue": H["B revenue"].map(lambda v: E.fmt(v, "AED ")),
+                "A spend": H["A spend"].map(lambda v: E.fmt(v, "AED ")),
+                "B spend": H["B spend"].map(lambda v: E.fmt(v, "AED ")),
+                "CAC B→A": [f"{b:.1f}→{a:.1f}" if a and b else
+                            (f"—→{a:.1f}" if a else "n/a")
+                            for a, b in zip(H["A CAC"], H["B CAC"])],
+                "ROAS B→A": [f"{b:.1f}→{a:.1f}x" if a and b else
+                             (f"—→{a:.1f}x" if a else "n/a")
+                             for a, b in zip(H["A ROAS"], H["B ROAS"])],
+                "Share of change": H["Share of change"].map(
+                    lambda v: "" if pd.isna(v) else f"{v:.0f}%"),
+            })
+            table(disp,
+                  "Group first, then each market, then the channels inside it. Markets are "
+                  "ordered by how much they moved, so whatever drove the change sits at the "
+                  "top. Share of change is each market's portion of the total movement, "
+                  "counting falls as well as rises. 'new' means period B had nothing to "
+                  "compare against. CAC and ROAS read oldest first, so the arrow runs the "
+                  "way time does.")
+
+            st.markdown("##### Day by day, aligned")
+            D = E.cmp_daily(t2, AR, BR, **kw)
+            figc = go.Figure()
+            figc.add_trace(go.Bar(x=D["Day"], y=D["Period B"], name="Period B",
+                                  marker_color="#B4B2A9", opacity=0.85,
+                                  customdata=D["B date"],
+                                  hovertemplate="%{customdata}: %{y:.0f}<extra>Period B</extra>"))
+            figc.add_trace(go.Bar(x=D["Day"], y=D["Period A"], name="Period A",
+                                  marker_color=BLUE,
+                                  customdata=D["A date"],
+                                  hovertemplate="%{customdata}: %{y:.0f}<extra>Period A</extra>"))
+            chart_style(figc, 280)
+            figc.update_layout(barmode="group", yaxis_title="Orders",
+                               hovermode="x unified")
+            st.plotly_chart(figc, use_container_width=True)
+            st.markdown("<div class='note'>Days are aligned by position in each range, not by "
+                        "calendar date, so day 1 of A sits against day 1 of B and two windows "
+                        "of different length stay readable together. Hover for the real "
+                        "dates.</div>", unsafe_allow_html=True)
+
+
+# ── TRENDS ───────────────────────────────────────────────────────────
+with TABS[5]:
     t1c, t2c, t3c, t4c = st.columns([1.6, 1.2, 1.2, 1])
     ts_mkts = t1c.multiselect("Markets", markets, default=markets, key="tsm")
     ts_chan = t2c.selectbox("Channel", ["All channels"] + E.CHANNEL_ORDER
@@ -618,7 +717,7 @@ with TABS[4]:
         st.caption("No data for this combination.")
 
 # ── DATA QUALITY ─────────────────────────────────────────────────────
-with TABS[5]:
+with TABS[6]:
     html = ""
     for f in snap.integrity:
         col = GREEN if f["pass"] else (RED if f["severity"] == "high" else AMBER)
