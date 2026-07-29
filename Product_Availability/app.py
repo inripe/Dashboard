@@ -31,13 +31,13 @@ st.set_page_config(page_title="Inripe · Availability", layout="wide")
 
 @st.cache_data(ttl=600)
 def get_data(year: int):
-    raw, markets = load_master()
+    raw, markets, meta = load_master()
     spine = ae.build_spine(raw, year)
-    return raw, markets, spine
+    return raw, markets, spine, meta
 
 
 try:
-    raw, markets_sheet, spine = get_data(YEAR)
+    raw, markets_sheet, spine, source_meta = get_data(YEAR)
 except Exception as exc:
     st.error(f"Could not load the product master: {exc}")
     st.stop()
@@ -166,6 +166,13 @@ if raw.get("quality_month") is not None:
 if qc:
     st.caption("Data check · " + " · ".join(qc))
 
+src = f"Source · {source_meta.get('source')} · {source_meta.get('name')}"
+if source_meta.get("modified"):
+    src += f" · last edited {source_meta['modified'][:16].replace('T', ' ')}"
+    if source_meta.get("modified_by"):
+        src += f" by {source_meta['modified_by']}"
+st.caption(src)
+
 
 # ---------------------------------------------------------------- part B
 
@@ -195,7 +202,8 @@ with tabs[0]:
                                     "finish": False, "row": False,
                                     "category": False},
                         category_orders={"row": order})
-        g.update_yaxes(autorange="reversed", title=None)
+        g.update_yaxes(title=None, autorange=True,
+                       categoryorder="array", categoryarray=order[::-1])
         g.update_xaxes(range=[date(YEAR, 1, 1), date(YEAR, 12, 31)], title=None)
         g.update_layout(height=max(340, 26 * len(order)),
                         margin=dict(l=0, r=0, t=10, b=0),
