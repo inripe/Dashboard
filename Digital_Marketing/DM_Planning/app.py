@@ -1,10 +1,14 @@
 """
-INRIPE DM PLANNING DASHBOARD — v3
+INRIPE DM PLANNING DASHBOARD — v4
 Business intelligence view of P4. Channel Plan
 
-v3: reads the workbook live from SharePoint instead of a copy committed to the
-repo. Falls back to the local file when SharePoint is not configured, so this
-still runs unchanged on a laptop with no credentials.
+v3  reads the workbook live from SharePoint instead of a copy committed to the
+    repo, falling back to a local file when SharePoint is not configured.
+v4  converts revenue to AED using the T5. FX Rates table. Revenue is entered in
+    each market's own currency and budget in AED, so without this every total
+    across markets was adding AED to SAR to QAR at face value. ROAS is
+    recomputed from the converted revenue rather than read from the sheet,
+    where it divided local-currency revenue by an AED budget.
 """
 
 import streamlit as st
@@ -63,9 +67,77 @@ MARKETS = {
 }
 
 
+# ── CURRENCY ─────────────────────────────────────────────────────────
+# Revenue is entered in each market's own currency; budget is entered in AED.
+# Reporting currency is AED, so revenue converts and budget does not.
+# Mirrors the same table and rule used by the tracking dashboard's engine.
+FX_SHEET = "T5. FX Rates"
+
+
+def read_fx(wb):
+    """Read T5. FX Rates -> {(market, 'YYYY-MM' or None): rate}.
+
+    A missing sheet is not an error - the app falls back to 1.0 and says so,
+    rather than converting silently or refusing to load.
+    """
+    if FX_SHEET not in wb.sheetnames:
+        return {}, "no FX table — revenue read as if already in AED"
+    ws = wb[FX_SHEET]
+    hdr = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(1, c).value
+        if v:
+            hdr[str(v).strip().lower()] = c
+    mc = hdr.get("market")
+    rc = next((hdr[k] for k in hdr if "rate" in k), None)
+    moc = hdr.get("month")
+    if not mc or not rc:
+        return {}, "FX table found but Market / Rate columns not recognised"
+    out = {}
+    for r in range(2, ws.max_row + 1):
+        m = ws.cell(r, mc).value
+        try:
+            rate = float(ws.cell(r, rc).value)
+        except (TypeError, ValueError):
+            continue
+        if not m or rate <= 0:
+            continue
+        key_month = None
+        if moc:
+            mv = ws.cell(r, moc).value
+            if mv not in (None, ""):
+                try:
+                    key_month = pd.to_datetime(mv).strftime("%Y-%m")
+                except Exception:
+                    key_month = str(mv).strip()
+        out[(str(m).strip(), key_month)] = rate
+    if not out:
+        return {}, "FX table is empty"
+    return out, ", ".join(f"{k[0]} x{v:.4f}" for k, v in out.items() if k[1] is None)
+
+
+def fx_for(fx, market, month_label):
+    """Month-specific rate first, then the market default, then 1.0."""
+    if not fx:
+        return 1.0
+    if month_label and month_label != "FY":
+        try:
+            key = pd.to_datetime(f"{month_label} 2026").strftime("%Y-%m")
+            if (market, key) in fx:
+                return fx[(market, key)]
+        except Exception:
+            pass
+    return fx.get((market, None), 1.0)
+
+
+# Rows holding money in the market's own currency. Budget rows are excluded
+# on purpose - they are already AED.
+REVENUE_KEYS = {"tgt_rev"}
+
+
 @st.cache_data(ttl=60)
 def load_data():
-    """SharePoint first, local copy second. Returns (data, source_label)."""
+    """SharePoint first, local copy second. Returns (data, source_label, fx_note)."""
     if SP.is_configured():
         buf, meta = SP.fetch_workbook()
         label = f"SharePoint · {meta['name']}"
@@ -81,6 +153,7 @@ def load_data():
         wb = load_workbook(path, data_only=True)
         label = f"local file · {path}"
 
+    fx, fx_note = read_fx(wb)
     ws = wb['P4. Channel Plan']
     data = {}
     for mkt, cfg in MARKETS.items():
@@ -96,7 +169,21 @@ def load_data():
             except: data[mkt][key]["FY"] = 0
             if data[mkt][key]["FY"] == 0:
                 data[mkt][key]["FY"] = sum(data[mkt][key][m] for m in MONTHS)
-    return data, label
+
+    # Convert revenue to AED. Budget is untouched. ROAS is then recomputed from
+    # the converted figure rather than read from the sheet, because the sheet's
+    # ROAS divides local-currency revenue by an AED budget.
+    for mkt in data:
+        for key in REVENUE_KEYS:
+            if key not in data[mkt]:
+                continue
+            for per in list(data[mkt][key]):
+                data[mkt][key][per] *= fx_for(fx, mkt, per)
+        if "roas" in data[mkt] and "tot_bud" in data[mkt]:
+            for per in list(data[mkt]["roas"]):
+                b = data[mkt]["tot_bud"].get(per, 0)
+                data[mkt]["roas"][per] = (data[mkt]["tgt_rev"].get(per, 0) / b) if b else 0
+    return data, label, fx_note
 
 
 def g(data, mkt, key, mo):
@@ -114,7 +201,7 @@ def fmt(n, prefix="", suffix="", dec=0):
 
 
 try:
-    data, SOURCE = load_data()
+    data, SOURCE, FX_NOTE = load_data()
 except Exception as e:
     st.error(f"Cannot load the workbook.\n\n{e}")
     if not SP.is_configured():
@@ -126,6 +213,13 @@ if not data:
     st.error("Workbook not found. Configure SharePoint, or place the file at: "
              + EXCEL_FALLBACKS[0])
     st.stop()
+
+if FX_NOTE.startswith("no FX") or "not recognised" in FX_NOTE or "empty" in FX_NOTE:
+    st.markdown(
+        f"<div class='warn-box'>⚠️ <b>Currency not converted</b> — {FX_NOTE}. "
+        f"Revenue is entered in each market's own currency, so any total across "
+        f"markets is mixing currencies. Add a '{FX_SHEET}' sheet with Market, "
+        f"Currency and Rate to AED columns.</div>", unsafe_allow_html=True)
 
 # ── HEADER ───────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -299,4 +393,5 @@ for m in mkts:
 if rows:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-st.caption(f"Source: {SOURCE} · P4. Channel Plan · Auto-refreshes every 60s")
+st.caption(f"Source: {SOURCE} · P4. Channel Plan · revenue converted to AED "
+           f"({FX_NOTE}) · budget already AED · auto-refreshes every 60s")
