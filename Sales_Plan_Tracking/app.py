@@ -297,7 +297,11 @@ def agg(df):
 
 A = agg(sel)
 SINGLE = (not CONSOL) and month != YTD
-land = ve.landing(combined, market, month, as_of, YEAR) if SINGLE else None
+if month != YTD:
+    land = (ve.landing_all(combined, month, as_of, YEAR) if CONSOL
+            else ve.landing(combined, market, month, as_of, YEAR))
+else:
+    land = None
 conc = ve.concentration(sel, by=["market"]) if not CONSOL else pd.DataFrame()
 cb = ve.cm_per_box(sel)
 oq = ve.order_quality(lines, plan, YEAR) if HAS_LINES else pd.DataFrame()
@@ -325,8 +329,10 @@ st.caption(scope_txt + ". Plan is compared against net sales. Cancelled, "
 
 # ------------------------------------------------------- executive block
 
-if SINGLE:
-    fnd = ve.findings(combined, lines, plan, market, month, as_of, YEAR)
+if month != YTD:
+    fnd = (ve.findings_all(combined, lines, plan, month, as_of, YEAR)
+           if CONSOL
+           else ve.findings(combined, lines, plan, market, month, as_of, YEAR))
     if fnd:
         st.markdown("<div class='sec'>Executive summary · ranked by money at "
                     "stake</div>", unsafe_allow_html=True)
@@ -350,9 +356,9 @@ if SINGLE:
                         f"<div class='d'>{f['detail']}</div></div>",
                         unsafe_allow_html=True)
 else:
-    note("The executive summary and the landing estimate need one market and "
-         "one month, so the findings can be attributed. Everything below still "
-         "works across the wider scope.")
+    note("The executive summary needs a single month, so each finding can be "
+         "attributed to a period. Pick one from the Month selector. Everything "
+         "below still works across the full year.")
 
 
 # ------------------------------------------------------ plan vs actual
@@ -691,7 +697,7 @@ if land:
 else:
     kpi(q[4], "Months in scope",
         str(sel[(sel.plan_units > 0) | (sel.act_units > 0)].month.nunique()),
-        None, "landing estimate needs one market and one month")
+        None, "landing estimate needs a single month")
 
 
 # ------------------------------------------------------------ trend

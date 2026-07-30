@@ -1041,6 +1041,86 @@ def momentum(combined: pd.DataFrame, lines: pd.DataFrame | None,
     return out
 
 
+def findings_all(combined: pd.DataFrame, lines: pd.DataFrame | None,
+                 plan: pd.DataFrame, month: str, as_of, year: int = 2026,
+                 markets: list[str] | None = None) -> list[dict]:
+    """Findings across every market, ranked on a common currency.
+
+    A finding is only meaningful once it is attributed, so each market is
+    assessed on its own and the results are then merged. Stakes are converted
+    to AED before ranking, because a QAR number and an EGP number cannot be
+    compared as they stand — without that, Egypt would never surface and
+    Qatar would always look worse than it is.
+    """
+    markets = markets or MARKETS
+    fx = (combined.drop_duplicates(["market", "month"])
+          .set_index(["market", "month"])["fx_to_aed"]
+          if "fx_to_aed" in combined.columns else None)
+
+    out: list[dict] = []
+    for mk in markets:
+        sub = combined[combined["market"] == mk]
+        if sub.empty:
+            continue
+        try:
+            fs = findings(combined, lines, plan, mk, month, as_of, year)
+        except Exception:
+            continue
+        rate = 1.0
+        if fx is not None:
+            try:
+                rate = float(fx.loc[(mk, month)])
+            except Exception:
+                rate = 1.0
+        for f in fs:
+            f = dict(f)
+            f["market"] = mk
+            f["stake_local"] = f["stake"]
+            f["stake"] = f["stake"] * rate
+            f["title"] = f"{mk} · {f['title']}"
+            out.append(f)
+
+    order = {"bad": 0, "warn": 1, "good": 2}
+    return sorted(out, key=lambda f: (order[f["severity"]], -f["stake"]))
+
+
+def landing_all(combined: pd.DataFrame, month: str, as_of, year: int = 2026,
+                markets: list[str] | None = None) -> dict:
+    """Consolidated pacing and landing estimate, in AED.
+
+    Each market is paced against its own plan and then converted, rather than
+    pacing a converted total. Those are not the same thing when a market has
+    no plan for the month.
+    """
+    markets = markets or MARKETS
+    plan_t = paced_t = actual_t = proj_t = 0.0
+    days_total = days_elapsed = 0
+    for mk in markets:
+        sub = combined[combined["market"] == mk]
+        if sub.empty:
+            continue
+        rate = 1.0
+        if "fx_to_aed" in sub.columns:
+            r = sub[sub["month"] == month]["fx_to_aed"].dropna()
+            if len(r):
+                rate = float(r.iloc[0])
+        l = landing(combined, mk, month, as_of, year)
+        plan_t += l["plan"] * rate
+        paced_t += l["paced_plan"] * rate
+        actual_t += l["actual"] * rate
+        if l["projected"]:
+            proj_t += l["projected"] * rate
+        days_total = max(days_total, l["days_total"])
+        days_elapsed = max(days_elapsed, l["days_elapsed"])
+    return {
+        "plan": plan_t, "paced_plan": paced_t, "actual": actual_t,
+        "projected": proj_t or None,
+        "days_total": days_total, "days_elapsed": days_elapsed,
+        "vs_paced": (actual_t / paced_t) if paced_t else None,
+        "projected_attainment": (proj_t / plan_t) if (proj_t and plan_t) else None,
+    }
+
+
 def findings(combined: pd.DataFrame, lines: pd.DataFrame | None,
              plan: pd.DataFrame, market: str, month: str,
              as_of, year: int = 2026) -> list[dict]:
