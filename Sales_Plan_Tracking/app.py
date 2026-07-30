@@ -802,8 +802,16 @@ with tabs[1]:
             scope = scope[scope.month == month]
         scope = scope[scope[col].isin(picked)]
         g = ve.rollup(scope, [col]).set_index(col).reindex(picked).reset_index()
-        best = g.loc[g[ATT].idxmax()] if g[ATT].notna().any() else None
-        wrst = g.loc[g[ATT].idxmin()] if g[ATT].notna().any() else None
+        if ATT not in g.columns:
+            g[ATT] = pd.NA
+        if CMP_ not in g.columns:
+            g[CMP_] = pd.NA
+        has_att = g[ATT].notna().any()
+        best = g.loc[g[ATT].idxmax()] if has_att else None
+        wrst = g.loc[g[ATT].idxmin()] if has_att else None
+        if g[[c for c in g.columns if c.startswith("act_") or
+              c.startswith("plan_")]].fillna(0).abs().sum().sum() == 0:
+            note("Nothing planned and nothing sold in this selection.")
         if best is not None and wrst is not None and len(g) > 1:
             note(f"<b>{best[col]} leads at {best[ATT]:.0%} of plan; "
                  f"{wrst[col]} trails at {wrst[ATT]:.0%}.</b> "

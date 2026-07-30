@@ -643,7 +643,13 @@ def rollup(combined: pd.DataFrame, by: list[str], **filters) -> pd.DataFrame:
         if wanted:
             df = df[df[col].isin(wanted)]
     if df.empty:
-        return pd.DataFrame(columns=list(by) + ADDITIVE)
+        # An empty rollup still has to carry the derived columns, or every
+        # caller that reads a ratio has to guard for their absence.
+        return pd.DataFrame(columns=list(by) + ADDITIVE + [
+            "unit_attainment", "revenue_attainment", "plan_cm_pct",
+            "act_cm_pct", "plan_wavg_price", "act_wavg_price", "return_rate",
+            "discount_rate", "revenue_attainment_aed", "plan_cm_pct_aed",
+            "act_cm_pct_aed", "act_cm_dated_pct", "dated_vs_plan_cost"])
 
     cols = [c for c in ADDITIVE if c in df.columns]
     g = df.groupby(list(by), observed=True)[cols].sum().reset_index()
