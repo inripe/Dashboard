@@ -315,3 +315,174 @@ def coverage(plan: pd.DataFrame) -> pd.DataFrame:
     out["planned"] = out["rows"].notna()
     out["month"] = pd.Categorical(out["month"], categories=MONTHS, ordered=True)
     return out.sort_values(["market", "month"]).reset_index(drop=True)
+
+
+# ------------------------------------------------- plan review and changes
+
+
+def shape(plan: pd.DataFrame, by: list[str]) -> pd.DataFrame:
+    """Plan totals at any grain, with every ratio derived after summing."""
+    cols = [c for c in ("plan_units", "plan_revenue_lc", "plan_cogs_lc",
+                        "plan_cm_lc", "plan_revenue_aed", "plan_cogs_aed",
+                        "plan_cm_aed") if c in plan.columns]
+    g = plan.groupby(list(by), observed=True)[cols].sum().reset_index()
+    if "plan_revenue_lc" in g:
+        g["cm_pct"] = (g["plan_cm_lc"] / g["plan_revenue_lc"]).where(
+            g["plan_revenue_lc"].ne(0))
+        g["wavg_price"] = (g["plan_revenue_lc"] / g["plan_units"]).where(
+            g["plan_units"].ne(0))
+        g["wavg_cost"] = (g["plan_cogs_lc"] / g["plan_units"]).where(
+            g["plan_units"].ne(0))
+    if "plan_revenue_aed" in g:
+        g["cm_pct_aed"] = (g["plan_cm_aed"] / g["plan_revenue_aed"]).where(
+            g["plan_revenue_aed"].ne(0))
+    if "month" in by:
+        g["month"] = pd.Categorical(g["month"], categories=MONTHS, ordered=True)
+        g = g.sort_values(list(by))
+    return g.reset_index(drop=True)
+
+
+def plan_concentration(plan: pd.DataFrame, by: str = "product",
+                       measure: str = "plan_revenue_aed") -> pd.DataFrame:
+    """How much of the plan rests on how few things.
+
+    A plan can be perfectly achievable and still fragile. This is the shape
+    of that fragility, per market: how much of the year depends on the
+    largest product, the largest three, and the largest month.
+    """
+    if measure not in plan.columns:
+        measure = "plan_revenue_lc"
+    rows = []
+    for mkt, grp in plan.groupby("market", observed=True):
+        tot = grp[measure].sum()
+        if not tot:
+            continue
+        s = grp.groupby(by, observed=True)[measure].sum().sort_values(
+            ascending=False)
+        m = grp.groupby("month", observed=True)[measure].sum().sort_values(
+            ascending=False)
+        rows.append({
+            "market": mkt, "total": tot, "items": int((s > 0).sum()),
+            "largest": s.index[0], "top1_share": s.iloc[0] / tot,
+            "top3_share": s.head(3).sum() / tot,
+            "top5_share": s.head(5).sum() / tot,
+            "peak_month": str(m.index[0]), "peak_month_share": m.iloc[0] / tot,
+            # How many items it takes to reach half the plan. A small number
+            # is a concentrated plan however flat the top share looks.
+            "items_to_half": int((s.cumsum() / tot <= 0.5).sum() + 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def plan_margin_quality(plan: pd.DataFrame) -> dict:
+    """Where the plan is thin or loss-making, before anything is sold.
+
+    Every one of these is knowable in advance. A row planned below cost is a
+    decision, not an accident, and it should be a visible one.
+    """
+    d = plan[plan["plan_units"] > 0].copy()
+    if d.empty:
+        return {}
+    d["cm_pct"] = (d["plan_cm_lc"] / d["plan_revenue_lc"]).where(
+        d["plan_revenue_lc"].ne(0))
+    below = d[d["plan_cogs_unit_lc"] >= d["plan_price_lc"]]
+    thin = d[(d["cm_pct"] > 0) & (d["cm_pct"] < 0.15)]
+    rev = d["plan_revenue_lc"].sum()
+    return {
+        "rows": len(d),
+        "below_cost_rows": len(below),
+        "below_cost_units": float(below["plan_units"].sum()),
+        "below_cost_cm": float(below["plan_cm_lc"].sum()),
+        "below_cost_detail": below[["market", "month", "product", "plan_units",
+                                    "plan_price_lc", "plan_cogs_unit_lc",
+                                    "plan_cm_lc"]],
+        "thin_rows": len(thin),
+        "thin_revenue_share": float(thin["plan_revenue_lc"].sum() / rev)
+        if rev else None,
+        "thin_detail": thin[["market", "month", "product", "plan_units",
+                             "plan_revenue_lc", "cm_pct"]].sort_values("cm_pct"),
+        "cm_pct_min": float(d["cm_pct"].min()),
+        "cm_pct_median": float(d["cm_pct"].median()),
+        "cm_pct_max": float(d["cm_pct"].max()),
+    }
+
+
+def diff_plans(current: pd.DataFrame, previous: pd.DataFrame) -> dict:
+    """What changed between two versions of the plan, and what it cost.
+
+    Matched on product, market and month, so a row that moved month reads as
+    one removal and one addition rather than a silent edit. Money impact is
+    reported on the same basis for both sides.
+    """
+    import variance_engine as _ve
+
+    def prep(df):
+        d = _ve.apply_naming(df)
+        keep = ["product", "market", "month", "plan_units", "plan_price_lc",
+                "plan_cogs_unit_lc"]
+        d = d[[c for c in keep if c in d.columns]].copy()
+        for c in ("plan_units", "plan_price_lc", "plan_cogs_unit_lc"):
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+        d = d[d["plan_units"].notna()]
+        d["revenue"] = d["plan_units"] * d["plan_price_lc"]
+        d["cm"] = d["plan_units"] * (d["plan_price_lc"] - d["plan_cogs_unit_lc"])
+        return d
+
+    cur, prv = prep(current), prep(previous)
+    keys = ["product", "market", "month"]
+    m = cur.merge(prv, on=keys, how="outer", suffixes=("_now", "_was"),
+                  indicator=True)
+
+    added = m[m["_merge"] == "left_only"].copy()
+    removed = m[m["_merge"] == "right_only"].copy()
+    both = m[m["_merge"] == "both"].copy()
+
+    changed = both[
+        (both["plan_units_now"] - both["plan_units_was"]).abs().gt(0.01)
+        | (both["plan_price_lc_now"] - both["plan_price_lc_was"]).abs().gt(0.005)
+        | (both["plan_cogs_unit_lc_now"]
+           - both["plan_cogs_unit_lc_was"]).abs().gt(0.005)].copy()
+
+    for df, a, b in ((changed, "_now", "_was"),):
+        df["units_delta"] = df[f"plan_units{a}"] - df[f"plan_units{b}"]
+        df["price_delta"] = df[f"plan_price_lc{a}"] - df[f"plan_price_lc{b}"]
+        df["cost_delta"] = (df[f"plan_cogs_unit_lc{a}"]
+                            - df[f"plan_cogs_unit_lc{b}"])
+        df["revenue_delta"] = df[f"revenue{a}"] - df[f"revenue{b}"]
+        df["cm_delta"] = df[f"cm{a}"] - df[f"cm{b}"]
+        df["what"] = [
+            ", ".join(filter(None, [
+                "units" if abs(u) > 0.01 else "",
+                "price" if abs(p) > 0.005 else "",
+                "cost" if abs(c) > 0.005 else ""]))
+            for u, p, c in zip(df["units_delta"], df["price_delta"],
+                               df["cost_delta"])]
+
+    rev_delta = (added["revenue_now"].sum() - removed["revenue_was"].sum()
+                 + changed["revenue_delta"].sum())
+    cm_delta = (added["cm_now"].sum() - removed["cm_was"].sum()
+                + changed["cm_delta"].sum())
+
+    # A change that pushes a row to or below cost matters more than its size.
+    broke = changed[(changed["plan_price_lc_now"]
+                     <= changed["plan_cogs_unit_lc_now"])
+                    & (changed["plan_price_lc_was"]
+                       > changed["plan_cogs_unit_lc_was"])]
+
+    return {
+        "added": added, "removed": removed, "changed": changed,
+        "n_added": len(added), "n_removed": len(removed),
+        "n_changed": len(changed),
+        "units_delta": float(added["plan_units_now"].sum()
+                             - removed["plan_units_was"].sum()
+                             + changed["units_delta"].sum()),
+        "revenue_delta": float(rev_delta),
+        "cm_delta": float(cm_delta),
+        "units_before": float(prv["plan_units"].sum()),
+        "units_after": float(cur["plan_units"].sum()),
+        "revenue_before": float(prv["revenue"].sum()),
+        "revenue_after": float(cur["revenue"].sum()),
+        "cm_before": float(prv["cm"].sum()),
+        "cm_after": float(cur["cm"].sum()),
+        "newly_below_cost": broke,
+    }

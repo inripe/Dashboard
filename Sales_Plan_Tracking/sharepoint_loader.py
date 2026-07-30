@@ -151,6 +151,51 @@ def fetch_workbook() -> tuple[io.BytesIO, dict]:
     return io.BytesIO(r.content), meta
 
 
+def previous_version(hdr=None) -> tuple:
+    """The workbook as it was before the current save.
+
+    SharePoint keeps a version history, so a plan change does not have to be
+    remembered by anyone. Comparing the live file to the version before it
+    turns "someone edited the plan" into a list of what moved and what it
+    cost.
+
+    Returns (file-like workbook, metadata) or (None, reason).
+    """
+    if not is_configured():
+        return None, "SharePoint is not configured"
+    try:
+        hdr = hdr or {"Authorization": f"Bearer {_token()}"}
+        site_id = _site_id(hdr)
+        item = _file_item(hdr, site_id)
+        r = requests.get(
+            f"{GRAPH}/sites/{site_id}/drive/items/{item['id']}/versions",
+            headers=hdr, timeout=TIMEOUT)
+        if r.status_code != 200:
+            return None, f"version history unavailable: {r.status_code}"
+        versions = r.json().get("value", [])
+        if len(versions) < 2:
+            return None, "only one version exists, nothing to compare"
+
+        prev = versions[1]
+        url = prev.get("@microsoft.graph.downloadUrl")
+        if not url:
+            url = (f"{GRAPH}/sites/{site_id}/drive/items/{item['id']}"
+                   f"/versions/{prev['id']}/content")
+        d = requests.get(url, headers=hdr, timeout=60)
+        if d.status_code != 200:
+            return None, f"could not download the previous version: {d.status_code}"
+        meta = {
+            "version": prev.get("id"),
+            "modified": prev.get("lastModifiedDateTime"),
+            "modified_by": (prev.get("lastModifiedBy", {})
+                            .get("user", {}).get("displayName")),
+            "versions_kept": len(versions),
+        }
+        return io.BytesIO(d.content), meta
+    except Exception as e:
+        return None, str(e)
+
+
 def selftest() -> None:
     """Run directly to check the connection: python sharepoint_loader.py"""
     if not is_configured():

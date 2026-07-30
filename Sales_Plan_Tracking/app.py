@@ -24,7 +24,7 @@ import streamlit as st
 import plan_engine as pe
 import pricing_engine as px
 import variance_engine as ve
-from data_loader import load_plan, load_actuals_any
+from data_loader import load_plan, load_actuals_any, load_previous_plan
 
 YEAR = 2026
 MARKETS = ["UAE", "QA", "KSA", "EG"]
@@ -58,12 +58,23 @@ pio.templates.default = "inripe"
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1rem; padding-bottom: 3rem; max-width: 1540px;}
-.band {background: #123a63; border-radius: 12px; padding: 17px 24px 16px;
-       margin: 0 0 .9rem; display: flex; justify-content: space-between;
-       align-items: flex-end; flex-wrap: wrap; gap: 10px;}
+/* Streamlit's own toolbar overlaps the top of the page on a deployed app,
+   so the container needs clearance the local server does not. */
+.block-container {padding-top: 3.4rem; padding-bottom: 3rem; max-width: 1540px;}
+header[data-testid="stHeader"] {background: transparent; height: 0;}
+#MainMenu, footer {visibility: hidden;}
+/* The scope selectors stay in reach. Changing market or month from the
+   bottom of a long tab should not mean scrolling back to the top. */
+.stElementContainer:has(.scope-anchor) + div[data-testid="stHorizontalBlock"] {
+  position: sticky; top: 0; z-index: 99; background: #fff;
+  padding: 8px 0 10px; border-bottom: 1px solid #eceff3; margin-bottom: 2px;}
+div[data-testid="stDataFrame"] {border-radius: 8px;}
+.band {background: #123a63; border-radius: 12px; padding: 20px 24px 18px;
+       margin: 0 0 1rem; display: flex; justify-content: space-between;
+       align-items: flex-end; flex-wrap: wrap; gap: 12px;
+       box-shadow: 0 1px 3px rgba(18,58,99,.14);}
 .band .ttl {font-size: 22px; font-weight: 500; color: #f4f7fa;
-            letter-spacing: -.015em; line-height: 1.2;}
+            letter-spacing: -.015em; line-height: 1.35; padding-top: 2px;}
 .band .sc {font-size: 12.5px; color: #9db6cf; margin-top: 5px;}
 .band .mt {text-align: right; font-size: 11.5px; line-height: 1.7;
            color: #93aac2;}
@@ -99,7 +110,8 @@ def get_data(year: int):
     plan = pe.attach_fx(pe.derive(raw), fx)
     actuals, ameta, lines = load_actuals_any(year, cost_log, plan)
     combined = ve.combine(plan, actuals, year, aliases)
-    return plan, actuals, lines, combined, pmeta, ameta, aliases, cost_log, datetime.now()
+    return (plan, actuals, lines, combined, pmeta, ameta, aliases, cost_log,
+            raw, datetime.now())
 
 
 # The first load pulls every order from all four stores, which takes a couple
@@ -109,7 +121,7 @@ with st.spinner("Reading the plan from SharePoint and every order from the "
                 "after that it is cached for 15 minutes."):
     try:
         (plan, actuals, lines, combined, pmeta, ameta, aliases,
-         cost_log, pulled) = get_data(YEAR)
+         cost_log, raw_plan, pulled) = get_data(YEAR)
     except Exception as exc:
         st.error(f"Could not load: {exc}")
         st.stop()
@@ -160,6 +172,53 @@ def kpi(col, label, value, dl=None, sub=None, accent=NEUT, dl_good=None):
                  unsafe_allow_html=True)
 
 
+def table(df, height=None, empty="Nothing in this scope.", into=None, **kw):
+    """Every table renders through here, so formatting is decided once.
+
+    Money carries thousands separators, counts stay whole, and a ratio shows
+    as a percentage whether it was stored as 0.42 or as 42. A frame that
+    comes back empty says so, rather than leaving a blank grid for the reader
+    to interpret.
+
+    `into` takes a column or container so a table can sit where it was placed
+    rather than always spanning the page.
+    """
+    target = into if into is not None else st
+    if df is None or len(df) == 0:
+        target.caption(empty)
+        return
+
+    d = df.copy()
+    cfg = {}
+    for col in d.columns:
+        name = str(col).lower()
+        if d[col].dtype.kind not in "if":
+            continue
+        mx = float(d[col].abs().max() or 0)
+        if any(k in name for k in ("%", "pct", "share", " att", "rate",
+                                   "realisation")):
+            # Ratios arrive as 0.42 from the engine and as 42 from a chart
+            # frame, so both are normalised before formatting.
+            if mx <= 1.5:
+                d[col] = d[col] * 100
+            cfg[col] = st.column_config.NumberColumn(format="%.1f%%")
+        elif any(k in name for k in ("unit", "box", "order", "count", "days",
+                                     "product", "rows", "lost", "items")):
+            cfg[col] = st.column_config.NumberColumn(format="%d")
+        elif "fx" in name:
+            cfg[col] = st.column_config.NumberColumn(format="%.4f")
+        elif any(k in name for k in ("price", "cost", "aov", "per box",
+                                     "cm/box", "basket")):
+            cfg[col] = st.column_config.NumberColumn(format="%.2f")
+        else:
+            cfg[col] = st.column_config.NumberColumn(format="%,.0f")
+    # Streamlit rejects height=None outright, so the argument is omitted
+    # rather than passed empty.
+    if height is not None:
+        kw["height"] = height
+    target.dataframe(d, hide_index=True, width="stretch",
+                     column_config=cfg, **kw)
+
 def note(text):
     st.markdown(f"<div class='note'>{text}</div>", unsafe_allow_html=True)
 
@@ -174,6 +233,10 @@ st.markdown(
     f"{'edited ' + (pmeta.get('modified') or '')[:16].replace('T', ' ')}"
     f"</div></div>", unsafe_allow_html=True)
 
+mode = st.radio("View", ["Tracking", "Plan"], horizontal=True,
+                label_visibility="collapsed")
+
+st.markdown("<div class='scope-anchor'></div>", unsafe_allow_html=True)
 c = st.columns([1.1, 1.2, 1.5, 1.7, 1.2])
 market = c[0].selectbox("Market", [ALL_MK] + MARKETS, index=3)
 month = c[1].selectbox("Month", [YTD] + MONTHS,
@@ -192,11 +255,24 @@ sel_labels = c[3].multiselect("Product",
 sel_prods = [name_of[x] for x in sel_labels if x in name_of]
 as_of = c[4].date_input("As of", value=date.today())
 
+# A single market normally reads best in its own currency, but comparing it
+# against another needs a common one. Across markets AED is the only honest
+# choice, so the toggle is offered rather than assumed.
+if market != ALL_MK:
+    ccy = st.radio("Report in", ["Local currency", "AED"], horizontal=True,
+                   index=0, label_visibility="collapsed",
+                   help="AED uses the rates on the FX sheet, matched by "
+                        "market and month.")
+else:
+    ccy = "AED"
+
 CONSOL = market == ALL_MK
-SUF = "_aed" if CONSOL else "_lc"
-cur = "AED" if CONSOL else plan[plan.market == market]["currency"].iloc[0]
-ATT = "revenue_attainment_aed" if CONSOL else "revenue_attainment"
-CMP_ = "act_cm_pct_aed" if CONSOL else "act_cm_pct"
+IN_AED = CONSOL or ccy == "AED"
+SUF = "_aed" if IN_AED else "_lc"
+LOCAL = "AED" if CONSOL else plan[plan.market == market]["currency"].iloc[0]
+cur = "AED" if IN_AED else LOCAL
+ATT = "revenue_attainment_aed" if IN_AED else "revenue_attainment"
+CMP_ = "act_cm_pct_aed" if IN_AED else "act_cm_pct"
 
 sel = base if month == YTD else base[base.month == month]
 if sel_cats:
@@ -240,7 +316,8 @@ scope_txt = " · ".join(filter(None, [
     f"day {land['days_elapsed']} of {land['days_total']}" if land else None,
     ", ".join(sel_cats[:2]) if sel_cats else None,
     f"{len(sel_prods)} products" if sel_prods else None,
-    f"reported in {cur}"]))
+    f"reported in {cur}"
+    + ("" if cur == LOCAL else f", converted from {LOCAL}")]))
 st.caption(scope_txt + ". Plan is compared against net sales. Cancelled, "
            "refunded and voided orders are excluded, not zeroed. Margin is at "
            "planned unit cost.")
@@ -279,6 +356,252 @@ else:
 
 
 # ------------------------------------------------------ plan vs actual
+
+
+# ------------------------------------------------------------- plan view
+
+if mode == "Plan":
+    pscope = plan[plan.market.isin(mk_scope)]
+    if month != YTD:
+        pscope = pscope[pscope.month == month]
+    if sel_cats:
+        pscope = pscope[pscope.category.isin(sel_cats)]
+    if sel_prods:
+        pscope = pscope[pscope["product"].isin(sel_prods)]
+    filled = pscope[pscope.plan_units > 0]
+
+    PSUF = SUF
+    st.markdown("<div class='sec'>The plan</div>", unsafe_allow_html=True)
+    pk = st.columns(5)
+    prev_u = filled.plan_units.sum()
+    prev_r = filled[f"plan_revenue{PSUF}"].sum()
+    prev_c = filled[f"plan_cm{PSUF}"].sum()
+    kpi(pk[0], "Units", n(prev_u), None,
+        f"{filled['product'].nunique()} products · "
+        f"{filled.month.nunique()} months", NEUT)
+    kpi(pk[1], f"Revenue {cur}", n(prev_r), None,
+        f"{n(prev_r / prev_u if prev_u else None, '{:,.2f}')} average price",
+        NEUT)
+    kpi(pk[2], f"CM {cur}", n(prev_c), None,
+        f"{n((prev_r - prev_c) / prev_u if prev_u else None, '{:,.2f}')} "
+        f"average cost", NEUT)
+    kpi(pk[3], "CM %", p(prev_c / prev_r if prev_r else None), None,
+        "weighted by the planned mix",
+        tone(prev_c / prev_r if prev_r else None, good=0.40, warn=0.30))
+    kpi(pk[4], "Rows", f"{len(filled):,}", None,
+        f"of {len(pscope):,} in scope · {len(pscope) - len(filled):,} blank",
+        NEUT)
+
+    mq = pe.plan_margin_quality(filled)
+    if mq:
+        bits = []
+        if mq["below_cost_rows"]:
+            bits.append(f"<b>{mq['below_cost_rows']} rows are planned at or "
+                        f"below cost</b>, losing {abs(mq['below_cost_cm']):,.0f}")
+        if mq["thin_rows"]:
+            bits.append(f"{mq['thin_rows']} rows sit under 15% margin, "
+                        f"{mq['thin_revenue_share']:.0%} of planned revenue")
+        bits.append(f"CM% across rows runs {mq['cm_pct_min']:.0%} to "
+                    f"{mq['cm_pct_max']:.0%}, median {mq['cm_pct_median']:.0%}")
+        note("Every one of these is knowable before anything is sold. "
+             + ". ".join(bits) + ".")
+
+    ptabs = st.tabs(["Shape", "Detail table", "Concentration",
+                     "Margin quality", "Coverage", "What changed"])
+
+    with ptabs[0]:
+        st.caption("Where the year is loaded.")
+        sh = pe.shape(filled, ["market", "month"])
+        f = go.Figure()
+        for i, mk in enumerate([m for m in MARKETS if m in set(sh.market)]):
+            d = sh[sh.market == mk]
+            f.add_trace(go.Bar(x=d.month.astype(str), y=d[f"plan_revenue{PSUF}"],
+                               name=mk, marker_color=SERIES[i % len(SERIES)]))
+        f.update_layout(barmode="stack", height=320,
+                        yaxis_title=f"Planned revenue {cur}",
+                        legend=dict(orientation="h", y=1.15, x=0))
+        st.plotly_chart(f, width="stretch")
+
+        cat = pe.shape(filled, ["category"]).sort_values(
+            f"plan_revenue{PSUF}", ascending=False)
+        c1, c2 = st.columns(2)
+        f2 = go.Figure(go.Bar(x=cat[f"plan_revenue{PSUF}"], y=cat.category,
+                              orientation="h", marker_color=BLUE,
+                              text=[f"{v:,.0f}" for v in cat[f"plan_revenue{PSUF}"]],
+                              textposition="auto"))
+        f2.update_layout(height=max(300, 26 * len(cat)),
+                         xaxis_title=f"Planned revenue {cur}",
+                         yaxis=dict(autorange="reversed"))
+        c1.plotly_chart(f2, width="stretch")
+        f3 = go.Figure(go.Bar(x=cat.cm_pct * 100, y=cat.category,
+                              orientation="h",
+                              marker_color=[TEAL if v >= .35 else YELLOW
+                                            if v >= .2 else ORANGE
+                                            for v in cat.cm_pct],
+                              text=[f"{v:.0%}" for v in cat.cm_pct],
+                              textposition="auto"))
+        f3.update_layout(height=max(300, 26 * len(cat)),
+                         xaxis_title="Planned CM %",
+                         yaxis=dict(autorange="reversed"))
+        c2.plotly_chart(f3, width="stretch")
+        st.caption("Left is where the money is planned. Right is how well it "
+                   "converts. A tall bar on the left with a short one on the "
+                   "right is volume bought at a poor rate.")
+
+    with ptabs[1]:
+        st.caption("Every planned row, as entered. Sortable and filterable — "
+                   "the figures finance will look up directly.")
+        cols = ["product_id", "category", "product", "market", "currency",
+                "month", "plan_units", "plan_price_lc", "plan_cogs_unit_lc",
+                "plan_revenue_lc", "plan_cogs_lc", "plan_cm_lc",
+                "plan_revenue_aed", "plan_cm_aed", "fx_to_aed"]
+        det = filled[[c for c in cols if c in filled.columns]].copy()
+        det["plan_cm_pct"] = (det["plan_cm_lc"] / det["plan_revenue_lc"]).where(
+            det["plan_revenue_lc"].ne(0))
+        table(det, height=460)
+        st.caption(f"{len(det):,} rows · "
+                   f"{det.plan_units.sum():,.0f} units · "
+                   f"AED {det.get('plan_revenue_aed', pd.Series(dtype=float)).sum():,.0f} "
+                   f"consolidated")
+
+        st.caption("Market by month, both currencies")
+        mm_ = pe.shape(filled, ["market", "currency", "month"])
+        keep = ["market", "currency", "month", "plan_units", "plan_revenue_lc",
+                "plan_cogs_lc", "plan_cm_lc", "cm_pct", "wavg_price",
+                "wavg_cost", "plan_revenue_aed", "plan_cm_aed"]
+        table(mm_[[c for c in keep if c in mm_.columns]],
+                     height=340)
+
+        st.caption("Product by market, full year")
+        bp = pe.shape(filled, ["market", "category", "product"])
+        keep2 = ["market", "category", "product", "plan_units",
+                 "plan_revenue_lc", "plan_cm_lc", "cm_pct", "wavg_price",
+                 "wavg_cost", "plan_revenue_aed"]
+        table(bp[[c for c in keep2 if c in bp.columns]].sort_values(
+            "plan_revenue_lc", ascending=False),
+            height=340)
+
+    with ptabs[2]:
+        st.caption("A plan can be achievable and still fragile.")
+        cc = pe.plan_concentration(filled)
+        if cc.empty:
+            st.info("Nothing planned in this scope.")
+        else:
+            for r in cc.itertuples():
+                note(f"<b>{r.market}: {r.top1_share:.0%} of planned revenue "
+                     f"rests on {r.largest}</b>, top three carry "
+                     f"{r.top3_share:.0%} across {r.items} products. "
+                     f"It takes only {r.items_to_half} product"
+                     f"{'s' if r.items_to_half != 1 else ''} to reach half the "
+                     f"plan. Peak month {r.peak_month} is "
+                     f"{r.peak_month_share:.0%} of the year.")
+            show = cc[["market", "items", "largest", "top1_share", "top3_share",
+                       "top5_share", "items_to_half", "peak_month",
+                       "peak_month_share"]]
+            table(show)
+
+    with ptabs[3]:
+        if not mq:
+            st.info("Nothing planned in this scope.")
+        else:
+            if mq["below_cost_rows"]:
+                st.caption(f"Planned at or below cost · {mq['below_cost_rows']}")
+                table(mq["below_cost_detail"])
+            if mq["thin_rows"]:
+                st.caption(f"Under 15% margin · {mq['thin_rows']}")
+                table(mq["thin_detail"], height=300)
+            dist = filled.copy()
+            dist["cm_pct"] = (dist["plan_cm_lc"] / dist["plan_revenue_lc"])
+            f = go.Figure(go.Histogram(x=dist["cm_pct"] * 100, nbinsx=30,
+                                       marker_color=BLUE))
+            f.update_layout(height=280, xaxis_title="Planned CM % per row",
+                            yaxis_title="Rows")
+            st.plotly_chart(f, width="stretch")
+            st.caption("A wide spread means the plan is not priced to a "
+                       "consistent margin. That may be deliberate.")
+
+    with ptabs[4]:
+        st.caption("Where the plan is silent. Blank is not zero.")
+        cov = pe.coverage(plan)
+        piv = cov.pivot(index="market", columns="month", values="planned")
+        piv = piv.reindex([m for m in MARKETS if m in piv.index])
+        piv = piv.reindex(columns=[m for m in MONTHS if m in piv.columns])
+        h = go.Figure(go.Heatmap(
+            z=piv.astype(float).values, x=list(piv.columns), y=list(piv.index),
+            colorscale=[[0, "#f6cfc8"], [1, "#bfe6d5"]], showscale=False,
+            text=[["planned" if v else "no plan" for v in rv]
+                  for rv in piv.values],
+            texttemplate="%{text}",
+            hovertemplate="%{y} · %{x}<br>%{text}<extra></extra>"))
+        h.update_layout(height=230)
+        st.plotly_chart(h, width="stretch")
+        gaps = cov[(cov.market.isin(mk_scope)) & (~cov.planned)]
+        if len(gaps):
+            table(gaps[["market", "month"]])
+
+    with ptabs[5]:
+        st.caption("The workbook against its previous saved version in "
+                   "SharePoint. No one has to remember what they edited.")
+        prev, pinfo = load_previous_plan()
+        if prev is None:
+            st.info(f"No comparison available: {pinfo}")
+        else:
+            try:
+                dp = pe.diff_plans(raw_plan, prev)
+            except Exception as e:
+                st.warning(f"Could not compare versions: {e}")
+                dp = None
+            if dp:
+                who = (pinfo.get("modified_by") or "someone")
+                when = (pinfo.get("modified") or "")[:16].replace("T", " ")
+                d1 = st.columns(4)
+                kpi(d1[0], "Rows changed", f"{dp['n_changed']:,}", None,
+                    f"{dp['n_added']:,} added · {dp['n_removed']:,} removed",
+                    NEUT)
+                kpi(d1[1], "Units", n(dp["units_after"]),
+                    n(dp["units_delta"], "{:+,.0f}"),
+                    f"was {n(dp['units_before'])}",
+                    GOOD if dp["units_delta"] >= 0 else BAD)
+                kpi(d1[2], "Revenue", n(dp["revenue_after"]),
+                    n(dp["revenue_delta"], "{:+,.0f}"),
+                    f"was {n(dp['revenue_before'])} · local currency", NEUT)
+                kpi(d1[3], "CM", n(dp["cm_after"]),
+                    n(dp["cm_delta"], "{:+,.0f}"),
+                    f"was {n(dp['cm_before'])}",
+                    GOOD if dp["cm_delta"] >= 0 else BAD)
+                note(f"Compared against the version saved {when} by "
+                     f"<b>{who}</b>. {pinfo.get('versions_kept', 0)} versions "
+                     f"kept by SharePoint.")
+                if len(dp["newly_below_cost"]):
+                    st.warning(
+                        f"{len(dp['newly_below_cost'])} rows moved to or below "
+                        f"cost in this edit: "
+                        + ", ".join(dp["newly_below_cost"]["product"].head(6)))
+                if dp["n_changed"]:
+                    st.caption("Changed rows, largest CM impact first")
+                    ch = dp["changed"][[
+                        "market", "month", "product", "what", "units_delta",
+                        "price_delta", "cost_delta", "revenue_delta",
+                        "cm_delta"]].copy()
+                    table(ch.reindex(
+                        ch["cm_delta"].abs().sort_values(
+                            ascending=False).index),
+                        height=320)
+                if dp["n_added"]:
+                    st.caption(f"Added · {dp['n_added']}")
+                    table(dp["added"][[
+                        "market", "month", "product", "plan_units_now",
+                        "plan_price_lc_now", "revenue_now", "cm_now"]],
+                        height=220)
+                if dp["n_removed"]:
+                    st.caption(f"Removed · {dp['n_removed']}")
+                    table(dp["removed"][[
+                        "market", "month", "product", "plan_units_was",
+                        "plan_price_lc_was", "revenue_was", "cm_was"]],
+                        height=220)
+
+    st.stop()
+
 
 st.markdown("<div class='sec'>Plan against actual</div>", unsafe_allow_html=True)
 k = st.columns(5)
@@ -459,7 +782,7 @@ with tabs[0]:
     show.columns = ["month", "plan units", "actual units", "unit att",
                     f"plan rev {cur}", f"actual rev {cur}", "rev att",
                     f"plan CM {cur}", f"actual CM {cur}", "CM%"]
-    st.dataframe(show, hide_index=True, width="stretch", height=300)
+    table(show, height=300)
 
 with tabs[1]:
     cc1, cc2 = st.columns([1, 3])
@@ -510,7 +833,7 @@ with tabs[1]:
         show.columns = [dim.lower(), "plan units", "actual units", "unit att",
                         f"plan rev {cur}", f"actual rev {cur}", "rev att",
                         f"CM {cur}", "CM%"]
-        st.dataframe(show, hide_index=True, width="stretch")
+        table(show)
 
 with tabs[2]:
     b = ve.bridge(sel)
@@ -538,14 +861,13 @@ with tabs[2]:
         decreasing={"marker": {"color": ORANGE}},
         totals={"marker": {"color": BLUE}}))
     w.update_layout(height=330, margin=dict(t=20), showlegend=False,
-                    yaxis_title="Revenue, local currency")
+                    yaxis_title=f"Revenue, {LOCAL}")
     st.plotly_chart(w, width="stretch")
     rows = [{"category": cat} | dict(ve.bridge(sel, category=cat))
             for cat in sorted(sel.category.dropna().unique())]
     if rows:
         st.caption("The same decomposition per category, so the gap has an owner.")
-        st.dataframe(pd.DataFrame(rows).sort_values("gap"), hide_index=True,
-                     width="stretch", height=280)
+        table(pd.DataFrame(rows).sort_values("gap"), height=280)
 
 with tabs[3]:
     st.caption("Plan cost is what you forecast. Dated cost is what the product "
@@ -586,7 +908,7 @@ with tabs[3]:
                   "dated_vs_plan_cost"]].copy()
         show.columns = ["month", "units", "net revenue", "CM at plan cost",
                         "CM at dated cost", "CM%", "cost movement"]
-        st.dataframe(show, hide_index=True, width="stretch")
+        table(show)
 
         if HAS_LINES and cost_log is not None:
             cov = ve.cost_coverage(lines, cost_log, plan, YEAR)
@@ -599,7 +921,7 @@ with tabs[3]:
                          f"cost. Those months will restate when you add the "
                          f"missing Cost_Log rows.")
                 st.caption("Where the cost figure came from")
-                st.dataframe(cov, hide_index=True, width="stretch")
+                table(cov)
 
         st.caption("The log is append-only. To change a cost, add a row with a "
                    "new valid_from — never edit an existing one, or history "
@@ -701,7 +1023,7 @@ with tabs[4]:
                        "breakeven_volume_pct", "verdict"]].copy()
             show.columns = ["market", "product", "units", "CM% now",
                             "volume needed %", "verdict"]
-            st.dataframe(show, hide_index=True, width="stretch", height=300)
+            table(show, height=300)
 
 with tabs[5]:
     st.caption("What the margin arithmetic says, ranked by money at stake. "
@@ -732,9 +1054,9 @@ with tabs[5]:
                 unsafe_allow_html=True)
         if len(adv) > 12:
             with st.expander(f"{len(adv) - 12} more"):
-                st.dataframe(adv[["severity", "stake", "product", "market",
+                table(adv[["severity", "stake", "product", "market",
                                   "month", "issue", "action"]],
-                             hide_index=True, width="stretch")
+                             )
 
     health = px.portfolio_price_health(combined,
                                        None if CONSOL else market)
@@ -747,7 +1069,7 @@ with tabs[5]:
         show.columns = ["market", "product", "units", "price", "cost",
                         "CM/box", "CM%", "CM share", "realisation",
                         "vol needed at -5%"]
-        st.dataframe(show, hide_index=True, width="stretch", height=340)
+        table(show, height=340)
 
 
 with tabs[6]:
@@ -777,7 +1099,7 @@ with tabs[6]:
                   "act_cm_at_plan_lc"]].copy()
         show.columns = ["product", "store name", "units", "plan price",
                         "achieved price", "realisation", "CM"]
-        st.dataframe(show, hide_index=True, width="stretch", height=280)
+        table(show, height=280)
 
 with tabs[7]:
     if cb.empty:
@@ -817,7 +1139,7 @@ with tabs[7]:
                        "top1_share", "top3_share", "revenue_lc"]].copy()
             show.columns = ["market", "month", "products sold", "largest",
                             "largest share", "top 3 share", "revenue"]
-            st.dataframe(show, hide_index=True, width="stretch", height=320)
+            table(show, height=320)
 
 with tabs[8]:
     if not HAS_LINES:
@@ -865,7 +1187,7 @@ with tabs[8]:
             show.columns = [label.lower(), "orders", "units", "boxes/order",
                             "avg order", "revenue", "share", "CM", "CM%",
                             "products"]
-            st.dataframe(show, hide_index=True, width="stretch")
+            table(show)
 
 with tabs[9]:
     if oq.empty:
@@ -890,7 +1212,7 @@ with tabs[9]:
                   "units_lost", "value_lost_lc", "cost_lost_lc"]].copy()
         show.columns = ["market", "month", "orders", "lost", "rate",
                         "units lost", "revenue lost", "cost written off"]
-        st.dataframe(show, hide_index=True, width="stretch")
+        table(show)
         if HAS_TIERS:
             st.caption("Of what survived, how much is settled.")
             tot = sel[["net_confirmed_lc", "net_committed_lc",
@@ -919,25 +1241,24 @@ with tabs[10]:
          f"{len(thin)} rows are planned at or below cost.")
     a1, a2 = st.columns(2)
     a1.caption(f"Sold but not planned · {len(ns)} · highest value first")
-    a1.dataframe(ns.sort_values("act_net_lc", ascending=False)[
+    table(ns.sort_values("act_net_lc", ascending=False)[
         ["market", "month", "product_label", "product", "act_units",
          "act_net_lc"]],
-        hide_index=True, width="stretch", height=260)
+        height=260)
     a2.caption(f"Planned but not sold · {len(npl)} · highest value first")
-    a2.dataframe(npl.sort_values("plan_revenue_lc", ascending=False)[
+    table(npl.sort_values("plan_revenue_lc", ascending=False)[
         ["market", "month", "product_label", "product", "plan_units",
          "plan_revenue_lc"]],
-        hide_index=True, width="stretch", height=260)
+        height=260)
     if len(thin):
         st.caption(f"Planned at or below cost · {len(thin)}")
-        st.dataframe(thin[["market", "month", "product", "plan_units",
-                           "plan_price_lc", "plan_cogs_unit_lc"]],
-                     hide_index=True, width="stretch")
+        table(thin[["market", "month", "product", "plan_units",
+                        "plan_price_lc", "plan_cogs_unit_lc"]])
     um = ve.unmatched_products(actuals, plan, aliases)
     if len(um):
         st.caption(f"Store product names that do not reach a plan product · "
                    f"{len(um)} · highest revenue first")
-        st.dataframe(um, hide_index=True, width="stretch", height=260)
+        table(um, height=260)
         st.caption(
             "Each of these means sales going unattributed and a plan row "
             "looking unsold. Add an Aliases sheet to the plan workbook with "
@@ -949,4 +1270,4 @@ with tabs[10]:
     gaps = cov[(cov.market.isin(mk_scope)) & (~cov.planned)]
     if len(gaps):
         st.caption("Months with no plan at all")
-        st.dataframe(gaps[["market", "month"]], hide_index=True, width="stretch")
+        table(gaps[["market", "month"]])

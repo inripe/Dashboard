@@ -120,3 +120,16 @@ def load_actuals_any(year: int = 2026, cost_log=None, plan=None):
     import variance_engine as ve
     sheets, meta = load_actuals()
     return ve.normalise_actuals(sheets), meta, None
+
+
+def load_previous_plan():
+    """The Plan sheet as it stood before the last save, if available."""
+    import sharepoint_loader as spl
+
+    buf, meta = spl.previous_version()
+    if buf is None:
+        return None, meta
+    try:
+        return pd.read_excel(buf, sheet_name="Plan"), meta
+    except Exception as e:
+        return None, f"previous version unreadable: {e}"
