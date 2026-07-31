@@ -25,6 +25,9 @@ BLUE, ORANGE, TEAL, YELLOW, PINK, GREY = (
 
 st.set_page_config(page_title="Inripe · Availability", layout="wide")
 
+import auth
+auth.gate()
+
 
 # ----------------------------------------------------------------- data
 
