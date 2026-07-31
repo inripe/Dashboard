@@ -39,6 +39,9 @@ SEV = {"bad": BAD, "warn": YELLOW, "good": GOOD}
 
 st.set_page_config(page_title="Inripe · Sales performance", layout="wide")
 
+import auth
+auth.gate()
+
 pio.templates["inripe"] = go.layout.Template(layout=dict(
     font=dict(family="-apple-system, Helvetica Neue, sans-serif", size=12,
               color="#4a4842"),
