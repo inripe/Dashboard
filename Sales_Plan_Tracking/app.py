@@ -39,9 +39,6 @@ SEV = {"bad": BAD, "warn": YELLOW, "good": GOOD}
 
 st.set_page_config(page_title="Inripe · Sales performance", layout="wide")
 
-import auth
-auth.gate()
-
 pio.templates["inripe"] = go.layout.Template(layout=dict(
     font=dict(family="-apple-system, Helvetica Neue, sans-serif", size=12,
               color="#4a4842"),
@@ -753,7 +750,7 @@ for m_, e in (ameta.get("errors") or {}).items():
 
 st.divider()
 HAS_COST = "act_cm_dated_lc" in combined.columns
-tabs = st.tabs(["Attainment", "Comparison", "Revenue bridge",
+tabs = st.tabs(["Attainment", "Daily", "Comparison", "Revenue bridge",
                 "Cost & margin", "Price simulator", "Pricing advisor",
                 "Portfolio", "Demand origin", "Order quality",
                 "Exceptions"])
@@ -794,6 +791,221 @@ with tabs[0]:
     table(show, height=300)
 
 with tabs[1]:
+    st.caption("Orders, units and revenue read together. One of them moving "
+               "without the others is the whole point, so none of them is "
+               "hidden behind a selector.")
+    if not HAS_LINES:
+        st.info("The daily view needs the Shopify API source.")
+    else:
+        dly = ve.daily(lines, plan, YEAR,
+                       None if CONSOL else market,
+                       None if month == YTD else month, cost_log)
+        if dly.empty:
+            st.info("No billable days in this scope.")
+        else:
+            pm = sel[f"plan_revenue{SUF}"].sum() if month != YTD else None
+            dim = land["days_total"] if land else None
+            sm = ve.daily_summary(dly, pm, dim)
+            wk = dly.tail(7)
+            pw = dly.iloc[-14:-7] if len(dly) >= 14 else None
+
+            def vs7(col):
+                if pw is None or not pw[col].mean():
+                    return None
+                return wk[col].mean() / pw[col].mean() - 1
+
+            m = st.columns(3)
+            kpi(m[0], "Orders", n(wk.orders.sum()),
+                (f"{vs7('orders') * 100:+.0f}% on the week before"
+                 if vs7("orders") is not None else None),
+                f"last 7 days · {n(wk.orders.mean(), '{:.0f}')} a day",
+                tone(1 + (vs7("orders") or 0)))
+            kpi(m[1], "Units", n(wk.boxes.sum()),
+                (f"{vs7('boxes') * 100:+.0f}% on the week before"
+                 if vs7("boxes") is not None else None),
+                f"{n(wk.boxes.sum() / max(1, wk.orders.sum()), '{:.1f}')} "
+                f"boxes per order",
+                tone(1 + (vs7("boxes") or 0)))
+            kpi(m[2], f"Revenue {cur}", n(wk.revenue.sum()),
+                (f"{vs7('revenue') * 100:+.0f}% on the week before"
+                 if vs7("revenue") is not None else None),
+                f"avg order {n(wk.revenue.sum() / max(1, wk.orders.sum()))} · "
+                f"CM {p(wk.cm.sum() / wk.revenue.sum() if wk.revenue.sum() else None)}",
+                tone(1 + (vs7("revenue") or 0)))
+
+            dn = ve.demand_note(dly)
+            if dn:
+                note(f"<b>{dn}</b>")
+
+            c1, c2, c3 = st.columns(3)
+            for col, (lbl, field, planline) in zip(
+                    (c1, c2, c3),
+                    [("Orders per day", "orders", None),
+                     ("Units per day", "boxes", None),
+                     (f"Revenue per day", "revenue",
+                      sm.get("plan_per_day"))]):
+                f = go.Figure()
+                f.add_trace(go.Bar(x=dly.date, y=dly[field], name=lbl,
+                                   marker_color=BLUE))
+                f.add_trace(go.Scatter(
+                    x=dly.date,
+                    y=dly[field].rolling(7, min_periods=1).mean(),
+                    name="7-day", line=dict(color=ORANGE, width=2)))
+                if planline:
+                    f.add_trace(go.Scatter(
+                        x=dly.date, y=[planline] * len(dly), name="Plan",
+                        line=dict(color=GREY, width=2, dash="dash")))
+                f.update_layout(height=190, showlegend=False, bargap=0.2,
+                                margin=dict(l=4, r=4, t=26, b=20),
+                                title=dict(text=lbl, font=dict(size=12), x=0,
+                                           xanchor="left"),
+                                xaxis=dict(showticklabels=False),
+                                yaxis=dict(title=None))
+                col.plotly_chart(f, width="stretch")
+
+            st.divider()
+            st.markdown("<div class='sec'>Products moving</div>",
+                        unsafe_allow_html=True)
+            mv = ve.daily_products(lines, YEAR, None if CONSOL else market,
+                                   None if month == YTD else month)
+            if mv.empty:
+                st.caption("Not enough history for a movers view.")
+            else:
+                rising = mv[mv.status == "rising"].nlargest(6, "revenue_change")
+                fading = mv[mv.status == "fading"].nsmallest(6, "revenue_change")
+                stopped = mv[mv.status == "stopped"]
+                new = mv[mv.status == "new"]
+
+                bits = []
+                if len(rising):
+                    bits.append(f"{len(rising)} rising, led by "
+                                f"{rising.iloc[0]['product']} at "
+                                f"{rising.iloc[0]['revenue_change']:+,.0f}")
+                if len(fading):
+                    bits.append(f"{len(fading)} fading, worst "
+                                f"{fading.iloc[0]['product']} at "
+                                f"{fading.iloc[0]['revenue_change']:+,.0f}")
+                if len(stopped):
+                    bits.append(f"{len(stopped)} stopped selling entirely")
+                if bits:
+                    note("<b>Last 7 days against the 7 before.</b> "
+                         + ". ".join(bits) + ". A product that stops selling "
+                         "on a perishable is a stronger signal than one that "
+                         "merely sells less.")
+
+                mvt = mv.head(20)
+                f = go.Figure(go.Bar(
+                    x=mvt.revenue_change, y=mvt["product"], orientation="h",
+                    marker_color=[TEAL if v >= 0 else ORANGE
+                                  for v in mvt.revenue_change],
+                    text=[f"{v:+,.0f}" for v in mvt.revenue_change],
+                    textposition="auto"))
+                f.update_layout(height=max(300, 24 * len(mvt)),
+                                xaxis_title=f"Revenue change {cur}, "
+                                            f"7 days against the 7 before",
+                                yaxis=dict(autorange="reversed"))
+                st.plotly_chart(f, width="stretch")
+
+                show = mv[["product", "status", "orders_now", "units_now",
+                           "revenue_now", "share_now", "revenue_change",
+                           "revenue_change_pct", "price_now", "price_prev",
+                           "days_since_sale"]].copy()
+                show.columns = ["product", "status", "orders", "units",
+                                "revenue", "share", "change", "change %",
+                                "price now", "price before",
+                                "days since sale"]
+                table(show, height=360)
+
+            mix = ve.daily_product_mix(lines, YEAR,
+                                       None if CONSOL else market,
+                                       None if month == YTD else month)
+            if len(mix):
+                st.caption("Daily revenue by product, leaders and the rest")
+                f = go.Figure()
+                bands = (mix.groupby("band")["revenue"].sum()
+                         .sort_values(ascending=False).index.tolist())
+                for i, bd in enumerate(bands):
+                    dd = mix[mix.band == bd]
+                    f.add_trace(go.Scatter(
+                        x=dd.date, y=dd.revenue, name=bd, stackgroup="one",
+                        line=dict(width=0.5,
+                                  color=(GREY if bd == "Other"
+                                         else SERIES[i % len(SERIES)]))))
+                f.update_layout(height=300, yaxis_title=f"Revenue {cur}",
+                                legend=dict(orientation="h", y=1.12, x=0,
+                                            font=dict(size=11)))
+                st.plotly_chart(f, width="stretch")
+
+            st.divider()
+            w1, w2 = st.columns([1.3, 1])
+            w1.caption("Orders by weekday")
+            w2.caption("New against returning, share of orders by week")
+            wd = (dly[dly.revenue > 0].groupby("weekday")
+                  .agg(days=("date", "count"), orders=("orders", "mean"),
+                       revenue=("revenue", "mean")).reset_index())
+            ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                     "Saturday", "Sunday"]
+            wd["_o"] = wd.weekday.map({w: i for i, w in enumerate(ORDER)})
+            wd = wd.sort_values("_o").drop(columns="_o")
+            if len(wd):
+                avg = wd.orders.mean()
+                f = go.Figure(go.Bar(
+                    x=wd.weekday.str[:3], y=wd.orders,
+                    marker_color=[TEAL if v >= avg else GREY
+                                  for v in wd.orders],
+                    text=[f"{v / avg - 1:+.0%}" for v in wd.orders],
+                    textposition="outside"))
+                f.update_layout(height=230, showlegend=False,
+                                margin=dict(l=4, r=4, t=34, b=20),
+                                yaxis=dict(title=None), xaxis=dict(title=None))
+                w1.plotly_chart(f, width="stretch")
+
+            if "customer_type" in lines.columns:
+                cd = lines.copy()
+                cd["date"] = pd.to_datetime(cd.processed_at, utc=True,
+                                            format="mixed").dt.tz_localize(None)
+                cd = cd[(cd.date.dt.year == YEAR) & (~cd.cancelled)
+                        & (~cd.financial_status.isin(ve.DEAD_STATUSES))]
+                if not CONSOL:
+                    cd = cd[cd.market == market]
+                if month != YTD:
+                    cd = cd[cd.date.dt.month == MONTHS.index(month) + 1]
+                if len(cd):
+                    cd["week"] = cd.date.dt.isocalendar().week
+                    ct = (cd.groupby(["week", "customer_type"], observed=True)
+                          ["order"].nunique().reset_index(name="orders"))
+                    tot = ct.groupby("week")["orders"].transform("sum")
+                    ct["share"] = ct.orders / tot
+                    f = go.Figure()
+                    for i, seg in enumerate(["New", "Returning", "Unknown"]):
+                        dd = ct[ct.customer_type == seg]
+                        if dd.empty:
+                            continue
+                        f.add_trace(go.Bar(
+                            x=dd.week.astype(str), y=dd.share, name=seg,
+                            marker_color=[BLUE, YELLOW, GREY][i]))
+                    # The title lives in the caption above, so the chart
+                    # only carries the legend. Two stacked headings in a
+                    # 230px chart collide.
+                    f.update_layout(height=230, barmode="stack",
+                                    margin=dict(l=4, r=4, t=34, b=20),
+                                    yaxis=dict(tickformat=".0%", title=None),
+                                    xaxis=dict(title=None),
+                                    legend=dict(orientation="h", y=1.16, x=0,
+                                                font=dict(size=11)))
+                    w2.plotly_chart(f, width="stretch")
+
+            st.caption("Every day, newest first")
+            show = dly[["date", "weekday", "orders", "boxes",
+                        "boxes_per_order", "aov", "revenue", "discount", "cm",
+                        "cm_pct", "rolling_7", "cumulative"]].copy()
+            show.columns = ["date", "day", "orders", "boxes", "boxes/order",
+                            "avg order", "revenue", "discount", "CM", "CM%",
+                            "7-day avg", "cumulative"]
+            table(show.iloc[::-1], height=380)
+
+
+with tabs[2]:
     cc1, cc2 = st.columns([1, 3])
     dim = cc1.selectbox("Compare by", ["Market", "Month", "Category", "Product"])
     col = {"Market": "market", "Month": "month", "Category": "category",
@@ -852,7 +1064,7 @@ with tabs[1]:
                         f"CM {cur}", "CM%"]
         table(show)
 
-with tabs[2]:
+with tabs[3]:
     st.caption("Where planned revenue went, from plan down to cash invoiced. "
                "The parts reconcile exactly, so nothing hides in a residual.")
     L = ve.leakage(combined, lines, plan,
@@ -1014,7 +1226,7 @@ with tabs[2]:
                         "achieved price", "realisation", "CM"]
         table(show, height=280)
 
-with tabs[3]:
+with tabs[4]:
     st.caption("Plan cost is what you forecast. Dated cost is what the product "
                "actually cost on the day each box was sold. The gap between "
                "them is cost movement, not commercial performance.")
@@ -1073,7 +1285,7 @@ with tabs[3]:
                    "silently rewrites itself.")
 
 
-with tabs[4]:
+with tabs[5]:
     st.caption("Change a price and see what would have to be true. Volume is "
                "held flat on purpose — the number that decides it is the "
                "break-even, not a guess at how customers respond.")
@@ -1170,7 +1382,7 @@ with tabs[4]:
                             "volume needed %", "verdict"]
             table(show, height=300)
 
-with tabs[5]:
+with tabs[6]:
     st.caption("What the margin arithmetic says, ranked by money at stake. "
                "No recommendation names an optimal price — that needs an "
                "elasticity this data cannot yet identify.")
@@ -1217,7 +1429,7 @@ with tabs[5]:
         table(show, height=340)
 
 
-with tabs[6]:
+with tabs[7]:
     if cb.empty:
         st.info("No sales in this scope.")
     else:
@@ -1257,7 +1469,7 @@ with tabs[6]:
                             "largest share", "top 3 share", "revenue"]
             table(show, height=320)
 
-with tabs[7]:
+with tabs[8]:
     if not HAS_LINES:
         st.info("This needs the Shopify API source.")
     else:
@@ -1328,7 +1540,7 @@ with tabs[7]:
                             "products"]
             table(show)
 
-with tabs[8]:
+with tabs[9]:
     if oq.empty:
         st.info("Order quality needs the Shopify API source.")
     else:
@@ -1366,7 +1578,7 @@ with tabs[8]:
                     {"Confirmed": GOOD, "Committed": BLUE,
                      "Potential": WARN}[lab])
 
-with tabs[9]:
+with tabs[10]:
     e = ve.exceptions(base)
     ns = e[e.presence == "sold, not planned"].copy()
     npl = e[e.presence == "planned, not sold"].copy()

@@ -1429,3 +1429,281 @@ def discount_detail(combined: pd.DataFrame, by: str = "product",
                                 / g["gross"].where(g["gross"].ne(0)))
     g["cm_points_lost"] = (g["cm_pct_undiscounted"] - g["cm_pct"]) * 100
     return g.sort_values("discount", ascending=False).reset_index(drop=True)
+
+
+def daily(lines: pd.DataFrame, plan: pd.DataFrame | None = None,
+          year: int = 2026, market: str | None = None,
+          month: str | None = None, cost_log: pd.DataFrame | None = None
+          ) -> pd.DataFrame:
+    """One row per day: orders, boxes, revenue, margin.
+
+    Built from the same billable rule as everything else, so a daily figure
+    and a monthly one can never disagree. Cancelled and dead-status orders
+    are absent rather than zeroed, and a day with no sales at all is a real
+    row of zeros rather than a missing one — a gap in a daily series is
+    almost always more interesting than a low day.
+    """
+    d = lines.copy()
+    d["date"] = pd.to_datetime(d["processed_at"], utc=True,
+                               format="mixed").dt.tz_localize(None).dt.normalize()
+    d = d[(d["date"].dt.year == year) & (~d["cancelled"])
+          & (~d["financial_status"].isin(DEAD_STATUSES))
+          & (d["qty_current"] > 0)
+          & (~d["product"].isin(NOT_PRODUCTS))]
+    if market:
+        d = d[d["market"] == market]
+    if month:
+        d = d[d["date"].dt.month == MONTHS.index(month) + 1]
+    if d.empty:
+        return pd.DataFrame()
+
+    ratio = (d["qty_current"] / d["qty_ordered"]).where(
+        d["qty_ordered"].ne(0), 1.0).clip(upper=1.0)
+    d["net"] = d["net_line_lc"] * ratio
+    d["gross"] = d["gross_lc"] * ratio
+
+    if cost_log is not None and len(cost_log):
+        costed = apply_dated_cost(d, cost_log, plan)
+        unit_cost = pd.to_numeric(costed["unit_cost_dated"], errors="coerce")
+    elif plan is not None:
+        d["_m"] = d["date"].dt.month.map(lambda n: MONTHS[n - 1])
+        pc = (plan.drop_duplicates(["product", "market", "month"])
+              .set_index(["product", "market", "month"])["plan_cogs_unit_lc"])
+        idx = pd.MultiIndex.from_arrays([d["product"], d["market"], d["_m"]])
+        unit_cost = pd.Series(pc.reindex(idx).to_numpy(), index=d.index)
+        d = d.drop(columns=["_m"])
+    else:
+        unit_cost = pd.Series(0.0, index=d.index)
+    d["cogs"] = d["qty_current"] * unit_cost.fillna(0)
+
+    g = d.groupby("date", observed=True).agg(
+        orders=("order", "nunique"),
+        boxes=("qty_current", "sum"),
+        gross=("gross", "sum"),
+        revenue=("net", "sum"),
+        cogs=("cogs", "sum"),
+        products=("product", "nunique")).reset_index()
+
+    # Fill the calendar so a silent day reads as zero, not as absent.
+    full = pd.date_range(g["date"].min(), g["date"].max(), freq="D")
+    g = (g.set_index("date").reindex(full, fill_value=0)
+         .rename_axis("date").reset_index())
+
+    g["cm"] = g["revenue"] - g["cogs"]
+    g["cm_pct"] = (g["cm"] / g["revenue"]).where(g["revenue"].ne(0))
+    g["discount"] = (g["gross"] - g["revenue"]).clip(lower=0)
+    g["boxes_per_order"] = (g["boxes"] / g["orders"]).where(g["orders"].ne(0))
+    g["aov"] = (g["revenue"] / g["orders"]).where(g["orders"].ne(0))
+    g["weekday"] = g["date"].dt.day_name()
+    g["rolling_7"] = g["revenue"].rolling(7, min_periods=1).mean()
+    g["cumulative"] = g["revenue"].cumsum()
+    return g
+
+
+def daily_by_market(lines: pd.DataFrame, plan: pd.DataFrame | None = None,
+                    year: int = 2026, month: str | None = None,
+                    cost_log: pd.DataFrame | None = None) -> pd.DataFrame:
+    """The daily series split by market, for comparing shapes side by side.
+
+    Each market is built with the same rule as the single-market view, then
+    stacked, so a market total here always matches that market read alone.
+    """
+    out = []
+    for mk in MARKETS:
+        d = daily(lines, plan, year, mk, month, cost_log)
+        if d.empty:
+            continue
+        d = d.copy()
+        d["market"] = mk
+        out.append(d)
+    if not out:
+        return pd.DataFrame()
+    return pd.concat(out, ignore_index=True)
+
+
+def daily_summary(daily_df: pd.DataFrame, plan_month_revenue: float | None = None,
+                  days_in_month: int | None = None) -> dict:
+    """The four numbers that head a daily view.
+
+    Yesterday rather than today, because today is still running and a
+    part-day compared against a full one is misleading.
+    """
+    if daily_df is None or daily_df.empty:
+        return {}
+    d = daily_df
+    last = d.iloc[-1]
+    week = d.tail(7)
+    prev_week = d.iloc[-14:-7] if len(d) >= 14 else None
+
+    wd = (d[d["revenue"] > 0].groupby("weekday")["revenue"].mean()
+          if (d["revenue"] > 0).any() else pd.Series(dtype=float))
+    overall = d[d["revenue"] > 0]["revenue"].mean() if (d["revenue"] > 0).any() else 0
+
+    return {
+        "last_date": last["date"],
+        "last_revenue": float(last["revenue"]),
+        "last_orders": int(last["orders"]),
+        "last_boxes": float(last["boxes"]),
+        "avg_7": float(week["revenue"].mean()),
+        "avg_7_prev": float(prev_week["revenue"].mean()) if prev_week is not None else None,
+        "week_change": (float(week["revenue"].mean() / prev_week["revenue"].mean() - 1)
+                        if prev_week is not None and prev_week["revenue"].mean() else None),
+        "mtd": float(d["revenue"].sum()),
+        "days_elapsed": int(len(d)),
+        "plan_per_day": (plan_month_revenue / days_in_month
+                         if plan_month_revenue and days_in_month else None),
+        "mtd_vs_plan": (d["revenue"].sum() / (plan_month_revenue
+                        * len(d) / days_in_month)
+                        if plan_month_revenue and days_in_month else None),
+        "best_weekday": (wd.idxmax() if len(wd) else None),
+        "best_weekday_lift": (wd.max() / overall - 1) if len(wd) and overall else None,
+        "zero_days": int((d["revenue"] == 0).sum()),
+    }
+
+
+def daily_products(lines: pd.DataFrame, year: int = 2026,
+                   market: str | None = None, month: str | None = None,
+                   window: int = 7) -> pd.DataFrame:
+    """Product movement over the last window against the window before it.
+
+    A monthly product table says what sold. This says what is changing, which
+    is the only thing a daily view can act on. Days since the last sale is
+    carried because on a perishable a product that quietly stopped selling is
+    a stronger signal than one that merely sold less.
+    """
+    d = lines.copy()
+    d["date"] = pd.to_datetime(d["processed_at"], utc=True,
+                               format="mixed").dt.tz_localize(None).dt.normalize()
+    d = d[(d["date"].dt.year == year) & (~d["cancelled"])
+          & (~d["financial_status"].isin(DEAD_STATUSES))
+          & (d["qty_current"] > 0)
+          & (~d["product"].isin(NOT_PRODUCTS))]
+    if market:
+        d = d[d["market"] == market]
+    if month:
+        d = d[d["date"].dt.month == MONTHS.index(month) + 1]
+    if d.empty:
+        return pd.DataFrame()
+
+    ratio = (d["qty_current"] / d["qty_ordered"]).where(
+        d["qty_ordered"].ne(0), 1.0).clip(upper=1.0)
+    d["net"] = d["net_line_lc"] * ratio
+
+    last_day = d["date"].max()
+    cur_from = last_day - pd.Timedelta(days=window - 1)
+    prv_from = cur_from - pd.Timedelta(days=window)
+
+    cur = d[d["date"] >= cur_from]
+    prv = d[(d["date"] >= prv_from) & (d["date"] < cur_from)]
+
+    def roll(x, tag):
+        if x.empty:
+            return pd.DataFrame(columns=["product", f"units_{tag}",
+                                         f"revenue_{tag}", f"orders_{tag}"])
+        return x.groupby("product", observed=True).agg(
+            **{f"units_{tag}": ("qty_current", "sum"),
+               f"revenue_{tag}": ("net", "sum"),
+               f"orders_{tag}": ("order", "nunique")}).reset_index()
+
+    g = roll(cur, "now").merge(roll(prv, "prev"), on="product", how="outer")
+    for c in g.columns:
+        if c != "product":
+            g[c] = g[c].fillna(0)
+
+    last_sale = d.groupby("product", observed=True)["date"].max()
+    g["days_since_sale"] = g["product"].map(
+        lambda p: (last_day - last_sale.get(p, last_day)).days)
+
+    g["revenue_change"] = g["revenue_now"] - g["revenue_prev"]
+    g["revenue_change_pct"] = (g["revenue_change"] / g["revenue_prev"]).where(
+        g["revenue_prev"].gt(0))
+    g["units_change"] = g["units_now"] - g["units_prev"]
+    tot = g["revenue_now"].sum()
+    g["share_now"] = g["revenue_now"] / tot if tot else 0
+    g["price_now"] = (g["revenue_now"] / g["units_now"]).where(
+        g["units_now"].gt(0))
+    g["price_prev"] = (g["revenue_prev"] / g["units_prev"]).where(
+        g["units_prev"].gt(0))
+
+    g["status"] = "steady"
+    g.loc[g["revenue_prev"].eq(0) & g["revenue_now"].gt(0), "status"] = "new"
+    g.loc[g["revenue_now"].eq(0) & g["revenue_prev"].gt(0), "status"] = "stopped"
+    g.loc[g["revenue_change_pct"].gt(0.25), "status"] = "rising"
+    g.loc[g["revenue_change_pct"].lt(-0.25), "status"] = "fading"
+    g["window_days"] = window
+    g["as_of"] = last_day
+    return g.sort_values("revenue_now", ascending=False).reset_index(drop=True)
+
+
+def daily_product_mix(lines: pd.DataFrame, year: int = 2026,
+                      market: str | None = None, month: str | None = None,
+                      top: int = 6) -> pd.DataFrame:
+    """Daily revenue for the leading products, everything else as one series."""
+    d = lines.copy()
+    d["date"] = pd.to_datetime(d["processed_at"], utc=True,
+                               format="mixed").dt.tz_localize(None).dt.normalize()
+    d = d[(d["date"].dt.year == year) & (~d["cancelled"])
+          & (~d["financial_status"].isin(DEAD_STATUSES))
+          & (d["qty_current"] > 0)
+          & (~d["product"].isin(NOT_PRODUCTS))]
+    if market:
+        d = d[d["market"] == market]
+    if month:
+        d = d[d["date"].dt.month == MONTHS.index(month) + 1]
+    if d.empty:
+        return pd.DataFrame()
+
+    ratio = (d["qty_current"] / d["qty_ordered"]).where(
+        d["qty_ordered"].ne(0), 1.0).clip(upper=1.0)
+    d["net"] = d["net_line_lc"] * ratio
+    leaders = (d.groupby("product", observed=True)["net"].sum()
+               .nlargest(top).index)
+    d["band"] = d["product"].where(d["product"].isin(leaders), "Other")
+    return (d.groupby(["date", "band"], observed=True)["net"].sum()
+            .reset_index(name="revenue"))
+
+
+def demand_note(daily_df: pd.DataFrame, window: int = 7) -> str:
+    """One sentence decomposing the move into orders, basket and price.
+
+    Revenue is orders times basket times price. Naming which of the three
+    moved is the difference between a number and something to act on, and
+    the three have different owners.
+    """
+    if daily_df is None or len(daily_df) < window * 2:
+        return ""
+    cur = daily_df.tail(window)
+    prv = daily_df.iloc[-window * 2:-window]
+
+    def parts(x):
+        o = x["orders"].sum()
+        u = x["boxes"].sum()
+        r = x["revenue"].sum()
+        return o, (u / o if o else 0), (r / u if u else 0), r
+
+    o1, b1, p1, r1 = parts(prv)
+    o2, b2, p2, r2 = parts(cur)
+    if not r1 or not o1:
+        return ""
+
+    dr = r2 / r1 - 1
+    do = o2 / o1 - 1 if o1 else 0
+    db = b2 / b1 - 1 if b1 else 0
+    dp = p2 / p1 - 1 if p1 else 0
+
+    driver = max((abs(do), "orders"), (abs(db), "basket size"),
+                 (abs(dp), "price"))[1]
+    moved = {"orders": do, "basket size": db, "price": dp}[driver]
+
+    lead = (f"Revenue {'up' if dr >= 0 else 'down'} {abs(dr):.0%} on the "
+            f"previous {window} days.")
+    detail = (f"Orders {do:+.0%}, basket {db:+.0%}, price {dp:+.0%} — "
+              f"{driver} moved most at {moved:+.0%}.")
+    owner = {
+        "orders": "That is a demand question: traffic, campaigns, agents.",
+        "basket size": "That is a merchandising question: bundles, minimums, "
+                       "what is shown at checkout.",
+        "price": "That is a mix or pricing question: cheaper products "
+                 "carrying the day, or discount widening.",
+    }[driver]
+    return f"{lead} {detail} {owner}"
