@@ -296,6 +296,10 @@ def from_line_items(lines: pd.DataFrame, year: int = 2026,
         df["qty_ordered"].ne(0), 1.0).clip(upper=1.0)
     df["act_gross_lc"] = df["gross_lc"] * ratio
     df["act_net_lc"] = df["net_line_lc"] * ratio
+    # Line-level and order-level discounts both belong in the discount
+    # figure. The order-level part was allocated across lines when the data
+    # was read, so it is already reflected in net; this keeps the reported
+    # discount consistent with that.
     df["act_discounts_lc"] = (df["act_gross_lc"] - df["act_net_lc"]).clip(lower=0)
 
     # Cost in effect on the day of sale, applied per line so a mid-month
@@ -1235,6 +1239,36 @@ def findings(combined: pd.DataFrame, lines: pd.DataFrame | None,
                            f"price on units actually sold."),
             })
 
+    # Discount and reversals only earn a place when they are material. A one
+    # percent discount rate is noise; a twelve percent reversal rate is the
+    # largest leak in the month and should outrank most other findings.
+    L = leakage(combined, lines, plan, market, month, year)
+    if L and abs(L.get("residual", 0)) < 1:
+        if L.get("reversal_rate") and L["reversal_rate"] > 0.05:
+            out.append({
+                "severity": "bad" if L["reversal_rate"] > 0.10 else "warn",
+                "stake": L["reversal_value"],
+                "title": f"{L['reversal_rate']:.0%} of gross revenue reversed",
+                "detail": (f"{L['reversal_value']:,.0f} lost to returns and "
+                           f"cancelled orders against {L['actual_gross']:,.0f} "
+                           f"of gross. That is "
+                           f"{L['reversal_value'] / max(1, abs(L['discount_value'])):.0f}x "
+                           f"what discounting costs. The fruit was procured "
+                           f"and flown before the order died."),
+            })
+        if L.get("discount_rate") and L["discount_rate"] > 0.03:
+            out.append({
+                "severity": "warn" if L["discount_rate"] > 0.06 else "good",
+                "stake": L["discount_value"],
+                "title": f"{L['discount_rate']:.0%} of gross given away in "
+                         f"discount",
+                "detail": (f"{L['discount_value']:,.0f} on "
+                           f"{L['act_units']:,.0f} boxes, "
+                           f"{L['discount_value'] / max(1, L['act_units']):,.2f} "
+                           f"a box. Cost does not fall when price does, so all "
+                           f"of it comes straight off contribution margin."),
+            })
+
     dead = sub[(sub["plan_units"] > 0) & (sub["act_units"] == 0)]
     if len(dead):
         out.append({
@@ -1261,3 +1295,137 @@ def findings(combined: pd.DataFrame, lines: pd.DataFrame | None,
 
     order = {"bad": 0, "warn": 1, "good": 2}
     return sorted(out, key=lambda f: (order[f["severity"]], -f["stake"]))
+
+
+def leakage(combined: pd.DataFrame, lines: pd.DataFrame | None = None,
+            plan: pd.DataFrame | None = None, market: str | None = None,
+            month: str | None = None, year: int = 2026) -> dict:
+    """Where planned revenue went, from plan down to cash actually invoiced.
+
+    The margin bridge asks why the gap happened. This asks where the money
+    leaked, which is a different question with different owners:
+
+        plan revenue
+          less volume        boxes never sold, at plan price
+            of which cancelled   ordered, then lost while waiting
+            of which never ordered
+          plus or minus price  gross price achieved against plan price
+          less discounts       given away at the till
+        = net revenue
+
+    The parts reconcile exactly to actual net revenue, because volume is
+    valued at plan price and price is valued on units actually sold. Order
+    that the other way round and the residual has to be hidden somewhere.
+
+    Cancellation is shown inside volume rather than added on top. A cancelled
+    order is already absent from actuals, so counting it separately would
+    charge the same loss twice.
+    """
+    d = combined
+    if market:
+        d = d[d["market"] == market]
+    if month:
+        d = d[d["month"] == month]
+    if d.empty:
+        return {}
+
+    plan_units = float(d["plan_units"].sum())
+    plan_rev = float(d["plan_revenue_lc"].sum())
+    act_units = float(d["act_units"].sum())
+    act_gross = float(d["act_gross_lc"].sum())
+    act_disc = float(d["act_discounts_lc"].sum())
+    act_net = float(d["act_net_lc"].sum())
+
+    plan_price = (plan_rev / plan_units) if plan_units else 0.0
+    volume = (act_units - plan_units) * plan_price
+    price = act_gross - act_units * plan_price
+    discount = -act_disc
+    # Whatever separates gross from net beyond discount is returns and
+    # reversals. Deriving it rather than reading a column means the parts
+    # always add up, whichever route the actuals arrived by.
+    reversals = -(act_gross - act_disc - act_net)
+
+    cancelled_units = cancelled_value = 0.0
+    cancel_rate = None
+    if lines is not None and len(lines):
+        oq = order_quality(lines, plan, year)
+        if market:
+            oq = oq[oq["market"] == market]
+        if month:
+            oq = oq[oq["month"] == month]
+        if len(oq):
+            cancelled_units = float(oq["units_lost"].sum())
+            cancelled_value = float(oq["value_lost_lc"].sum())
+            tot_o = float(oq["orders"].sum())
+            cancel_rate = (float(oq["orders_lost"].sum()) / tot_o
+                           if tot_o else None)
+
+    # Cancelled boxes are part of the volume gap, valued on the same basis so
+    # the two are directly comparable.
+    vol_cancelled = -cancelled_units * plan_price
+    vol_never_ordered = volume - vol_cancelled
+
+    return {
+        "plan_revenue": plan_rev,
+        "volume": volume,
+        "volume_cancelled": vol_cancelled,
+        "volume_never_ordered": vol_never_ordered,
+        "price": price,
+        "discount": discount,
+        "reversals": reversals,
+        "actual_net": act_net,
+        "actual_gross": act_gross,
+        "gap": act_net - plan_rev,
+        # Reconciliation is asserted, not assumed. If this is not ~0 the
+        # decomposition is wrong and should not be shown.
+        "residual": act_net - (plan_rev + volume + price + discount
+                               + reversals),
+        "plan_units": plan_units, "act_units": act_units,
+        "plan_price": plan_price,
+        "act_gross_price": (act_gross / act_units) if act_units else None,
+        "act_net_price": (act_net / act_units) if act_units else None,
+        "discount_rate": (act_disc / act_gross) if act_gross else None,
+        "discount_value": act_disc,
+        "reversal_value": -reversals,
+        "reversal_rate": (-reversals / act_gross) if act_gross else None,
+        "cancelled_units": cancelled_units,
+        "cancelled_value": cancelled_value,
+        "cancel_rate": cancel_rate,
+        # Margin lost to discount, since a discount is pure margin: the cost
+        # of the box does not fall when the price does.
+        "discount_cm_impact": -act_disc,
+    }
+
+
+def discount_detail(combined: pd.DataFrame, by: str = "product",
+                    market: str | None = None,
+                    month: str | None = None) -> pd.DataFrame:
+    """Discount rate and value per product, category or month.
+
+    A blended discount rate hides the products giving away the most. Every
+    unit of discount is a unit of margin, because cost does not move when
+    price does.
+    """
+    d = combined[combined["act_gross_lc"] > 0]
+    if market:
+        d = d[d["market"] == market]
+    if month:
+        d = d[d["month"] == month]
+    if d.empty:
+        return pd.DataFrame()
+
+    keys = ["market", by] if by not in ("market",) else ["market"]
+    g = d.groupby(keys, observed=True).agg(
+        units=("act_units", "sum"),
+        gross=("act_gross_lc", "sum"),
+        discount=("act_discounts_lc", "sum"),
+        net=("act_net_lc", "sum"),
+        cm=("act_cm_at_plan_lc", "sum")).reset_index()
+    g["discount_rate"] = g["discount"] / g["gross"]
+    g["discount_per_box"] = g["discount"] / g["units"].where(g["units"].ne(0))
+    g["cm_pct"] = g["cm"] / g["net"].where(g["net"].ne(0))
+    # What the margin would have been with no discount at all.
+    g["cm_pct_undiscounted"] = ((g["cm"] + g["discount"])
+                                / g["gross"].where(g["gross"].ne(0)))
+    g["cm_points_lost"] = (g["cm_pct_undiscounted"] - g["cm_pct"]) * 100
+    return g.sort_values("discount", ascending=False).reset_index(drop=True)

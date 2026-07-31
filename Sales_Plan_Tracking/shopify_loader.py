@@ -64,6 +64,33 @@ SYSTEM_TAGS = AD_TAGS | {
 
 DRAFT_SOURCES = {"shopify_draft_order", "draft_order"}
 
+# Shipping method carries the delivery city on most orders, because it is
+# picked from a fixed list at checkout. But an agent raising an order by hand
+# often leaves the default, so these labels mean "no city recorded" rather
+# than a place. Those orders fall back to the typed address, and if that is
+# empty too they are reported as unrecorded rather than guessed at.
+GENERIC_SHIPPING = {
+    "", "shipping", "free shipping", "standard", "standard shipping",
+    "custom", "delivery", "express", "economy", "pickup", "local pickup",
+    "same day", "next day", "flat rate", "default",
+}
+
+
+def delivery_city(shipping_method: str | None, address_city: str | None) -> str:
+    """The city an order was delivered to, from the most reliable source.
+
+    Shipping method first, since it is chosen from a list. The typed address
+    second, which is messy but better than nothing. Neither means the city
+    was never captured, and saying so is more useful than inventing one.
+    """
+    sm = (shipping_method or "").strip()
+    if sm and sm.lower() not in GENERIC_SHIPPING:
+        return sm.title()
+    ac = (address_city or "").strip()
+    if ac:
+        return ac.title()
+    return "Not recorded"
+
 
 def classify(source: str | None, tags: list[str]) -> tuple[str, str | None]:
     """(channel, agent) for one order.
@@ -127,9 +154,14 @@ query Orders($q: String!, $first: Int!, $after: String) {
       displayFinancialStatus
       displayFulfillmentStatus
       currencyCode
+      # Order-level totals, captured only so the audit can check the sum of
+      # line items against a number Shopify calculated independently.
+      currentSubtotalPriceSet { shopMoney { amount } }
+      currentTotalPriceSet { shopMoney { amount } }
       sourceName
       tags
       shippingAddress { city countryCodeV2 }
+      shippingLine { title }
       customerJourneySummary { customerOrderIndex }
       lineItems(first: 50) {
         nodes {
@@ -293,6 +325,12 @@ def fetch_store(store: Store, year: int) -> pd.DataFrame:
             if o.get("test"):
                 continue
             addr = o.get("shippingAddress") or {}
+            # The address city is free text the customer typed, so it arrives
+            # as hundreds of neighbourhoods, compounds and Arabic spellings —
+            # unusable as a dimension. The shipping method is picked from a
+            # fixed list at checkout and carries the delivery city cleanly, so
+            # that is what the city dimension is built from.
+            ship = (o.get("shippingLine") or {}).get("title")
             journey = o.get("customerJourneySummary") or {}
             idx = journey.get("customerOrderIndex")
             tags = o.get("tags") or []
@@ -300,7 +338,9 @@ def fetch_store(store: Store, year: int) -> pd.DataFrame:
             for li in o["lineItems"]["nodes"]:
                 prod = (li.get("product") or {}).get("title")
                 rows.append({
-                    "city": (addr.get("city") or "Unknown").strip().title(),
+                    "city": delivery_city(ship, addr.get("city")),
+                    "address_city": (addr.get("city") or "").strip(),
+                    "shipping_method": (ship or "").strip(),
                     "country": addr.get("countryCodeV2") or "",
                     "channel": channel,
                     "agent": agent,
@@ -315,6 +355,12 @@ def fetch_store(store: Store, year: int) -> pd.DataFrame:
                     "financial_status": o.get("displayFinancialStatus"),
                     "fulfillment_status": o.get("displayFulfillmentStatus"),
                     "currency": o.get("currencyCode"),
+                    "order_subtotal": float(
+                        ((o.get("currentSubtotalPriceSet") or {})
+                         .get("shopMoney") or {}).get("amount") or 0),
+                    "order_total": float(
+                        ((o.get("currentTotalPriceSet") or {})
+                         .get("shopMoney") or {}).get("amount") or 0),
                     # The catalogue name wins. A migrated line item reading
                     # "Fas Mango" resolves to "Mango Fas" and joins the plan.
                     "product": _clean(prod or li["title"]),
@@ -329,7 +375,43 @@ def fetch_store(store: Store, year: int) -> pd.DataFrame:
         if not page["pageInfo"]["hasNextPage"]:
             break
         after = page["pageInfo"]["endCursor"]
-    return pd.DataFrame(rows)
+
+    df = pd.DataFrame(rows)
+    return _reconcile_to_order(df)
+
+
+def _reconcile_to_order(df: pd.DataFrame) -> pd.DataFrame:
+    """Scale line values so each order sums to Shopify's own subtotal.
+
+    A discount applied to the whole order does not appear on any line, so
+    summing line items overstates revenue. Shopify's subtotal already carries
+    those discounts and is the authoritative product revenue for the order,
+    so the lines are scaled to it and the difference is recorded as an
+    order-level discount rather than quietly lost.
+
+    Only shrinking is allowed. A subtotal larger than the lines means
+    something other than a discount is in play — shipping billed as a line,
+    a partial refund not yet settled — and inventing revenue to close that
+    gap would be worse than leaving it visible.
+    """
+    if df.empty or "order_subtotal" not in df.columns:
+        return df
+
+    df = df.copy()
+    df["order_discount_lc"] = 0.0
+    live = ~df["cancelled"]
+    sums = df[live].groupby("order")["net_line_lc"].sum()
+    subs = df[live].groupby("order")["order_subtotal"].first()
+
+    ratio = (subs / sums).where(sums.gt(0) & subs.gt(0))
+    ratio = ratio.where(ratio.between(0.5, 1.0))     # shrink only, and sanely
+    if ratio.notna().any():
+        r = df["order"].map(ratio)
+        adj = r.notna() & live
+        df.loc[adj, "order_discount_lc"] = (
+            df.loc[adj, "net_line_lc"] * (1 - r[adj]))
+        df.loc[adj, "net_line_lc"] = df.loc[adj, "net_line_lc"] * r[adj]
+    return df
 
 
 def fetch_all(year: int) -> tuple[pd.DataFrame, dict]:

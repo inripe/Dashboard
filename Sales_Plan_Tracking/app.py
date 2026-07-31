@@ -750,9 +750,9 @@ for m_, e in (ameta.get("errors") or {}).items():
 
 st.divider()
 HAS_COST = "act_cm_dated_lc" in combined.columns
-tabs = st.tabs(["Attainment", "Comparison", "Margin bridge", "Cost & margin",
-                "Price simulator", "Pricing advisor", "Price realisation",
-                "Portfolio", "Where demand came from", "Order quality",
+tabs = st.tabs(["Attainment", "Comparison", "Revenue bridge",
+                "Cost & margin", "Price simulator", "Pricing advisor",
+                "Portfolio", "Demand origin", "Order quality",
                 "Exceptions"])
 
 with tabs[0]:
@@ -850,38 +850,166 @@ with tabs[1]:
         table(show)
 
 with tabs[2]:
-    b = ve.bridge(sel)
-    drv = {"volume": b["volume"], "price": b["price"], "mix": b["mix"]}
-    worst = min(drv, key=drv.get)
-    share = abs(drv[worst]) / abs(b["gap"]) if b["gap"] else None
-    note(f"<b>{worst.title()} is {share:.0%} of the gap.</b> "
-         f"Plan {b['plan']:,.0f}, actual {b['actual']:,.0f}, a difference of "
-         f"{b['gap']:+,.0f}. Volume {b['volume']:+,.0f}, price "
-         f"{b['price']:+,.0f}, mix {b['mix']:+,.0f}. "
-         + ("A volume gap is supply or demand. " if worst == "volume" else
-            "A price gap is discounting or downtrading. " if worst == "price"
-            else "A mix gap means the same boxes sold at a different blend. ")
-         + "Read one market at a time — the bridge is in local currency.")
-    w = go.Figure(go.Waterfall(
-        orientation="v",
-        measure=["absolute", "relative", "relative", "relative", "total"],
-        x=["Plan", "Volume", "Price", "Mix", "Actual"],
-        y=[b["plan"], b["volume"], b["price"], b["mix"], None],
-        text=[f"{v:,.0f}" for v in [b["plan"], b["volume"], b["price"],
-                                    b["mix"], b["actual"]]],
-        textposition="outside",
-        connector={"line": {"color": GREY, "width": 1}},
-        increasing={"marker": {"color": TEAL}},
-        decreasing={"marker": {"color": ORANGE}},
-        totals={"marker": {"color": BLUE}}))
-    w.update_layout(height=330, margin=dict(t=20), showlegend=False,
-                    yaxis_title=f"Revenue, {LOCAL}")
-    st.plotly_chart(w, width="stretch")
-    rows = [{"category": cat} | dict(ve.bridge(sel, category=cat))
-            for cat in sorted(sel.category.dropna().unique())]
-    if rows:
-        st.caption("The same decomposition per category, so the gap has an owner.")
-        table(pd.DataFrame(rows).sort_values("gap"), height=280)
+    st.caption("Where planned revenue went, from plan down to cash invoiced. "
+               "The parts reconcile exactly, so nothing hides in a residual.")
+    L = ve.leakage(combined, lines, plan,
+                   None if CONSOL else market,
+                   None if month == YTD else month, YEAR)
+    if not L:
+        st.info("Nothing in this scope.")
+    elif abs(L["residual"]) > 1:
+        st.warning(f"The decomposition does not reconcile — residual "
+                   f"{L['residual']:,.0f}. Not shown, because a bridge that "
+                   f"does not add up is worse than none.")
+    else:
+        lk = st.columns(4)
+        kpi(lk[0], "Discount", n(L["discount_value"]),
+            None, f"{p(L['discount_rate'])} of gross · "
+                  f"{n(L['discount_value'] / L['act_units'] if L['act_units'] else None, '{:,.2f}')} a box",
+            tone(L["discount_rate"], good=0.02, warn=0.05, invert=True))
+        kpi(lk[1], "Returns and reversals", n(L["reversal_value"]),
+            None, f"{p(L['reversal_rate'])} of gross",
+            tone(L["reversal_rate"], good=0.03, warn=0.08, invert=True))
+        kpi(lk[2], "Volume not sold", n(abs(L["volume"])),
+            None, f"{n(abs(L['act_units'] - L['plan_units']))} boxes at the "
+                  f"plan price of {n(L['plan_price'], '{:,.2f}')}",
+            BAD if L["volume"] < 0 else GOOD)
+        kpi(lk[3], "Total gap", n(L["gap"], "{:+,.0f}"),
+            None, f"{n(L['actual_net'])} against a plan of "
+                  f"{n(L['plan_revenue'])}",
+            BAD if L["gap"] < 0 else GOOD)
+
+        steps = [("Plan revenue", L["plan_revenue"], "absolute"),
+                 ("Volume", L["volume"], "relative"),
+                 ("Price", L["price"], "relative"),
+                 ("Discount", L["discount"], "relative"),
+                 ("Returns", L["reversals"], "relative"),
+                 ("Net revenue", None, "total")]
+        w = go.Figure(go.Waterfall(
+            orientation="v",
+            measure=[m for _, _, m in steps],
+            x=[x for x, _, _ in steps],
+            y=[v for _, v, _ in steps],
+            text=[f"{v:,.0f}" if v is not None else f"{L['actual_net']:,.0f}"
+                  for _, v, _ in steps],
+            textposition="outside",
+            connector={"line": {"color": GREY, "width": 1}},
+            increasing={"marker": {"color": TEAL}},
+            decreasing={"marker": {"color": ORANGE}},
+            totals={"marker": {"color": BLUE}}))
+        w.update_layout(height=360, margin=dict(t=24), showlegend=False,
+                        yaxis_title=f"Revenue {LOCAL}")
+        st.plotly_chart(w, width="stretch")
+
+        biggest = max([("volume", abs(L["volume"])),
+                       ("discount", abs(L["discount"])),
+                       ("returns", abs(L["reversals"]))], key=lambda t: t[1])
+        note(f"<b>{biggest[0].title()} is the largest leak at "
+             f"{biggest[1]:,.0f} {LOCAL}.</b> "
+             f"Discount is {p(L['discount_rate'])} of gross and returns are "
+             f"{p(L['reversal_rate'])}. "
+             f"Every unit of discount is a unit of margin — the cost of a box "
+             f"does not fall when its price does, so "
+             f"{n(L['discount_value'])} of discount is "
+             f"{n(L['discount_value'])} straight off contribution. "
+             + (f"{n(L['cancelled_units'])} boxes were ordered and then "
+                f"cancelled, which sits inside the volume figure rather than "
+                f"on top of it."
+                if L.get("cancelled_units") else ""))
+
+        st.caption("Price path per box")
+        pp = pd.DataFrame([{
+            "plan price": L["plan_price"],
+            "gross achieved": L["act_gross_price"],
+            "after discount": L["act_net_price"],
+            "vs plan": ((L["act_net_price"] / L["plan_price"] - 1) * 100
+                        if L["plan_price"] else None)}])
+        table(pp)
+
+        st.caption("Discount by product — every point of discount is a point "
+                   "of margin")
+        dd = ve.discount_detail(combined, "product",
+                                None if CONSOL else market,
+                                None if month == YTD else month)
+        if len(dd):
+            top = dd.head(15)
+            f = go.Figure()
+            f.add_trace(go.Bar(x=top.discount, y=top["product"],
+                               orientation="h", name="Discount value",
+                               marker_color=ORANGE,
+                               text=[f"{v:,.0f}" for v in top.discount],
+                               textposition="auto"))
+            f.update_layout(height=max(300, 26 * len(top)),
+                            xaxis_title=f"Discount given {LOCAL}",
+                            yaxis=dict(autorange="reversed"))
+            st.plotly_chart(f, width="stretch")
+            show = dd[["market", "product", "units", "gross", "discount",
+                       "discount_rate", "discount_per_box", "cm_pct",
+                       "cm_pct_undiscounted", "cm_points_lost"]].copy()
+            show.columns = ["market", "product", "units", "gross", "discount",
+                            "discount rate", "discount/box", "CM%",
+                            "CM% if undiscounted", "CM points lost"]
+            table(show, height=340)
+        else:
+            st.caption("No discounts recorded in this scope.")
+
+        if not CONSOL and month != YTD:
+            st.caption("The same decomposition by month")
+            rows = []
+            for mo in MONTHS:
+                Lm = ve.leakage(combined, lines, plan, market, mo, YEAR)
+                if Lm and (Lm["plan_revenue"] or Lm["actual_net"]):
+                    rows.append({
+                        "month": mo, "plan": Lm["plan_revenue"],
+                        "volume": Lm["volume"], "price": Lm["price"],
+                        "discount": Lm["discount"],
+                        "returns": Lm["reversals"],
+                        "actual": Lm["actual_net"],
+                        "discount rate": Lm["discount_rate"],
+                        "return rate": Lm["reversal_rate"]})
+            table(pd.DataFrame(rows), height=320)
+
+
+
+    st.divider()
+    st.caption("Volume, price and mix per category, so the gap has an owner. "
+               "Mix is the one effect the leakage view above cannot show: the "
+               "same boxes sold at a different blend of products.")
+    cat_rows = [{"category": cat_} | dict(ve.bridge(sel, category=cat_))
+                for cat_ in sorted(sel.category.dropna().unique())]
+    if cat_rows:
+        table(pd.DataFrame(cat_rows).sort_values("gap"), height=280)
+
+
+    st.divider()
+    st.caption("Achieved price against plan price, per product.")
+    if cb.empty:
+        st.info("No sales in this scope.")
+    else:
+        weak = cb[cb.price_realisation < 0.90]
+        lost = ((cb.plan_wavg_price - cb.act_wavg_price) * cb.act_units)
+        note(f"<b>{len(weak)} of {len(cb)} products sold below 90% of plan "
+             f"price.</b> Net effect across all products is "
+             f"{-lost.sum():+,.0f} against plan price on units actually sold. "
+             + (f"Worst is {weak.iloc[0]['product']} at "
+                f"{weak.iloc[0]['price_realisation']:.0%}. " if len(weak) else "")
+             + "A low realisation is either discounting or a shift to cheaper "
+               "grades within the same product.")
+        d = cb.sort_values("price_realisation")
+        f = go.Figure(go.Bar(
+            x=(d.price_realisation - 1) * 100, y=d[LBL], orientation="h",
+            marker_color=[ORANGE if v < 1 else TEAL for v in d.price_realisation],
+            text=[f"{v:.0%}" for v in d.price_realisation], textposition="auto"))
+        f.update_layout(height=max(300, 28 * len(d)),
+                        xaxis_title="Achieved vs plan price, percentage points",
+                        yaxis=dict(autorange="reversed"))
+        st.plotly_chart(f, width="stretch")
+        show = d[[LBL, "product", "act_units", "plan_wavg_price",
+                  "act_wavg_price", "price_realisation",
+                  "act_cm_at_plan_lc"]].copy()
+        show.columns = ["product", "store name", "units", "plan price",
+                        "achieved price", "realisation", "CM"]
+        table(show, height=280)
 
 with tabs[3]:
     st.caption("Plan cost is what you forecast. Dated cost is what the product "
@@ -1090,35 +1218,6 @@ with tabs[6]:
     if cb.empty:
         st.info("No sales in this scope.")
     else:
-        weak = cb[cb.price_realisation < 0.90]
-        lost = ((cb.plan_wavg_price - cb.act_wavg_price) * cb.act_units)
-        note(f"<b>{len(weak)} of {len(cb)} products sold below 90% of plan "
-             f"price.</b> Net effect across all products is "
-             f"{-lost.sum():+,.0f} against plan price on units actually sold. "
-             + (f"Worst is {weak.iloc[0]['product']} at "
-                f"{weak.iloc[0]['price_realisation']:.0%}. " if len(weak) else "")
-             + "A low realisation is either discounting or a shift to cheaper "
-               "grades within the same product.")
-        d = cb.sort_values("price_realisation")
-        f = go.Figure(go.Bar(
-            x=(d.price_realisation - 1) * 100, y=d[LBL], orientation="h",
-            marker_color=[ORANGE if v < 1 else TEAL for v in d.price_realisation],
-            text=[f"{v:.0%}" for v in d.price_realisation], textposition="auto"))
-        f.update_layout(height=max(300, 28 * len(d)),
-                        xaxis_title="Achieved vs plan price, percentage points",
-                        yaxis=dict(autorange="reversed"))
-        st.plotly_chart(f, width="stretch")
-        show = d[[LBL, "product", "act_units", "plan_wavg_price",
-                  "act_wavg_price", "price_realisation",
-                  "act_cm_at_plan_lc"]].copy()
-        show.columns = ["product", "store name", "units", "plan price",
-                        "achieved price", "realisation", "CM"]
-        table(show, height=280)
-
-with tabs[7]:
-    if cb.empty:
-        st.info("No sales in this scope.")
-    else:
         rng = cb.cm_per_box.max() / cb.cm_per_box.min() if cb.cm_per_box.min() else None
         note(f"<b>CM per box ranges "
              f"{cb.cm_per_box.min():,.1f} to {cb.cm_per_box.max():,.1f}"
@@ -1155,7 +1254,7 @@ with tabs[7]:
                             "largest share", "top 3 share", "revenue"]
             table(show, height=320)
 
-with tabs[8]:
+with tabs[7]:
     if not HAS_LINES:
         st.info("This needs the Shopify API source.")
     else:
@@ -1182,13 +1281,36 @@ with tabs[8]:
             if g.empty:
                 cols[i].info(f"No {label.lower()} data.")
                 continue
-            fig = go.Figure(go.Bar(x=g[dim_].astype(str), y=g.revenue_lc,
-                                   marker_color=SERIES[: len(g)],
-                                   text=[f"{v:.0%}" for v in g.revenue_share],
+            # A city typed by the customer produces a very long tail. The
+            # chart shows what carries the revenue and folds the rest into
+            # one bar; the table below keeps every row.
+            TOP = 8
+            if len(g) > TOP:
+                head = g.head(TOP)
+                tail = g.tail(len(g) - TOP)
+                gc = pd.concat([
+                    head[[dim_, "revenue_lc", "revenue_share"]],
+                    pd.DataFrame([{
+                        dim_: f"Other · {len(tail)}",
+                        "revenue_lc": tail.revenue_lc.sum(),
+                        "revenue_share": tail.revenue_share.sum()}])],
+                    ignore_index=True)
+            else:
+                gc = g[[dim_, "revenue_lc", "revenue_share"]]
+            fig = go.Figure(go.Bar(x=gc[dim_].astype(str), y=gc.revenue_lc,
+                                   marker_color=(SERIES * 3)[: len(gc)],
+                                   text=[f"{v:.0%}" for v in gc.revenue_share],
                                    textposition="outside"))
-            fig.update_layout(height=260, margin=dict(t=26),
-                              title=dict(text=label, font=dict(size=13)),
-                              yaxis_title="Revenue", showlegend=False)
+            # Three charts sit side by side, so they have to be dimensioned
+            # identically. The y-axis title is dropped because in a third of
+            # the page width it costs more room than it explains — the
+            # caption above already says these are revenue.
+            fig.update_layout(
+                height=300, margin=dict(l=4, r=4, t=30, b=70),
+                title=dict(text=label, font=dict(size=13), x=0, xanchor="left"),
+                yaxis=dict(title=None, tickformat=",.0s"),
+                xaxis=dict(tickangle=-40, automargin=True, title=None),
+                showlegend=False, bargap=0.25, autosize=True)
             cols[i].plotly_chart(fig, width="stretch")
         for dim_, label in ve.SEGMENTS.items():
             g = segs[dim_]
@@ -1203,7 +1325,7 @@ with tabs[8]:
                             "products"]
             table(show)
 
-with tabs[9]:
+with tabs[8]:
     if oq.empty:
         st.info("Order quality needs the Shopify API source.")
     else:
@@ -1241,7 +1363,7 @@ with tabs[9]:
                     {"Confirmed": GOOD, "Committed": BLUE,
                      "Potential": WARN}[lab])
 
-with tabs[10]:
+with tabs[9]:
     e = ve.exceptions(base)
     ns = e[e.presence == "sold, not planned"].copy()
     npl = e[e.presence == "planned, not sold"].copy()

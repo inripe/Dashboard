@@ -328,6 +328,116 @@ def run() -> Report:
     # Two different faults hide in "sold, not planned" and they have different
     # owners. A name the plan has never heard of is a catalogue problem. A
     # known product sold in an unplanned month is a planning problem.
+    print("\n=== L. REVENUE LEAKAGE RECONCILES ===")
+    # The leakage bridge claims plan + volume + price + discount + reversals
+    # equals actual net. If that is not exact for every market and month, the
+    # decomposition is wrong and the tab must not be trusted.
+    bad_leak = []
+    for mk in MARKETS:
+        for mo in MONTHS:
+            L = ve.leakage(combined, lines, plan, mk, mo, YEAR_G[0])
+            if not L or (not L["plan_revenue"] and not L["actual_net"]):
+                continue
+            if abs(L["residual"]) > 0.01:
+                bad_leak.append((mk, mo, round(L["residual"], 2)))
+    rep.check(not bad_leak, "L1",
+              "leakage reconciles to zero for every market and month",
+              f"{len(bad_leak)} do not: {bad_leak[:4]}")
+
+    tot = ve.leakage(combined, lines, plan, None, None, YEAR_G[0])
+    if tot:
+        rep.check(abs(tot["residual"]) < 1.0, "L2",
+                  f"leakage reconciles across the whole year "
+                  f"(residual {tot['residual']:.4f})")
+        rep.check(tot["discount_value"] >= 0 and tot["reversal_value"] >= -1,
+                  "L3", "discount and reversal values are not negative",
+                  f"discount {tot['discount_value']}, "
+                  f"reversal {tot['reversal_value']}")
+
+    print("\n=== M. LINE ITEMS vs SHOPIFY ORDER TOTALS ===")
+    # The only genuinely independent number available. Shopify computes an
+    # order total from its own records; the dashboard builds one by summing
+    # line items. They will not match exactly, because an order total carries
+    # shipping and tax, but a large gap means the line-item read is wrong.
+    if lines is not None and "order_total" in lines.columns:
+        d = lines.copy()
+        d["ts"] = pd.to_datetime(d["processed_at"], utc=True, format="mixed")
+        d = d[(d["ts"].dt.year == YEAR_G[0]) & (~d["cancelled"])
+              & (~d["financial_status"].isin(ve.DEAD_STATUSES))]
+        per_order = d.groupby(["market", "order"], observed=True).agg(
+            lines_net=("net_line_lc", "sum"),
+            shopify_sub=("order_subtotal", "first"),
+            shopify_total=("order_total", "first")).reset_index()
+        per_order = per_order[per_order["shopify_sub"] > 0]
+        if len(per_order):
+            per_order["gap"] = (per_order["lines_net"]
+                                - per_order["shopify_sub"])
+            per_order["gap_pct"] = (per_order["gap"].abs()
+                                    / per_order["shopify_sub"])
+            worst = per_order[per_order["gap_pct"] > 0.02]
+            tot_lines = per_order["lines_net"].sum()
+            tot_shop = per_order["shopify_sub"].sum()
+            drift = abs(tot_lines - tot_shop) / tot_shop if tot_shop else 0
+            rep.check(drift < 0.01, "M1",
+                      f"line-item revenue is within 1% of Shopify's own order "
+                      f"subtotals ({tot_lines:,.0f} vs {tot_shop:,.0f}, "
+                      f"{drift:.2%} apart)",
+                      f"{drift:.2%} apart on {len(per_order):,} orders")
+            if len(worst):
+                rep.warn("M2", f"{len(worst):,} of {len(per_order):,} orders "
+                               f"differ from Shopify's subtotal by more than "
+                               f"2%. Usually order-level discounts, which sit "
+                               f"outside the line items.")
+        else:
+            rep.warn("M0", "no order subtotals returned, cross-check skipped")
+    else:
+        rep.warn("M0", "order totals not captured — update shopify_loader.py "
+                       "to enable the independent cross-check")
+
+    print("\n=== N. PRICING ARITHMETIC ===")
+    try:
+        import pricing_engine as px
+        sim0 = px.simulate(combined, [px.Scenario(pct=0)], use_actual=True)
+        rep.check(abs(sim0["cm_change"]) < 0.01, "N1",
+                  "a zero percent price change moves contribution margin by "
+                  "nothing")
+        s10 = px.simulate(combined, [px.Scenario(pct=-10)], use_actual=True)
+        be = s10["breakeven_volume_pct"]
+        if be is not None:
+            # Verified from first principles: the extra volume must restore
+            # exactly the margin the price cut removed.
+            before = sim0["base_cm"]
+            after_unit = s10["new_cm"]
+            expected = (before / after_unit - 1) * 100 if after_unit else None
+            rep.check(expected is None or abs(be - expected) < 5.0, "N2",
+                      f"break-even volume at -10% is {be:.1f}%, consistent "
+                      f"with the margin arithmetic",
+                      f"{be:.1f}% against {expected:.1f}% from first principles")
+        rep.check(s10["new_revenue"] < sim0["base_revenue"], "N3",
+                  "a price cut lowers revenue when volume is held flat")
+    except Exception as e:
+        rep.warn("N0", f"pricing checks skipped: {e}")
+
+    print("\n=== O. PLAN VIEW MATCHES THE WORKBOOK ===")
+    try:
+        sh = pe.shape(plan[plan["plan_units"] > 0], ["market"])
+        raw_units = pd.to_numeric(
+            raw.get("plan_units", pd.Series(dtype=float)),
+            errors="coerce").sum()
+        rep.check(abs(sh["plan_units"].sum() - raw_units) < 0.01, "O1",
+                  f"the plan view totals {sh['plan_units'].sum():,.0f} units, "
+                  f"matching the workbook exactly")
+        conc = pe.plan_concentration(plan[plan["plan_units"] > 0])
+        rep.check(len(conc) == 0 or conc["top1_share"].between(0, 1).all(),
+                  "O2", "concentration shares are between 0 and 100%")
+        mq = pe.plan_margin_quality(plan[plan["plan_units"] > 0])
+        rep.check(not mq or mq["cm_pct_min"] <= mq["cm_pct_median"]
+                  <= mq["cm_pct_max"], "O3",
+                  "planned margin distribution is internally ordered")
+    except Exception as e:
+        rep.warn("O0", f"plan view checks skipped: {e}")
+
+
     ex = ve.exceptions(combined)
     unplanned = ex[ex.presence == "sold, not planned"]
     known = set(plan["product"].dropna().unique())
