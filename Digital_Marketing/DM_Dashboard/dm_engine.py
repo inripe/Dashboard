@@ -1,0 +1,1743 @@
+"""
+INRIPE DM TRACKING — CALCULATION ENGINE v6
+Pure Python/pandas. No streamlit, no plotly. Importable and testable standalone.
+
+Every number rendered by app.py is produced here, so the numbers can be verified
+without running the UI. app.py contains presentation only.
+
+Design rules enforced in this module
+------------------------------------
+R1  Missing is not zero.        -> None propagates; never scored as 0%.
+R2  One basis per number.       -> every ratio carries an explicit `basis` label.
+R3  Polarity is declared.       -> inverse metrics never green-flag an overrun.
+R4  Totals are reconciled.      -> every headline figure is recomputed a second way.
+R5  Coverage gates scoring.     -> thin data greys out, it does not turn red.
+"""
+
+from __future__ import annotations
+
+import calendar
+import datetime as _dt
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+# ─────────────────────────────────────────────────────────────────────
+# SCHEMA CONSTANTS — the vocabulary gap between T2 and T3 lives here only
+# ─────────────────────────────────────────────────────────────────────
+
+ACTUAL_PLATFORMS = ["API", "Meta API", "Meta Ecom"]
+
+# actual platform -> the platform label targets use
+PLATFORM_TO_TARGET = {"API": "API", "Meta API": "Meta", "Meta Ecom": "Meta"}
+
+# Targets are set at Meta level, so the two Meta platforms must roll up before
+# any plan comparison. Consolidated is the default; split is a drill-down.
+CHANNEL_GROUPS = {
+    "API": ["API"],
+    "Meta": ["Meta API", "Meta Ecom"],
+}
+CHANNEL_ORDER = ["API", "Meta"]
+# TikTok carries targets in T3 but has never reported an actual. It is excluded
+# from channel views on purpose; planned_only_channels() reports it so a planned
+# channel with no delivery is visible rather than silently missing.
+
+
+def planned_only_channels(t3, market, month, year) -> list:
+    """Channels that have a plan but no way to report actuals."""
+    d = _scope(t3, None if market in (None, "All") else market, month, year)
+    planned = set(d[d["Metric"] == TGT_ORDERS]["Platform"].unique())
+    return sorted(planned - set(CHANNEL_GROUPS) - {"Total"})
+
+# orders are named differently per platform in T2
+ORDER_METRIC = {"API": "Total Orders", "Meta API": "Orders", "Meta Ecom": "Orders"}
+ORDER_METRICS_ALL = ["Total Orders", "Orders"]
+
+REVENUE = "Revenue (AED)"
+SPEND = "Budget Spent"
+UNITS = "Units"
+MSG_CUST = "Messages to Customers"
+MSG_LEAD = "Messages to Leads"
+MSG_RECV = "Messages Received"
+
+TGT_ORDERS = "Target Orders"
+TGT_REVENUE = "Target Revenue"
+TGT_API_REVENUE = "API Revenue (AED)"
+TGT_UNITS = "Target Units"
+TGT_BUDGET = "Budget"
+TGT_MESSAGES = "Messages Required"
+
+# ── CURRENCY ──────────────────────────────────────────────────────────
+# Revenue is entered in the market's own currency; budget spend is entered in
+# AED. Reporting currency is AED, so revenue converts and spend does not.
+FX_SHEET = "T5. FX Rates"
+REVENUE_METRICS = {REVENUE}
+TARGET_REVENUE_METRICS = {TGT_REVENUE, TGT_API_REVENUE}
+TGT_CR = "CR%"
+
+# RAG thresholds. (green_at, amber_at) as fractions of the comparison basis.
+TH_UP = (0.90, 0.70)        # higher is better: >=90% green, >=70% amber
+TH_DOWN = (1.05, 1.20)      # lower is better:  <=105% green, <=120% amber
+TH_SPEND = (0.90, 1.05, 0.70, 1.15)   # (lo_green, hi_green, lo_amber, hi_amber)
+
+COVERAGE_MIN = 0.90         # below this share of elapsed days, scoring is greyed
+AOV_TOLERANCE = 0.10        # price divergence beyond this trips the integrity flag
+CORR_WEAK, CORR_STRONG = 0.30, 0.60
+
+GREEN, AMBER, RED, GREY, BLUE = "#1A6B4A", "#854F0B", "#A32D2D", "#8A8A8A", "#1B4F8A"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# FORMATTING — R1: None and 0 are different things
+# ─────────────────────────────────────────────────────────────────────
+
+def fmt(n, prefix: str = "", suffix: str = "", dec: int = 0) -> str:
+    """Format a number. None -> 'n/a'. Zero -> '0', never 'n/a'.
+
+    Uses one decimal on K/M so 2,918 and 3,345 do not both render '3K'.
+    """
+    if n is None or (isinstance(n, float) and np.isnan(n)):
+        return "n/a"
+    if abs(n) >= 1_000_000:
+        return f"{prefix}{n / 1_000_000:.2f}M{suffix}"
+    if abs(n) >= 10_000:
+        return f"{prefix}{n / 1_000:.1f}K{suffix}"
+    if abs(n) >= 1_000:
+        return f"{prefix}{n:,.0f}{suffix}"
+    return f"{prefix}{n:,.{dec}f}{suffix}"
+
+
+def pct(a, b) -> Optional[float]:
+    """a as a percentage of b. None if either side is unusable."""
+    if a is None or b in (None, 0) or (isinstance(b, float) and np.isnan(b)):
+        return None
+    return a / b * 100.0
+
+
+def fmt_pct(a, b, dec: int = 0) -> str:
+    v = pct(a, b)
+    return "n/a" if v is None else f"{v:.{dec}f}%"
+
+
+def delta_pct(a, b) -> Optional[float]:
+    """True delta: (a-b)/b. Identical inputs give 0.0, not 100."""
+    if a is None or b in (None, 0):
+        return None
+    return (a - b) / b * 100.0
+
+
+def safe_div(a, b):
+    if a is None or b in (None, 0):
+        return None
+    return a / b
+
+
+# ─────────────────────────────────────────────────────────────────────
+# RAG — R3: polarity is declared, never inferred
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Verdict:
+    label: str
+    color: str
+    ratio: Optional[float]
+    basis: str
+    scored: bool = True
+    note: str = ""
+
+
+def rag(actual, basis_value, direction: str = "up", basis: str = "",
+        gated: bool = False, gate_note: str = "") -> Verdict:
+    """Score `actual` against `basis_value`.
+
+    direction:
+        'up'    higher is better (orders, revenue, ROAS, CR%, basket)
+        'down'  lower is better  (CAC)
+        'spend' band around 100% (budget spent, burn%) - overrun is never green,
+                and heavy underspend is flagged too
+    gated: coverage too thin to score -> grey, no colour verdict (R5)
+    """
+    if gated:
+        return Verdict("n/a", GREY, None, basis, scored=False, note=gate_note)
+    r = pct(actual, basis_value)
+    if r is None:
+        return Verdict("n/a", GREY, None, basis, scored=False, note="no basis")
+
+    if direction == "up":
+        g, a = TH_UP[0] * 100, TH_UP[1] * 100
+        if r >= g:
+            return Verdict(f"{r:.0f}% OK", GREEN, r, basis)
+        if r >= a:
+            return Verdict(f"{r:.0f}% WATCH", AMBER, r, basis)
+        return Verdict(f"{r:.0f}% MISS", RED, r, basis)
+
+    if direction == "down":
+        g, a = TH_DOWN[0] * 100, TH_DOWN[1] * 100
+        if r <= g:
+            return Verdict(f"{r:.0f}% OK", GREEN, r, basis)
+        if r <= a:
+            return Verdict(f"{r:.0f}% WATCH", AMBER, r, basis)
+        return Verdict(f"{r:.0f}% OVER", RED, r, basis)
+
+    if direction == "neutral":
+        # Spend, burn and message volume are inputs, not outcomes. Spending more
+        # is neither good nor bad on its own - CAC and ROAS judge whether it
+        # bought anything. These report magnitude and never a verdict.
+        return Verdict(f"{r:.0f}% of {basis or 'plan'}", GREY, r, basis, scored=False)
+
+    if direction == "spend":
+        lo_g, hi_g, lo_a, hi_a = (TH_SPEND[0] * 100, TH_SPEND[1] * 100,
+                                  TH_SPEND[2] * 100, TH_SPEND[3] * 100)
+        if lo_g <= r <= hi_g:
+            return Verdict(f"{r:.0f}% OK", GREEN, r, basis)
+        if r > hi_a:
+            return Verdict(f"{r:.0f}% OVER", RED, r, basis)
+        if r < lo_a:
+            return Verdict(f"{r:.0f}% UNDER", RED, r, basis)
+        if r > hi_g:
+            return Verdict(f"{r:.0f}% OVER", AMBER, r, basis)
+        return Verdict(f"{r:.0f}% UNDER", AMBER, r, basis)
+
+    raise ValueError(f"unknown direction {direction!r}")
+
+
+# A ratio beyond this cannot be a real result - it is a data entry fault.
+IMPLAUSIBLE_RATIO = 300.0
+
+
+def plausible(actual, ratio, key) -> tuple[bool, str]:
+    """Catch data-entry faults before they are rendered as a verdict.
+
+    An extra zero or a value typed into the wrong column is the most common real
+    error in a hand-maintained workbook, and without this it renders green.
+    """
+    if ratio is not None and ratio > IMPLAUSIBLE_RATIO:
+        return False, f"{ratio:,.0f}% of plan is not a real result"
+    if key in ("cac",) and actual is not None and actual <= 0:
+        return False, "acquisition cost cannot be zero"
+    if key in ("cr_api", "cr_meta") and actual is not None and actual > 100:
+        return False, "conversion rate cannot exceed 100%"
+    if key in ("roas",) and actual is not None and actual > 500:
+        return False, f"{actual:,.0f}x return is not a real result"
+    return True, ""
+
+
+def corr_band(r: Optional[float]) -> str:
+    """R2: one definition of weak/moderate/strong, used everywhere."""
+    if r is None or (isinstance(r, float) and np.isnan(r)):
+        return "insufficient data"
+    a = abs(r)
+    if a < CORR_WEAK:
+        return "weak"
+    if a < CORR_STRONG:
+        return "moderate"
+    return "strong"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LOAD
+# ─────────────────────────────────────────────────────────────────────
+
+def load_fx(path) -> tuple[dict, str]:
+    """Read T5. FX Rates -> {(market, 'YYYY-MM' or None): rate}.
+
+    A missing sheet is not an error - the workbook predates it. Every market
+    falls back to 1.0 and the integrity check reports that revenue was read as
+    already being in AED, so the assumption is visible rather than silent.
+    """
+    try:
+        fx = pd.read_excel(path, sheet_name=FX_SHEET)
+    except Exception:
+        return {}, "no FX sheet"
+    cols = {str(c).strip().lower(): c for c in fx.columns}
+    mc = cols.get("market")
+    rc = next((cols[k] for k in cols if "rate" in k), None)
+    if mc is None or rc is None:
+        return {}, "FX sheet found but Market / Rate columns not recognised"
+    moc = cols.get("month")
+    out = {}
+    for _, row in fx.iterrows():
+        m = row[mc]
+        if pd.isna(m):
+            continue
+        try:
+            rate = float(row[rc])
+        except (TypeError, ValueError):
+            continue
+        if rate <= 0:
+            continue
+        key_month = None
+        if moc is not None and not pd.isna(row[moc]):
+            try:
+                key_month = pd.to_datetime(row[moc]).strftime("%Y-%m")
+            except Exception:
+                key_month = str(row[moc]).strip()
+        out[(str(m).strip(), key_month)] = rate
+    return out, "ok"
+
+
+def fx_rate(fx: dict, market: str, month: int, year: int) -> float:
+    """Month-specific rate first, then the market default, then 1.0.
+
+    A pegged currency never needs a month row. A floating one - EGP - does, and
+    this lets both live in the same table.
+    """
+    if not fx:
+        return 1.0
+    key = f"{year:04d}-{month:02d}"
+    if (market, key) in fx:
+        return fx[(market, key)]
+    if (market, None) in fx:
+        return fx[(market, None)]
+    return 1.0
+
+
+def apply_fx(t2: pd.DataFrame, t3: pd.DataFrame, fx: dict) -> tuple:
+    """Convert revenue to AED. Budget and spend are already AED and untouched.
+
+    The rates used are recorded on the returned frames, so anything downstream
+    can state which conversion was applied rather than assume none was.
+    """
+    if not fx:
+        return t2, t3
+    t2 = t2.copy()
+    mask = t2["Metric"].isin(REVENUE_METRICS)
+    if mask.any():
+        rates = np.array([fx_rate(fx, m, mo, yr) for m, mo, yr in
+                          zip(t2.loc[mask, "Market"], t2.loc[mask, "Month"],
+                              t2.loc[mask, "Year"])])
+        t2.loc[mask, "Value"] = t2.loc[mask, "Value"].to_numpy() * rates
+    t3 = t3.copy()
+    mask = t3["Metric"].isin(TARGET_REVENUE_METRICS)
+    if mask.any():
+        rates = np.array([fx_rate(fx, m, mo, yr) for m, mo, yr in
+                          zip(t3.loc[mask, "Market"], t3.loc[mask, "MonthNum"],
+                              t3.loc[mask, "Year"])])
+        t3.loc[mask, "Value"] = t3.loc[mask, "Value"].to_numpy() * rates
+    t2.attrs["fx"], t3.attrs["fx"] = fx, fx
+    t2.attrs.setdefault("fx_note", "ok")
+    return t2, t3
+
+
+def load_data(path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read T2. Actuals and T3. Targets. Header sits on sheet row 2."""
+    t2 = pd.read_excel(path, sheet_name="T2. Actuals", skiprows=1)
+    t2 = t2[["Date", "Market", "Platform", "Metric", "Value"]].copy()
+    t2["Date"] = pd.to_datetime(t2["Date"], errors="coerce")
+    t2["Value"] = pd.to_numeric(t2["Value"], errors="coerce")
+    t2 = t2.dropna(subset=["Date", "Market", "Platform", "Metric"])
+    # R1: a blank Value is missing, not zero -> drop the row, do not coerce to 0
+    t2 = t2.dropna(subset=["Value"])
+    t2["Market"] = t2["Market"].astype(str)
+    t2["Platform"] = t2["Platform"].astype(str)
+    t2["Metric"] = t2["Metric"].astype(str)
+    t2["Month"] = t2["Date"].dt.month
+    t2["Year"] = t2["Date"].dt.year
+    t2["Day"] = t2["Date"].dt.date
+
+    t3 = pd.read_excel(path, sheet_name="T3. Targets", skiprows=1)
+    t3 = t3[["Market", "Month", "Platform", "Metric", "Target Value"]].copy()
+    t3.columns = ["Market", "Month", "Platform", "Metric", "Value"]
+    t3["Month"] = pd.to_datetime(t3["Month"], errors="coerce")
+    t3["Value"] = pd.to_numeric(t3["Value"], errors="coerce")
+    t3 = t3.dropna(subset=["Month", "Market", "Platform", "Metric"])
+    t3 = t3.dropna(subset=["Value"])
+    for c in ("Market", "Platform", "Metric"):
+        t3[c] = t3[c].astype(str)
+    t3["MonthNum"] = t3["Month"].dt.month
+    t3["Year"] = t3["Month"].dt.year
+
+    try:
+        if hasattr(path, "seek"):
+            path.seek(0)
+        fx, note = load_fx(path)
+    except Exception:
+        fx, note = {}, "FX sheet could not be read"
+    t2, t3 = apply_fx(t2, t3, fx)
+    t2.attrs["fx"], t2.attrs["fx_note"] = fx, note
+    t3.attrs["fx"] = fx
+    return t2, t3
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SCOPED ACCESSORS
+# ─────────────────────────────────────────────────────────────────────
+
+def _scope(df, market=None, month=None, year=None, platform=None):
+    d = df
+    if market and market != "All":
+        d = d[d["Market"] == market]
+    if month is not None:
+        col = "Month" if "Day" in df.columns else "MonthNum"
+        d = d[d[col] == month]
+    if year is not None:
+        d = d[d["Year"] == year]
+    if platform:
+        d = d[d["Platform"] == platform]
+    return d
+
+
+def actual(t2, metric, market=None, month=None, year=None, platform=None,
+           date_range=None) -> Optional[float]:
+    """Sum an actual metric. Returns None when no rows exist (R1)."""
+    d = _scope(t2, market, month, year, platform)
+    if date_range:
+        d = d[(d["Date"] >= pd.Timestamp(date_range[0])) &
+              (d["Date"] <= pd.Timestamp(date_range[1]))]
+    d = d[d["Metric"] == metric] if isinstance(metric, str) else d[d["Metric"].isin(metric)]
+    return None if d.empty else float(d["Value"].sum())
+
+
+def target(t3, metric, market=None, month=None, year=None, platform=None) -> Optional[float]:
+    d = _scope(t3, market, month, year, platform)
+    d = d[d["Metric"] == metric]
+    return None if d.empty else float(d["Value"].sum())
+
+
+def total_orders(t2, **kw) -> Optional[float]:
+    """Orders across all platforms. 'Total Orders' is the API platform's own
+    label, not a grand total - summing both names is correct, not double counting."""
+    return actual(t2, ORDER_METRICS_ALL, **kw)
+
+
+def daily_orders_series(t2, market=None, month=None, year=None) -> pd.Series:
+    d = _scope(t2, market, month, year)
+    d = d[d["Metric"].isin(ORDER_METRICS_ALL)]
+    if d.empty:
+        return pd.Series(dtype=float)
+    return d.groupby("Date")["Value"].sum().sort_index()
+
+
+def daily_metric_series(t2, metric, market=None, month=None, year=None) -> pd.Series:
+    d = _scope(t2, market, month, year)
+    d = d[d["Metric"] == metric]
+    if d.empty:
+        return pd.Series(dtype=float)
+    return d.groupby("Date")["Value"].sum().sort_index()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# COVERAGE — R5
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Coverage:
+    days_in_month: int
+    days_elapsed: int              # distinct calendar dates carrying any entry
+    days_remaining: int
+    per_market: dict = field(default_factory=dict)   # market -> (entries, active)
+
+    def gate(self, market: Optional[str]) -> tuple[bool, str]:
+        """True when this market's data is too thin to score."""
+        if not market or market == "All":
+            return False, ""
+        entries, _active = self.per_market.get(market, (0, 0))
+        if self.days_elapsed == 0:
+            return True, "no data"
+        share = entries / self.days_elapsed
+        if share < COVERAGE_MIN:
+            return True, f"only {entries}/{self.days_elapsed} days reported"
+        return False, ""
+
+
+def build_coverage(t2, month, year) -> Coverage:
+    d = _scope(t2, None, month, year)
+    dim = calendar.monthrange(year, month)[1]
+    elapsed = int(d["Day"].nunique()) if not d.empty else 0
+    per = {}
+    for m in sorted(d["Market"].unique()):
+        dm = d[d["Market"] == m]
+        entries = int(dm["Day"].nunique())
+        od = dm[dm["Metric"].isin(ORDER_METRICS_ALL)].groupby("Day")["Value"].sum()
+        active = int((od > 0).sum())
+        per[m] = (entries, active)
+    return Coverage(dim, elapsed, max(dim - elapsed, 0), per)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TREND / MOMENTUM — R2: one window definition, shared by every panel
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Momentum:
+    recent: Optional[float]
+    prior: Optional[float]
+    window: int
+    label: str          # 'accelerating' | 'slowing' | 'steady' | 'insufficient'
+    arrow: str          # up / down / flat
+
+
+def momentum(series: pd.Series, window: int = 7) -> Momentum:
+    """Last `window` days vs the `window` days before them.
+
+    Deliberately not first-half vs second-half: on a 27-day month that compares
+    a 13-day-old average against a 14-day-old one and reports the state of the
+    month a fortnight ago as if it were current.
+    """
+    v = [x for x in series.values]
+    if len(v) < 4:
+        return Momentum(None, None, window, "insufficient", "flat")
+    w = min(window, len(v) // 2)
+    recent = float(np.mean(v[-w:]))
+    prior = float(np.mean(v[-2 * w:-w]))
+    if prior == 0:
+        return Momentum(recent, prior, w, "insufficient", "flat")
+    if recent > prior * 1.05:
+        return Momentum(recent, prior, w, "accelerating", "up")
+    if recent < prior * 0.95:
+        return Momentum(recent, prior, w, "slowing", "down")
+    return Momentum(recent, prior, w, "steady", "flat")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# THE SNAPSHOT
+# ─────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Line:
+    """One metric row. Carries its own basis and polarity so no consumer
+    has to guess which comparison produced the verdict (R2/R3)."""
+    key: str
+    label: str
+    actual: Optional[float]
+    plan: Optional[float]
+    paced: Optional[float]
+    eom: Optional[float]
+    direction: str
+    basis: str              # 'paced' | 'plan'
+    prefix: str = ""
+    suffix: str = ""
+    dec: int = 0
+    verdict: Optional[Verdict] = None
+    eom_vs_plan: Optional[float] = None
+    trend: str = "flat"
+
+
+@dataclass
+class Snapshot:
+    market: str
+    month: int
+    year: int
+    month_name: str
+    coverage: Coverage
+    lines: list
+    momentum: Momentum
+    integrity: list
+    raw: dict
+
+    def line(self, key) -> Optional[Line]:
+        return next((l for l in self.lines if l.key == key), None)
+
+
+def _pace(plan, cov: Coverage):
+    if plan is None or cov.days_in_month == 0:
+        return None
+    return plan * cov.days_elapsed / cov.days_in_month
+
+
+def _eom(act, cov: Coverage):
+    if act is None or cov.days_elapsed == 0:
+        return None
+    return act / cov.days_elapsed * cov.days_in_month
+
+
+def build_snapshot(t2, t3, market, month, year) -> Snapshot:
+    mkt = None if market in (None, "All") else market
+    cov = build_coverage(t2, month, year)
+    gated, gate_note = cov.gate(mkt)
+
+    A = lambda metric, **kw: actual(t2, metric, market=mkt, month=month, year=year, **kw)
+    T = lambda metric, plat: target(t3, metric, market=mkt, month=month, year=year, platform=plat)
+
+    # ── actuals ──────────────────────────────────────────────────────
+    ord_api = A(ORDER_METRIC["API"], platform="API")
+    ord_meta_api = A(ORDER_METRIC["Meta API"], platform="Meta API")
+    ord_meta_ecom = A(ORDER_METRIC["Meta Ecom"], platform="Meta Ecom")
+    ord_tot = total_orders(t2, market=mkt, month=month, year=year)
+    ord_meta = _nsum(ord_meta_api, ord_meta_ecom)
+
+    units = A(UNITS)
+    rev = A(REVENUE)
+    spend = A(SPEND)
+    rev_api = A(REVENUE, platform="API")
+    spend_api = A(SPEND, platform="API")
+
+    msg_cust = A(MSG_CUST, platform="API")
+    msg_lead = A(MSG_LEAD, platform="API")
+    msg_api = _nsum(msg_cust, msg_lead)
+    msg_recv = A(MSG_RECV, platform="Meta API")
+
+    roas = safe_div(rev, spend)
+    cac = safe_div(spend, ord_tot)
+    basket = safe_div(units, ord_tot)
+    cr_api = pct(ord_api, msg_api)
+    cr_meta = pct(ord_meta_api, msg_recv)
+    aov = safe_div(rev, ord_tot)
+    price_per_unit = safe_div(rev, units)
+
+    # ── targets ──────────────────────────────────────────────────────
+    plan_ord = T(TGT_ORDERS, "Total")
+    plan_units = T(TGT_UNITS, "Total")
+    plan_rev = T(TGT_REVENUE, "Total")
+    plan_bud = T(TGT_BUDGET, "Total")
+    plan_ord_api = T(TGT_ORDERS, "API")
+    plan_bud_api = T(TGT_BUDGET, "API")
+    plan_msg_api = T(TGT_MESSAGES, "API")
+    plan_ord_meta = T(TGT_ORDERS, "Meta")
+    plan_bud_meta = T(TGT_BUDGET, "Meta")
+    plan_rev_api = T(TGT_API_REVENUE, "API")
+
+    plan_roas = safe_div(plan_rev, plan_bud)
+    plan_cac = safe_div(plan_bud, plan_ord)
+    plan_basket = safe_div(plan_units, plan_ord)
+    plan_price = safe_div(plan_rev, plan_units)
+    plan_aov = safe_div(plan_rev, plan_ord)
+    plan_cr_api = pct(plan_ord_api, plan_msg_api)
+
+    burn = pct(spend, plan_bud)
+    burn_expected = pct(cov.days_elapsed, cov.days_in_month)
+
+    daily_series = daily_orders_series(t2, mkt, month, year)
+    mom = momentum(daily_series)
+    daily_actual = safe_div(ord_tot, cov.days_elapsed)
+    daily_target = safe_div(plan_ord, cov.days_in_month)
+    gap = None if (plan_ord is None or ord_tot is None) else plan_ord - ord_tot
+    need_daily = safe_div(gap, cov.days_remaining) if cov.days_remaining > 0 else None
+
+    def mk(key, label, act, plan, direction, basis, prefix="", suffix="", dec=0,
+           paced_override="auto", eom_override="auto"):
+        paced = _pace(plan, cov) if paced_override == "auto" else paced_override
+        em = _eom(act, cov) if eom_override == "auto" else eom_override
+        basis_val = paced if basis == "paced" else plan
+        v = rag(act, basis_val, direction, basis, gated, gate_note)
+        ok, why = plausible(act, v.ratio, key)
+        if not ok:
+            v = Verdict("CHECK DATA", RED, v.ratio, basis, scored=False, note=why)
+        ln = Line(key, label, act, plan, paced, em, direction, basis,
+                  prefix, suffix, dec, v, pct(em, plan))
+        ln.trend = _trend_for(t2, key, mkt, month, year)
+        return ln
+
+    lines = [
+        mk("orders", "Orders", ord_tot, plan_ord, "up", "paced"),
+        mk("units", "Units", units, plan_units, "up", "paced"),
+        mk("revenue", "Revenue", rev, plan_rev, "up", "paced", prefix="AED "),
+        mk("spend", "Budget spent", spend, plan_bud, "neutral", "paced", prefix="AED "),
+        # ratios have no meaningful pace or EOM run-rate: compared to plan directly
+        mk("roas", "ROAS", roas, plan_roas, "up", "plan", suffix="x", dec=1,
+           paced_override=None, eom_override=None),
+        mk("cac", "CAC", cac, plan_cac, "down", "plan", prefix="AED ", dec=1,
+           paced_override=None, eom_override=None),
+        mk("cr_api", "CR% API", cr_api, plan_cr_api, "up", "plan", suffix="%", dec=2,
+           paced_override=None, eom_override=None),
+        mk("cr_meta", "CR% Meta API", cr_meta, None, "up", "plan", suffix="%", dec=2,
+           paced_override=None, eom_override=None),
+        mk("burn", "Budget burn%", burn, burn_expected, "neutral", "plan", suffix="%", dec=0,
+           paced_override=None, eom_override=None),
+        mk("daily_orders", "Daily orders", daily_actual, daily_target, "up", "plan", dec=0,
+           paced_override=None, eom_override=None),
+    ]
+
+    raw = dict(
+        ord_api=ord_api, ord_meta_api=ord_meta_api, ord_meta_ecom=ord_meta_ecom,
+        ord_meta=ord_meta, ord_tot=ord_tot, units=units, rev=rev, spend=spend,
+        rev_api=rev_api, spend_api=spend_api,
+        msg_cust=msg_cust, msg_lead=msg_lead, msg_api=msg_api, msg_recv=msg_recv,
+        roas=roas, cac=cac, basket=basket, aov=aov, price_per_unit=price_per_unit,
+        cr_api=cr_api, cr_meta=cr_meta,
+        plan_ord=plan_ord, plan_units=plan_units, plan_rev=plan_rev, plan_bud=plan_bud,
+        plan_ord_api=plan_ord_api, plan_bud_api=plan_bud_api, plan_msg_api=plan_msg_api,
+        plan_ord_meta=plan_ord_meta, plan_bud_meta=plan_bud_meta, plan_rev_api=plan_rev_api,
+        plan_roas=plan_roas, plan_cac=plan_cac, plan_basket=plan_basket,
+        plan_price=plan_price, plan_aov=plan_aov, plan_cr_api=plan_cr_api,
+        burn=burn, burn_expected=burn_expected,
+        daily_actual=daily_actual, daily_target=daily_target,
+        need_daily=need_daily, gap=gap,
+        roas_api=safe_div(rev_api, spend_api),
+        daily_series=daily_series,
+        gated=gated, gate_note=gate_note,
+    )
+
+    integ = run_integrity(t2, t3, mkt, month, year, raw, cov)
+
+    return Snapshot(market or "All", month, year, calendar.month_abbr[month],
+                    cov, lines, mom, integ, raw)
+
+
+def _nsum(*vals):
+    """Sum that keeps None when every input is missing."""
+    present = [v for v in vals if v is not None]
+    return None if not present else float(sum(present))
+
+
+_TREND_METRIC = {
+    "orders": ORDER_METRICS_ALL, "revenue": REVENUE, "spend": SPEND,
+    "units": UNITS, "daily_orders": ORDER_METRICS_ALL,
+}
+
+
+def _trend_for(t2, key, market, month, year) -> str:
+    """R2: every trend arrow in the app comes from this one function, so the
+    snapshot and the scorecard cannot disagree about which way a metric moved."""
+    met = _TREND_METRIC.get(key)
+    if met is None:
+        return "flat"
+    d = _scope(t2, market, month, year)
+    d = d[d["Metric"].isin(met)] if isinstance(met, list) else d[d["Metric"] == met]
+    if d.empty:
+        return "flat"
+    s = d.groupby("Date")["Value"].sum().sort_index()
+    return momentum(s).arrow
+
+
+# ─────────────────────────────────────────────────────────────────────
+# INTEGRITY CHECKS — R4
+# ─────────────────────────────────────────────────────────────────────
+
+def run_integrity(t2, t3, market, month, year, raw, cov: Coverage) -> list:
+    """Self-audit. Every headline figure is recomputed a second, independent way.
+
+    Deliberately contains no price or AOV test. P1 of the workbook records that the
+    AOV concept was removed from this model: Target Units and Target Revenue are
+    independent entries in P4 with no link between them, so their attainment
+    percentages are not comparable and a divergence between them is not an error."""
+    out = []
+
+    def add(cid, name, ok, detail, severity="high"):
+        out.append({"id": cid, "check": name, "pass": bool(ok),
+                    "detail": detail, "severity": severity})
+
+    # 1. Orders reconcile: platform sum vs daily-series sum
+    ps = _nsum(raw["ord_api"], raw["ord_meta_api"], raw["ord_meta_ecom"])
+    ds = float(raw["daily_series"].sum()) if len(raw["daily_series"]) else None
+    ok = ps is not None and ds is not None and abs(ps - ds) < 0.5
+    add("ORD_RECON", "Orders reconcile (platform sum = daily sum)", ok,
+        f"platform {fmt(ps)} vs daily {fmt(ds)}")
+
+    # 2. Revenue by market sums to total
+    d = _scope(t2, market, month, year)
+    rev_by_mkt = d[d["Metric"] == REVENUE]["Value"].sum()
+    ok = raw["rev"] is not None and abs(rev_by_mkt - raw["rev"]) < 0.5
+    add("REV_RECON", "Revenue reconciles across markets", ok,
+        f"{fmt(rev_by_mkt, 'AED ')} vs {fmt(raw['rev'], 'AED ')}")
+
+    # 3. Coverage
+    ok = cov.days_elapsed <= cov.days_in_month and cov.days_elapsed > 0
+    add("COVERAGE", "Elapsed days within month", ok,
+        f"day {cov.days_elapsed} of {cov.days_in_month}")
+
+    # 4. Per-market reporting completeness
+    thin = [f"{m} {e}/{cov.days_elapsed}d"
+            for m, (e, _a) in cov.per_market.items()
+            if cov.days_elapsed and e / cov.days_elapsed < COVERAGE_MIN]
+    add("MKT_COVERAGE", "All markets reporting full period", not thin,
+        "all markets complete" if not thin else "thin: " + ", ".join(thin),
+        severity="medium")
+
+    # 5. Basket size sanity
+    if None not in (raw["basket"], raw["plan_basket"]):
+        ok = abs(raw["basket"] / raw["plan_basket"] - 1) <= 0.15
+        add("BASKET", "Basket size near plan", ok,
+            f"{raw['basket']:.2f} vs plan {raw['plan_basket']:.2f}", severity="medium")
+
+    # 6. Currency
+    fx = t2.attrs.get("fx", {})
+    act_m0 = set(_scope(t2, None, month, year)["Market"].unique())
+    if not fx:
+        add("FX", "Revenue converted to AED", False,
+            "no FX table - revenue read as if already in AED. Add a "
+            "'T5. FX Rates' sheet with Market, Currency and Rate to AED columns.")
+    else:
+        miss = sorted(m for m in act_m0
+                      if (m, None) not in fx and (m, f"{year:04d}-{month:02d}") not in fx)
+        add("FX", "Revenue converted to AED", not miss,
+            ", ".join(f"{m} x{fx_rate(fx, m, month, year):.4f}" for m in sorted(act_m0))
+            if not miss else "no rate for " + ", ".join(miss) + " - read as 1.0")
+
+    # 6b. Channel targets for every market reporting actuals
+    unplanned = []
+    for m in sorted(act_m0):
+        for ch in CHANNEL_ORDER:
+            o = _chan_orders(t2, m, ch, month, year) or 0
+            s_ = _chan_metric(t2, SPEND, m, ch, month, year) or 0
+            if (o or s_) and target(t3, TGT_ORDERS, m, month, year, ch) is None:
+                unplanned.append(f"{m} {ch} ({o:,.0f} orders)")
+    add("CHANNEL_TARGETS", "Channel targets for every reporting market", not unplanned,
+        "complete" if not unplanned else
+        "reporting without a plan: " + ", ".join(unplanned)
+        + " — shown in the tables but not scored",
+        severity="medium")
+
+    # 7. Targets exist for every market carrying actuals
+    act_mkts = set(_scope(t2, None, month, year)["Market"].unique())
+    tgt_mkts = set(_scope(t3, None, month, year)[
+        lambda x: x["Metric"] == TGT_ORDERS]["Market"].unique())
+    missing = sorted(act_mkts - tgt_mkts)
+    add("TARGETS", "Targets present for all active markets", not missing,
+        "complete" if not missing else "missing: " + ", ".join(missing))
+
+    # 8. Plan internal consistency: channel targets should roll up to Total
+    for m in sorted(act_mkts):
+        tot = target(t3, TGT_ORDERS, m, month, year, "Total")
+        parts = _nsum(*[target(t3, TGT_ORDERS, m, month, year, p)
+                        for p in ("API", "Meta", "TikTok")])
+        if tot and parts:
+            ok = abs(tot - parts) / tot < 0.02
+            add(f"ROLLUP_{m}", f"{m} channel targets roll up to Total", ok,
+                f"channels {fmt(parts)} vs Total {fmt(tot)}", severity="medium")
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# COMMENTARY — every figure below is read from the snapshot, none retyped
+# ─────────────────────────────────────────────────────────────────────
+
+def build_commentary(s: Snapshot, gap: Optional[pd.DataFrame] = None) -> list:
+    """Returns [(severity, text)] where severity is good|warn|risk|info."""
+    r = s.raw
+    cov = s.coverage
+    out = []
+
+    o = s.line("orders")
+    vs_paced = pct(r["ord_tot"], o.paced)
+    if vs_paced is None:
+        out.append(("info", f"{s.market}: no order plan for {s.month_name}."))
+    else:
+        head = (f"Day {cov.days_elapsed} of {cov.days_in_month}: "
+                f"{fmt(r['ord_tot'])} orders, {vs_paced:.0f}% of paced plan. "
+                f"EOM run rate {fmt(o.eom)} = {fmt_pct(o.eom, o.plan)} of plan.")
+        sev = "good" if vs_paced >= 90 else "warn" if vs_paced >= 70 else "risk"
+        plural = s.market == "All"
+        name = "All markets" if plural else s.market
+        verb = "are" if plural else "is"
+        state = ("on track" if sev == "good"
+                 else "behind pace" if sev == "warn" else "significantly behind")
+        out.append((sev, f"{name} {verb} {state} in {s.month_name}. {head}"))
+
+        if r["need_daily"] and r["daily_target"]:
+            above = (r["need_daily"] / r["daily_target"] - 1) * 100   # ABOVE, not "of"
+            out.append(("risk" if above > 50 else "warn",
+                        f"Closing the gap needs {r['need_daily']:.0f} orders/day for the "
+                        f"remaining {cov.days_remaining} days, {above:.0f}% above the "
+                        f"{r['daily_target']:.0f}/day plan rate."))
+
+    m = s.momentum
+    if m.label == "accelerating":
+        out.append(("good", f"Momentum improving: last {m.window} days average "
+                            f"{m.recent:.0f}/day vs {m.prior:.0f}/day in the {m.window} before."))
+    elif m.label == "slowing":
+        out.append(("warn", f"Momentum slowing: last {m.window} days average "
+                            f"{m.recent:.0f}/day vs {m.prior:.0f}/day in the {m.window} before."))
+
+    # channels
+    if r["ord_api"] is not None and r["plan_ord_api"]:
+        v = pct(r["ord_api"], _pace(r["plan_ord_api"], cov))
+        sev = "good" if v >= 90 else "warn" if v >= 70 else "risk"
+        extra = f" ROAS {r['roas_api']:.1f}x." if r["roas_api"] else ""
+        out.append((sev, f"API {fmt(r['ord_api'])} orders, {v:.0f}% of paced plan.{extra}"))
+    if r["ord_meta"] is not None and r["plan_ord_meta"]:
+        v = pct(r["ord_meta"], _pace(r["plan_ord_meta"], cov))
+        sev = "good" if v >= 90 else "warn" if v >= 70 else "risk"
+        out.append((sev, f"Meta {fmt(r['ord_meta'])} orders, {v:.0f}% of paced plan."))
+
+    # budget - never phrased as a win when overspending
+    b = s.line("burn")
+    if b.verdict and b.verdict.ratio is not None:
+        if b.verdict.ratio > 115:
+            out.append(("risk", f"Budget burn {r['burn']:.0f}% of plan at day "
+                                f"{cov.days_elapsed}, ahead of the {r['burn_expected']:.0f}% "
+                                f"expected. Overspending against plan."))
+        elif b.verdict.ratio < 70:
+            out.append(("warn", f"Budget under-deployed: {r['burn']:.0f}% spent vs "
+                                f"{r['burn_expected']:.0f}% expected by day {cov.days_elapsed}."))
+
+    # where the miss actually sits - the first question anyone asks
+    if gap is not None and len(gap):
+        behind = gap[gap["Gap (orders)"] > 0]
+        if len(behind):
+            tot = behind["Gap (orders)"].sum()
+            top = behind.iloc[0]
+            share = top["Gap (orders)"] / tot * 100 if tot > 0 else 0
+            if share > 20:
+                out.append(("risk",
+                            f"Largest single gap is {top['Market']} {top['Channel']}: "
+                            f"{top['Actual']:,} orders against {top['Paced plan']:,} paced, "
+                            f"{share:.0f}% of the shortfall in this selection."))
+
+    # integrity gets the last word, and it is loud
+    for f in s.integrity:
+        if not f["pass"] and f["severity"] == "high":
+            out.append(("risk", f"Data integrity: {f['check']} FAILED - {f['detail']}. "
+                                f"Treat affected figures as unverified."))
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# BREAKDOWN / COMPARISON HELPERS
+# ─────────────────────────────────────────────────────────────────────
+
+def market_channel_breakdown(t2, t3, month, year, cov: Coverage) -> pd.DataFrame:
+    rows = []
+    mkts = sorted(_scope(t2, None, month, year)["Market"].unique())
+    for m in mkts:
+        entries, _ = cov.per_market.get(m, (0, 0))
+        gated = cov.days_elapsed and entries / cov.days_elapsed < COVERAGE_MIN
+        for ch in ACTUAL_PLATFORMS + ["Total"]:
+            if ch == "Total":
+                o = total_orders(t2, market=m, month=month, year=year)
+                rev = actual(t2, REVENUE, market=m, month=month, year=year)
+                sp = actual(t2, SPEND, market=m, month=month, year=year)
+                po = target(t3, TGT_ORDERS, m, month, year, "Total")
+                pb = target(t3, TGT_BUDGET, m, month, year, "Total")
+                cr = None
+            else:
+                o = actual(t2, ORDER_METRIC[ch], market=m, month=month, year=year, platform=ch)
+                rev = actual(t2, REVENUE, market=m, month=month, year=year, platform=ch)
+                sp = actual(t2, SPEND, market=m, month=month, year=year, platform=ch)
+                tp = PLATFORM_TO_TARGET[ch]
+                po = target(t3, TGT_ORDERS, m, month, year, tp)
+                pb = target(t3, TGT_BUDGET, m, month, year, tp)
+                if ch == "API":
+                    msgs = _nsum(actual(t2, MSG_CUST, market=m, month=month, year=year, platform=ch),
+                                 actual(t2, MSG_LEAD, market=m, month=month, year=year, platform=ch))
+                    cr = pct(o, msgs)
+                elif ch == "Meta API":
+                    cr = pct(o, actual(t2, MSG_RECV, market=m, month=month, year=year, platform=ch))
+                else:
+                    cr = None
+                # Meta targets cover both Meta platforms; do not compare one against both
+                if ch in ("Meta API", "Meta Ecom"):
+                    po = None
+                    pb = None
+            if o is None and sp is None:
+                continue
+            paced_o = _pace(po, cov)
+            eom_o = _eom(o, cov)
+            v = rag(o, paced_o, "up", "paced", gated,
+                    f"{entries}/{cov.days_elapsed} days")
+            rows.append({
+                "Market": m, "Channel": ch,
+                "Orders": None if o is None else int(o),
+                "vs Paced": fmt_pct(o, paced_o),
+                "EOM": None if eom_o is None else int(eom_o),
+                "EOM vs Plan": fmt_pct(eom_o, po),
+                "CR%": "n/a" if cr is None else f"{cr:.2f}%",
+                "Revenue": None if rev is None else int(rev),
+                "Spend": None if sp is None else int(sp),
+                "Burn% (vs paced)": fmt_pct(sp, _pace(pb, cov)),
+                "ROAS": "n/a" if safe_div(rev, sp) is None else f"{rev/sp:.1f}x",
+                "CAC": "n/a" if safe_div(sp, o) is None else f"{sp/o:.1f}",
+                "Coverage": f"{entries}/{cov.days_elapsed}d",
+                "Orders RAG": v.label,
+                "Spend RAG": rag(sp, _pace(pb, cov), "spend", "paced", gated,
+                                 f"{entries}/{cov.days_elapsed} days").label,
+            })
+    return pd.DataFrame(rows)
+
+
+def period_compare(t2, market, a_start, a_end, b_start, b_end) -> pd.DataFrame:
+    mkt = None if market in (None, "All") else market
+
+    def agg(metric, s, e, platform=None):
+        return actual(t2, metric, market=mkt, platform=platform, date_range=(s, e))
+
+    def block(s, e):
+        o = agg(ORDER_METRICS_ALL, s, e)
+        rev = agg(REVENUE, s, e)
+        sp = agg(SPEND, s, e)
+        msgs = _nsum(agg(MSG_CUST, s, e, "API"), agg(MSG_LEAD, s, e, "API"))
+        oa = agg(ORDER_METRIC["API"], s, e, "API")
+        days = max((e - s).days + 1, 1)
+        return dict(orders=o, revenue=rev, spend=sp,
+                    roas=safe_div(rev, sp), cac=safe_div(sp, o),
+                    cr=pct(oa, msgs), daily=safe_div(o, days), days=days)
+
+    A, B = block(a_start, a_end), block(b_start, b_end)
+    spec = [("Orders", "orders", "up", "", 0), ("Revenue", "revenue", "up", "AED ", 0),
+            ("Budget spent", "spend", "spend", "AED ", 0), ("ROAS", "roas", "up", "", 1),
+            ("CAC", "cac", "down", "AED ", 1), ("API CR%", "cr", "up", "", 2),
+            ("Orders/day", "daily", "up", "", 1)]
+    rows = []
+    for label, k, direction, pfx, dec in spec:
+        d = delta_pct(A[k], B[k])
+        if d is None:
+            arrow = "n/a"
+        elif abs(d) < 3:
+            arrow = "flat"
+        elif (d > 0) == (direction != "down"):
+            arrow = "better"
+        else:
+            arrow = "worse"
+        rows.append({"Metric": label,
+                     "Period A": fmt(A[k], pfx, dec=dec),
+                     "Period B": fmt(B[k], pfx, dec=dec),
+                     "Δ% (A vs B)": "n/a" if d is None else f"{d:+.1f}%",
+                     "Direction": arrow})
+    return pd.DataFrame(rows)
+
+
+def default_compare_periods(dates: list) -> tuple:
+    """Period A = latest 7 days, Period B = the 7 before. A comparison that
+    defaults both sides to the same range renders the section inert."""
+    if not dates:
+        return None, None, None, None
+    ds = sorted(dates)
+    a_end = ds[-1]
+    a_start = ds[max(len(ds) - 7, 0)]
+    b_end = a_start - _dt.timedelta(days=1)
+    b_start = b_end - _dt.timedelta(days=6)
+    if b_start < ds[0]:
+        b_start = ds[0]
+    return a_start, a_end, b_start, b_end
+
+
+def daily_frame(t2, market, month, year) -> pd.DataFrame:
+    """Per-day frame used by the correlation panels."""
+    mkt = None if market in (None, "All") else market
+    d = _scope(t2, mkt, month, year)
+    if d.empty:
+        return pd.DataFrame()
+    rows = []
+    for day, g in d.groupby("Day"):
+        o = g[g["Metric"].isin(ORDER_METRICS_ALL)]["Value"].sum()
+        oa = g[(g["Platform"] == "API") & (g["Metric"] == ORDER_METRIC["API"])]["Value"].sum()
+        rev = g[g["Metric"] == REVENUE]["Value"].sum()
+        sp = g[g["Metric"] == SPEND]["Value"].sum()
+        msg = g[g["Metric"].isin([MSG_CUST, MSG_LEAD])]["Value"].sum()
+        rows.append(dict(day=day, day_num=day.day, orders=o, api_orders=oa,
+                         revenue=rev, spend=sp, messages=msg,
+                         cac=safe_div(sp, o), roas=safe_div(rev, sp)))
+    return pd.DataFrame(rows).sort_values("day_num")
+
+
+def efficiency_points(t2, t3, month, year, market="All") -> list:
+    """S8 bubble data. CR% here is API orders over API messages - the same
+    definition the scorecard uses. Dividing all-channel orders by API-only
+    messages inflates the rate and is why this panel used to disagree with S1."""
+    mkts = sorted(_scope(t2, None, month, year)["Market"].unique())
+    if market != "All":
+        mkts = [market]
+    out = []
+    for m in mkts:
+        o = total_orders(t2, market=m, month=month, year=year)
+        oa = actual(t2, ORDER_METRIC["API"], market=m, month=month, year=year, platform="API")
+        rev = actual(t2, REVENUE, market=m, month=month, year=year)
+        sp = actual(t2, SPEND, market=m, month=month, year=year)
+        msgs = _nsum(actual(t2, MSG_CUST, market=m, month=month, year=year, platform="API"),
+                     actual(t2, MSG_LEAD, market=m, month=month, year=year, platform="API"))
+        if not sp:
+            continue
+        out.append(dict(market=m, budget=sp, roas=safe_div(rev, sp),
+                        cr_api=pct(oa, msgs), orders=o))
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v7 — CHANNEL HIERARCHY, GAP ATTRIBUTION, GENERIC CHANNEL DRILL-DOWN
+# ─────────────────────────────────────────────────────────────────────
+
+def _chan_orders(t2, market, channel, month, year):
+    """Orders for a channel group, summing its constituent platforms."""
+    return _nsum(*[actual(t2, ORDER_METRIC[p], market=market, month=month,
+                          year=year, platform=p)
+                   for p in CHANNEL_GROUPS[channel]])
+
+
+def _chan_metric(t2, metric, market, channel, month, year):
+    return _nsum(*[actual(t2, metric, market=market, month=month, year=year,
+                          platform=p) for p in CHANNEL_GROUPS[channel]])
+
+
+def gap_contribution(t2, t3, month, year, cov: Coverage) -> pd.DataFrame:
+    """Rank market x channel by how much of the shortfall each one owns.
+
+    The scorecard says the month is behind. This says where, in orders and in
+    AED, so the conversation starts at the cause rather than the symptom.
+    """
+    rows = []
+    markets = sorted(_scope(t2, None, month, year)["Market"].unique())
+    for m in markets:
+        for ch in CHANNEL_ORDER:
+            act = _chan_orders(t2, m, ch, month, year)
+            plan = target(t3, TGT_ORDERS, m, month, year, ch)
+            act = act or 0.0
+            spend_chk = _chan_metric(t2, SPEND, m, ch, month, year) or 0.0
+            if plan is None:
+                # No target for this cell. Dropping it would make real orders
+                # vanish from a table that is supposed to account for all of
+                # them, so it is shown and labelled instead.
+                if not act and not spend_chk:
+                    continue
+                rev0 = _chan_metric(t2, REVENUE, m, ch, month, year) or 0.0
+                rows.append({
+                    "Market": m, "Channel": ch,
+                    "Actual": int(act), "Paced plan": None,
+                    "Gap (orders)": None, "Gap (AED rev)": None,
+                    "vs paced": None, "Spend": int(spend_chk),
+                    "_gap": 0.0, "_noplan": True,
+                })
+                continue
+            paced = _pace(plan, cov)
+            gap = (paced or 0) - act
+            spend = _chan_metric(t2, SPEND, m, ch, month, year) or 0.0
+            rev = _chan_metric(t2, REVENUE, m, ch, month, year) or 0.0
+            aov = safe_div(rev, act) if act else None
+            rows.append({
+                "Market": m, "Channel": ch,
+                "Actual": int(act), "Paced plan": int(paced or 0),
+                "Gap (orders)": int(round(gap)),
+                "Gap (AED rev)": int(round(gap * aov)) if aov else None,
+                "vs paced": pct(act, paced),
+                "Spend": int(spend),
+                "_gap": gap, "_noplan": False,
+            })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    behind = df[df["_gap"] > 0]["_gap"].sum()
+    df["Share of shortfall"] = df["_gap"].apply(
+        lambda g: (g / behind * 100) if behind > 0 and g > 0 else 0.0)
+    df = df.sort_values("_gap", ascending=False).drop(columns=["_gap"])
+    return df
+
+
+def channel_detail(t2, t3, channel, market, month, year, cov: Coverage) -> pd.DataFrame:
+    """Metric detail for any channel. Replaces the hardcoded API section.
+
+    Rows adapt to the channel: messaging metrics only appear where that channel
+    reports them, rather than showing empty rows for channels that never had them.
+    """
+    mkt = None if market in (None, "All") else market
+    plats = CHANNEL_GROUPS[channel]
+
+    orders = _chan_orders(t2, mkt, channel, month, year)
+    rev = _chan_metric(t2, REVENUE, mkt, channel, month, year)
+    spend = _chan_metric(t2, SPEND, mkt, channel, month, year)
+    plan_ord = target(t3, TGT_ORDERS, mkt, month, year, channel)
+    plan_bud = target(t3, TGT_BUDGET, mkt, month, year, channel)
+    plan_msg = target(t3, TGT_MESSAGES, mkt, month, year, channel)
+    plan_rev = (target(t3, TGT_API_REVENUE, mkt, month, year, "API")
+                if channel == "API" else None)
+
+    if channel == "API":
+        msg_out = _nsum(actual(t2, MSG_CUST, market=mkt, month=month, year=year, platform="API"),
+                        actual(t2, MSG_LEAD, market=mkt, month=month, year=year, platform="API"))
+        msg_label = "Messages sent"
+    else:
+        msg_out = actual(t2, MSG_RECV, market=mkt, month=month, year=year, platform="Meta API")
+        msg_label = "Messages received"
+
+    cr = pct(orders, msg_out)
+    plan_cr = pct(plan_ord, plan_msg)
+
+    def row(label, act, plan, direction, pfx="", sfx="", dec=0, paced=True, key=""):
+        p = _pace(plan, cov) if (paced and plan is not None) else None
+        basis = p if p is not None else plan
+        v = rag(act, basis, direction, "paced" if p is not None else "plan")
+        ok, why = plausible(act, v.ratio, key)
+        if not ok:
+            v = Verdict("CHECK DATA", RED, v.ratio, "", scored=False, note=why)
+        return {"Metric": label,
+                "Actual MTD": fmt(act, pfx, sfx, dec),
+                "Plan (month)": fmt(plan, pfx, sfx, dec),
+                f"Paced to D{cov.days_elapsed}": fmt(p, pfx, sfx, dec) if p is not None else "n/a",
+                "vs paced": fmt_pct(act, p) if p is not None else "n/a",
+                "vs full-month plan": fmt_pct(act, plan),
+                "Status": v.label}
+
+    rows = [
+        row("Orders", orders, plan_ord, "up"),
+        row(msg_label, msg_out, plan_msg, "neutral"),
+        row("Conversion rate %", cr, plan_cr, "up", sfx="%", dec=2, paced=False,
+            key="cr_api"),
+        row("Revenue", rev, plan_rev, "up", pfx="AED "),
+        row("Spend", spend, plan_bud, "neutral", pfx="AED "),
+    ]
+    roas = safe_div(rev, spend)
+    cac = safe_div(spend, orders)
+    for label, val, pfx, sfx, dec in [("ROAS", roas, "", "x", 1),
+                                      ("CAC", cac, "AED ", "", 1)]:
+        rows.append({"Metric": label, "Actual MTD": fmt(val, pfx, sfx, dec),
+                     "Plan (month)": "not planned by channel",
+                     f"Paced to D{cov.days_elapsed}": "n/a",
+                     "vs paced": "n/a", "vs full-month plan": "n/a",
+                     "Status": "reference only"})
+
+    if channel == "Meta":
+        for p in plats:
+            po = actual(t2, ORDER_METRIC[p], market=mkt, month=month, year=year, platform=p)
+            ps = actual(t2, SPEND, market=mkt, month=month, year=year, platform=p)
+            pr = actual(t2, REVENUE, market=mkt, month=month, year=year, platform=p)
+            rows.append({
+                "Metric": f"  · {p}",
+                "Actual MTD": f"{fmt(po)} orders",
+                "Plan (month)": "no separate target",
+                f"Paced to D{cov.days_elapsed}": "n/a",
+                "vs paced": "n/a",
+                "vs full-month plan": "n/a",
+                "Status": (f"ROAS {pr/ps:.1f}x" if ps else "no spend")})
+    return pd.DataFrame(rows)
+
+
+def channel_summary(t2, t3, market, month, year, cov: Coverage,
+                    split_meta: bool = False) -> pd.DataFrame:
+    """One row per channel. Meta consolidated by default, split on request."""
+    mkt = None if market in (None, "All") else market
+    rows = []
+    units = CHANNEL_ORDER if not split_meta else ["API", "Meta API", "Meta Ecom"]
+    for ch in units:
+        if ch in CHANNEL_GROUPS:
+            o = _chan_orders(t2, mkt, ch, month, year)
+            rev = _chan_metric(t2, REVENUE, mkt, ch, month, year)
+            sp = _chan_metric(t2, SPEND, mkt, ch, month, year)
+            plan = target(t3, TGT_ORDERS, mkt, month, year, ch)
+            pbud = target(t3, TGT_BUDGET, mkt, month, year, ch)
+        else:
+            o = actual(t2, ORDER_METRIC[ch], market=mkt, month=month, year=year, platform=ch)
+            rev = actual(t2, REVENUE, market=mkt, month=month, year=year, platform=ch)
+            sp = actual(t2, SPEND, market=mkt, month=month, year=year, platform=ch)
+            plan = pbud = None
+        if o is None and sp is None:
+            continue
+        paced = _pace(plan, cov)
+        v = rag(o, paced, "up", "paced")
+        rows.append({
+            "Channel": ch,
+            "Orders": int(o or 0),
+            "Paced plan": int(paced) if paced else None,
+            "vs paced": fmt_pct(o, paced),
+            "EOM": int(_eom(o, cov)) if o else None,
+            "Revenue": int(rev or 0),
+            "Spend": int(sp or 0),
+            "Spend vs paced": fmt_pct(sp, _pace(pbud, cov)),
+            "ROAS": f"{rev/sp:.1f}x" if sp else "n/a",
+            "CAC": f"{sp/o:.1f}" if o else "n/a",
+            "Share of orders": None,
+            "Status": v.label,
+        })
+    if rows:
+        tot = sum(r["Orders"] for r in rows) or 1
+        for r in rows:
+            r["Share of orders"] = f"{r['Orders']/tot*100:.0f}%"
+    return pd.DataFrame(rows)
+
+
+def financial_summary(t2, t3, market, month, year, cov: Coverage) -> pd.DataFrame:
+    """Money only. Kept apart from volume so the two are never scored alike."""
+    mkt = None if market in (None, "All") else market
+    rev = actual(t2, REVENUE, market=mkt, month=month, year=year)
+    sp = actual(t2, SPEND, market=mkt, month=month, year=year)
+    prev = target(t3, TGT_REVENUE, mkt, month, year, "Total")
+    pbud = target(t3, TGT_BUDGET, mkt, month, year, "Total")
+    rows = [
+        ("Revenue", rev, prev, "up", "AED ", 0),
+        ("Budget spent", sp, pbud, "neutral", "AED ", 0),
+        ("Revenue after marketing spend", 
+         (rev - sp) if None not in (rev, sp) else None,
+         (prev - pbud) if None not in (prev, pbud) else None, "up", "AED ", 0),
+        ("ROAS", safe_div(rev, sp), safe_div(prev, pbud), "up", "", 1),
+        ("Spend per order",
+         safe_div(sp, total_orders(t2, market=mkt, month=month, year=year)),
+         safe_div(pbud, target(t3, TGT_ORDERS, mkt, month, year, "Total")),
+         "down", "AED ", 1),
+    ]
+    out = []
+    for label, act, plan, direction, pfx, dec in rows:
+        paced = _pace(plan, cov) if direction != "down" and label not in ("ROAS",) else None
+        basis = paced if paced is not None else plan
+        v = rag(act, basis, direction, "paced" if paced is not None else "plan")
+        out.append({"Metric": label,
+                    "Actual MTD": fmt(act, pfx, dec=dec),
+                    "Plan (month)": fmt(plan, pfx, dec=dec),
+                    f"Paced to D{cov.days_elapsed}": fmt(paced, pfx, dec=dec) if paced else "n/a",
+                    "vs plan": fmt_pct(act, plan),
+                    "Status": v.label})
+    return pd.DataFrame(out)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v7.1 — CAPITAL ALLOCATION VIEW
+# ─────────────────────────────────────────────────────────────────────
+
+# Bands that decide the verdict. The rule lives here, not in a UI comment.
+PACE_AHEAD, PACE_BEHIND = 100.0, 90.0
+COST_CHEAP, COST_DEAR = 1.00, 1.50
+BUDGET_IDLE, BUDGET_HEAVY = 0.70, 1.50
+
+
+def _row_read(vs_pace, used, cost_idx, cac, spend, orders, headroom) -> str:
+    """One sentence describing this cell, built from its own figures.
+
+    Written instead of a verdict word because a code word needs a legend and a
+    rule the reader has to hold in their head, while a sentence carries its own
+    justification.
+    """
+    if None in (vs_pace, used, cost_idx):
+        return "No channel plan to compare against."
+
+    if cost_idx < 1:
+        cost = f"costing {(1 - cost_idx) * 100:.0f}% less than planned"
+    elif cost_idx < 1.1:
+        cost = "costing about what was planned"
+    elif cost_idx < 2:
+        cost = f"costing {(cost_idx - 1) * 100:.0f}% more than planned"
+    else:
+        cost = f"costing {cost_idx:.1f}x what was planned"
+
+    # the case worth naming: behind pace only because the money never went out
+    if used < 70 and vs_pace < 90 and cost_idx < 1.3 and headroom and headroom > 0:
+        return (f"Behind because AED {headroom:,.0f} never went out, not because it "
+                f"stopped working — {cost}.")
+    if used < 70 and cost_idx <= 1:
+        return f"{cost.capitalize()}, and only {used:.0f}% of its budget has gone out."
+    if cost_idx >= 1.5 and vs_pace < 90:
+        return (f"Spent {used:.0f}% of budget {cost} and returned {vs_pace:.0f}% "
+                f"of paced orders.")
+    if used > 150:
+        return f"{vs_pace:.0f}% of paced orders, but {used:.0f}% of budget spent, {cost}."
+    if vs_pace < 90:
+        return f"{vs_pace:.0f}% of paced orders on {used:.0f}% of budget, {cost}."
+    return f"On pace at {vs_pace:.0f}%, {cost}."
+
+
+def allocation_view(t2, t3, month, year, cov: Coverage,
+                    market: str = "All") -> pd.DataFrame:
+    """Market x channel ranked by what to do with the next dirham.
+
+    Pace alone says where the miss is, not what to do. Three readings together
+    say that: how much of the paced budget has actually gone out, what each
+    order cost against what it was costed at, and how far off pace it is.
+
+    Without budget utilisation two cells at the same pace look identical when
+    they need opposite action - one has not spent its money, the other has spent
+    it and has nothing to show.
+    """
+    rows = []
+    mkts = sorted(_scope(t2, None, month, year)["Market"].unique())
+    if market != "All":
+        mkts = [m for m in mkts if m == market]
+    for m in mkts:
+        for ch in CHANNEL_ORDER:
+            act = _chan_orders(t2, m, ch, month, year) or 0.0
+            spend = _chan_metric(t2, SPEND, m, ch, month, year) or 0.0
+            rev = _chan_metric(t2, REVENUE, m, ch, month, year) or 0.0
+            plan_o = target(t3, TGT_ORDERS, m, month, year, ch)
+            plan_b = target(t3, TGT_BUDGET, m, month, year, ch)
+            if plan_o is None:
+                if not act and not spend:
+                    continue
+                rows.append({
+                    "Market": m, "Channel": ch, "Orders": act, "vs paced": None,
+                    "Spend": spend, "Budget used": None, "Headroom": None,
+                    "CAC": safe_div(spend, act), "Plan CAC": None,
+                    "Cost index": None, "ROAS": safe_div(rev, spend),
+                    "Read": "Reporting actuals with no plan to compare against.",
+                    "Verdict": "no plan", "_why": "no target set for this channel",
+                    "_rank": 9,
+                })
+                continue
+            paced_o, paced_b = _pace(plan_o, cov), _pace(plan_b, cov)
+            vs_pace = pct(act, paced_o)
+            used = pct(spend, paced_b)
+            cac = safe_div(spend, act)
+            plan_cac = safe_div(plan_b, plan_o)
+            cost_idx = safe_div(cac, plan_cac)
+            headroom = (paced_b - spend) if paced_b is not None else None
+
+            read = _row_read(vs_pace, used, cost_idx, cac, spend, act, headroom)
+            if vs_pace is None or cost_idx is None or used is None:
+                verdict, why = "n/a", "no plan to compare against"
+            elif cost_idx <= COST_CHEAP and (used < BUDGET_IDLE * 100
+                                             or vs_pace >= PACE_AHEAD):
+                verdict, why = ("SCALE",
+                                "buying below planned cost with budget still unspent"
+                                if used < BUDGET_IDLE * 100
+                                else "ahead of pace and below planned cost")
+            elif used < BUDGET_IDLE * 100 and cost_idx <= 1.3:
+                verdict, why = ("DEPLOY",
+                                "behind pace because the budget has not gone out, "
+                                "not because it stopped working")
+            elif cost_idx >= COST_DEAR and vs_pace < PACE_BEHIND:
+                verdict, why = ("CUT",
+                                "budget spent, orders not delivered, cost well above plan")
+            elif cost_idx >= 1.3 and used > BUDGET_HEAVY * 100:
+                verdict, why = ("RESTRAIN",
+                                "delivering, but overspending to buy above-plan cost volume")
+            elif cost_idx >= COST_DEAR:
+                verdict, why = "WATCH", "delivering, but well above planned cost"
+            elif vs_pace < PACE_BEHIND:
+                verdict, why = "FIX", "spending to plan but not converting it into orders"
+            else:
+                verdict, why = "HOLD", "on pace at roughly planned cost"
+
+            rows.append({
+                "Market": m, "Channel": ch,
+                # Full precision kept here; rounding belongs to the display
+                # layer. Truncating per cell made six cells drift from the total.
+                "Orders": act, "vs paced": vs_pace,
+                "Spend": spend, "Budget used": used,
+                "Headroom": headroom,
+                "CAC": cac, "Plan CAC": plan_cac, "Cost index": cost_idx,
+                "ROAS": safe_div(rev, spend),
+                "Read": read,
+                "Verdict": verdict, "_why": why,
+                "_rank": {"SCALE": 0, "DEPLOY": 1, "HOLD": 2, "FIX": 3,
+                          "RESTRAIN": 4, "WATCH": 5, "CUT": 6}.get(verdict, 7),
+            })
+    if not rows:
+        return pd.DataFrame()
+    # Sorted by what an order actually costs, cheapest first, because that is the
+    # allocation question. Cost index answers a different one - whether the
+    # channel is performing against its own plan - and stays as a column.
+    #
+    # Only a missing or zero CAC sorts last - a channel with orders but no spend
+    # recorded shows a CAC of zero, which would otherwise take the top of the
+    # table. Whether a plan exists is irrelevant to what an order costs, so an
+    # unplanned cell with real spend ranks on its own number like any other.
+    df = pd.DataFrame(rows)
+    df["_sortable"] = [v if (v and v > 0) else float("inf") for v in df["CAC"]]
+    df = df.sort_values("_sortable").drop(columns=["_sortable"]).reset_index(drop=True)
+    # Only worth saying when there is something to be cheaper than.
+    real = df[df["CAC"].fillna(0) > 0]
+    if len(real) > 1:
+        i = real.index[0]
+        df.loc[i, "Read"] = "Cheapest orders here. " + df.loc[i, "Read"]
+    return df
+
+
+def reallocation_estimate(alloc: pd.DataFrame) -> Optional[dict]:
+    """What the money currently in CUT cells would buy at the best available cost.
+
+    A ceiling, not a forecast: it assumes the cheap channel absorbs the budget at
+    its current cost, which no channel does indefinitely.
+    """
+    if alloc.empty:
+        return None
+    cut = alloc[alloc["Verdict"].isin(["CUT", "RESTRAIN"])]
+    dest = alloc[alloc["Verdict"] == "SCALE"]
+    if cut.empty or dest.empty:
+        return None
+    freed = float(cut["Spend"].sum())
+    best = dest.loc[dest["CAC"].idxmin()]
+    if not best["CAC"] or best["CAC"] <= 0:
+        return None
+    current = int(cut["Orders"].sum())
+    would_buy = int(freed / best["CAC"])
+    idle = float(alloc[alloc["Headroom"] > 0]["Headroom"].sum())
+    return {
+        "idle": idle,
+        "freed": freed,
+        "from": ", ".join(f"{r['Market']} {r['Channel']}" for _, r in cut.iterrows()),
+        "to": f"{best['Market']} {best['Channel']}",
+        "to_cac": float(best["CAC"]),
+        "current_orders": current,
+        "would_buy": would_buy,
+        "delta": would_buy - current,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v7.3 — PERIOD COMPARISON
+# ─────────────────────────────────────────────────────────────────────
+
+# How each metric should be read when it moves. Spend and message volume are
+# inputs: they report magnitude and never a verdict.
+CMP_POLARITY = {
+    "orders": "up", "units": "up", "revenue": "up", "roas": "up",
+    "cr": "up", "aov": "up", "daily": "up",
+    "cac": "down",
+    "spend": "neutral", "messages": "neutral",
+}
+CMP_LABEL = {
+    "orders": "Orders", "units": "Units", "revenue": "Revenue", "spend": "Spend",
+    "cac": "CAC", "roas": "ROAS", "aov": "AOV", "cr": "CR%",
+    "daily": "Orders/day", "messages": "Messages",
+}
+CMP_FMT = {
+    "orders": ("", "", 0), "units": ("", "", 0), "revenue": ("AED ", "", 0),
+    "spend": ("AED ", "", 0), "cac": ("AED ", "", 1), "roas": ("", "x", 1),
+    "aov": ("AED ", "", 0), "cr": ("", "%", 2), "daily": ("", "", 0),
+    "messages": ("", "", 0),
+}
+
+
+def _platforms_for(channels, split_meta: bool) -> Optional[list]:
+    """Resolve a channel selection to the platform names T2 actually uses."""
+    if not channels:
+        return None
+    out = []
+    for c in channels:
+        if c in CHANNEL_GROUPS and not split_meta:
+            out += CHANNEL_GROUPS[c]
+        elif c in CHANNEL_GROUPS:
+            out += CHANNEL_GROUPS[c]
+        else:
+            out.append(c)
+    return sorted(set(out))
+
+
+def cmp_block(t2, start, end, markets=None, platforms=None) -> dict:
+    """Every comparison metric for one window, one scope.
+
+    CR% is deliberately channel-aware: API converts messages sent, Meta converts
+    messages received. Mixing the two produces a rate that means nothing.
+    """
+    d = t2[(t2["Date"] >= pd.Timestamp(start)) & (t2["Date"] <= pd.Timestamp(end))]
+    if markets:
+        d = d[d["Market"].isin(markets)]
+    if platforms:
+        d = d[d["Platform"].isin(platforms)]
+
+    orders = d[d["Metric"].isin(ORDER_METRICS_ALL)]["Value"].sum()
+    units = d[d["Metric"] == UNITS]["Value"].sum()
+    rev = d[d["Metric"] == REVENUE]["Value"].sum()
+    spend = d[d["Metric"] == SPEND]["Value"].sum()
+
+    api_msg = d[(d["Platform"] == "API")
+                & (d["Metric"].isin([MSG_CUST, MSG_LEAD]))]["Value"].sum()
+    meta_msg = d[(d["Platform"] == "Meta API") & (d["Metric"] == MSG_RECV)]["Value"].sum()
+    api_ord = d[(d["Platform"] == "API") & (d["Metric"] == "Total Orders")]["Value"].sum()
+    meta_ord = d[(d["Platform"] == "Meta API") & (d["Metric"] == "Orders")]["Value"].sum()
+
+    msgs = api_msg + meta_msg
+    conv = api_ord + meta_ord
+    days = max((pd.Timestamp(end) - pd.Timestamp(start)).days + 1, 1)
+
+    return {
+        "orders": orders, "units": units, "revenue": rev, "spend": spend,
+        "messages": msgs,
+        "roas": safe_div(rev, spend), "cac": safe_div(spend, orders),
+        "aov": safe_div(rev, orders), "cr": pct(conv, msgs),
+        "daily": safe_div(orders, days), "days": days,
+        "reported_days": int(d["Day"].nunique()) if not d.empty else 0,
+    }
+
+
+def cmp_change(a, b, key) -> dict:
+    """Delta plus how to read it. 'new' when B is nothing and A is something."""
+    va, vb = a.get(key), b.get(key)
+    pol = CMP_POLARITY.get(key, "up")
+    if va is None and vb is None:
+        return {"delta": None, "pct": None, "read": "n/a", "polarity": pol}
+    va = va or 0.0
+    if not vb:
+        return {"delta": va, "pct": None,
+                "read": "new" if va else "n/a", "polarity": pol}
+    d = va - vb
+    p = d / vb * 100
+    if pol == "neutral":
+        read = "higher" if p > 1 else "lower" if p < -1 else "flat"
+    elif abs(p) < 1:
+        read = "flat"
+    else:
+        good = (p > 0) if pol == "up" else (p < 0)
+        read = "better" if good else "worse"
+    return {"delta": d, "pct": p, "read": read, "polarity": pol}
+
+
+CMP_HEADLINE_KEYS = ["orders", "units", "revenue", "spend",
+                     "cac", "roas", "aov", "cr", "daily"]
+
+
+def cmp_headline(t2, a_range, b_range, markets=None, channels=None,
+                 split_meta=False) -> pd.DataFrame:
+    plats = _platforms_for(channels, split_meta)
+    A = cmp_block(t2, *a_range, markets, plats)
+    B = cmp_block(t2, *b_range, markets, plats)
+    rows = []
+    for k in CMP_HEADLINE_KEYS:
+        pfx, sfx, dec = CMP_FMT[k]
+        ch = cmp_change(A, B, k)
+        rows.append({
+            "Metric": CMP_LABEL[k],
+            "Period A": fmt(A[k], pfx, sfx, dec),
+            "Period B": fmt(B[k], pfx, sfx, dec),
+            "Change": ("n/a" if ch["delta"] is None
+                       else fmt(ch["delta"], pfx, sfx, dec) if ch["pct"] is not None
+                       else "new"),
+            "Δ%": "n/a" if ch["pct"] is None else f"{ch['pct']:+.1f}%",
+            "Direction": ch["read"],
+        })
+    return pd.DataFrame(rows)
+
+
+def cmp_hierarchy(t2, a_range, b_range, markets=None, channels=None,
+                  split_meta=False) -> pd.DataFrame:
+    """Group, then each market, then each channel inside it.
+
+    Markets are ordered by how much they moved, so whatever drove the change is
+    at the top rather than wherever the alphabet puts it.
+    """
+    mkts = markets or sorted(t2["Market"].unique())
+    units = (["API", "Meta API", "Meta Ecom"] if split_meta else list(CHANNEL_ORDER))
+    if channels:
+        chosen = set(channels)
+        units = [u for u in units
+                 if u in chosen
+                 or any(u in CHANNEL_GROUPS.get(c, []) for c in chosen)]
+
+    def row(label, level, mkt_scope, plats):
+        A = cmp_block(t2, *a_range, mkt_scope, plats)
+        B = cmp_block(t2, *b_range, mkt_scope, plats)
+        o = cmp_change(A, B, "orders")
+        return {
+            "_level": level, "Scope": label,
+            "A orders": A["orders"], "B orders": B["orders"],
+            "Δ orders": o["delta"],
+            "Δ%": o["pct"], "_read": o["read"],
+            "A revenue": A["revenue"], "B revenue": B["revenue"],
+            "A spend": A["spend"], "B spend": B["spend"],
+            "A CAC": A["cac"], "B CAC": B["cac"],
+            "A ROAS": A["roas"], "B ROAS": B["roas"],
+            "A AOV": A["aov"], "B AOV": B["aov"],
+            "_abs": abs(o["delta"] or 0),
+        }
+
+    all_plats = _platforms_for(units, split_meta)
+    out = [row("All markets", 0, mkts, all_plats)]
+    mrows = [row(m, 1, [m], all_plats) for m in mkts]
+    mrows.sort(key=lambda r: -r["_abs"])
+    for mr in mrows:
+        out.append(mr)
+        for u in units:
+            plats = CHANNEL_GROUPS[u] if u in CHANNEL_GROUPS else [u]
+            cr = row(u, 2, [mr["Scope"]], plats)
+            if cr["A orders"] or cr["B orders"] or cr["A spend"] or cr["B spend"]:
+                out.append(cr)
+    df = pd.DataFrame(out)
+    total = df[df["_level"] == 1]["_abs"].sum()
+    df["Share of change"] = df.apply(
+        lambda r: (r["_abs"] / total * 100) if total and r["_level"] == 1 else None, axis=1)
+    return df
+
+
+def cmp_daily(t2, a_range, b_range, markets=None, channels=None,
+              split_meta=False) -> pd.DataFrame:
+    """Both periods on a shared day index, so day 1 of A sits against day 1 of B.
+
+    Aligning on calendar date would leave the shorter period padded with blanks
+    and make two ranges of different length impossible to read together.
+    """
+    plats = _platforms_for(channels, split_meta)
+
+    def series(rng):
+        d = t2[(t2["Date"] >= pd.Timestamp(rng[0])) & (t2["Date"] <= pd.Timestamp(rng[1]))]
+        if markets:
+            d = d[d["Market"].isin(markets)]
+        if plats:
+            d = d[d["Platform"].isin(plats)]
+        d = d[d["Metric"].isin(ORDER_METRICS_ALL)]
+        s = d.groupby("Date")["Value"].sum()
+        idx = pd.date_range(rng[0], rng[1], freq="D")
+        return s.reindex(idx, fill_value=0.0)
+
+    sa, sb = series(a_range), series(b_range)
+    n = max(len(sa), len(sb))
+    return pd.DataFrame({
+        "Day": [f"d{i+1}" for i in range(n)],
+        "Period A": [float(sa.iloc[i]) if i < len(sa) else None for i in range(n)],
+        "Period B": [float(sb.iloc[i]) if i < len(sb) else None for i in range(n)],
+        "A date": [sa.index[i].strftime("%d %b") if i < len(sa) else "" for i in range(n)],
+        "B date": [sb.index[i].strftime("%d %b") if i < len(sb) else "" for i in range(n)],
+    })
+
+
+def cmp_summary(t2, a_range, b_range, markets=None, channels=None,
+                split_meta=False) -> list:
+    """Sentences built from the deltas. Returns [(severity, text)]."""
+    plats = _platforms_for(channels, split_meta)
+    A = cmp_block(t2, *a_range, markets, plats)
+    B = cmp_block(t2, *b_range, markets, plats)
+    out = []
+
+    o, s = cmp_change(A, B, "orders"), cmp_change(A, B, "spend")
+    if o["pct"] is None:
+        out.append(("info", "No orders in period B, so there is nothing to compare against."))
+        return out
+
+    sev = "good" if o["pct"] > 1 else "risk" if o["pct"] < -1 else "info"
+    spend_txt = (f" on {abs(s['pct']):.0f}% {'more' if s['pct'] > 0 else 'less'} spend"
+                 if s["pct"] is not None and abs(s["pct"]) >= 1 else " on flat spend")
+    if abs(o["pct"]) < 1:
+        # A change of under a percent is noise. Saying "fell 0%" reads as a
+        # finding when nothing happened.
+        out.append((sev, f"Orders held flat at {A['orders']:,.0f}{spend_txt}."))
+    else:
+        out.append((sev, f"Orders {'rose' if o['pct'] > 0 else 'fell'} "
+                         f"{abs(o['pct']):.0f}% to {A['orders']:,.0f}{spend_txt}."))
+
+    cac, roas = cmp_change(A, B, "cac"), cmp_change(A, B, "roas")
+    if cac["pct"] is not None and roas["pct"] is not None:
+        if abs(cac["pct"]) < 1 and abs(roas["pct"]) < 1:
+            out.append(("info", f"Efficiency was unchanged: CAC "
+                                f"{fmt(A['cac'], 'AED ', dec=1)}, "
+                                f"ROAS {A['roas']:.1f}x."))
+        else:
+            out.append(("good" if cac["read"] == "better" else "warn",
+                        f"CAC {'fell' if cac['pct'] < 0 else 'rose'} from "
+                        f"{fmt(B['cac'], 'AED ', dec=1)} to {fmt(A['cac'], 'AED ', dec=1)} "
+                        f"and ROAS moved {B['roas']:.1f}x to {A['roas']:.1f}x."))
+
+    # which market moved it
+    mkts = markets or sorted(t2["Market"].unique())
+    if len(mkts) > 1:
+        moves = []
+        for m in mkts:
+            a_, b_ = cmp_block(t2, *a_range, [m], plats), cmp_block(t2, *b_range, [m], plats)
+            moves.append((m, (a_["orders"] or 0) - (b_["orders"] or 0)))
+        tot = sum(abs(x[1]) for x in moves)
+        moves.sort(key=lambda x: -abs(x[1]))
+        if tot and moves and abs(moves[0][1]) > 0:
+            top, d = moves[0]
+            out.append(("info", f"{top} accounts for {abs(d)/tot*100:.0f}% of the movement, "
+                                f"{'up' if d > 0 else 'down'} {abs(d):,.0f} orders."))
+
+    # a channel moving against the group is worth naming
+    if split_meta:
+        for p in ("Meta API", "Meta Ecom"):
+            a_, b_ = cmp_block(t2, *a_range, mkts, [p]), cmp_block(t2, *b_range, mkts, [p])
+            c = cmp_change(a_, b_, "orders")
+            if c["pct"] is not None and (c["pct"] < 0) != (o["pct"] < 0) and abs(c["pct"]) > 10:
+                out.append(("warn", f"{p} moved the other way: "
+                                    f"{c['pct']:+.0f}% to {a_['orders']:,.0f} orders, "
+                                    f"CAC {fmt(b_['cac'], 'AED ', dec=1)} to "
+                                    f"{fmt(a_['cac'], 'AED ', dec=1)}."))
+
+    # thin data invalidates the comparison before any of the above matters
+    for lbl, blk in (("A", A), ("B", B)):
+        if blk["reported_days"] < blk["days"]:
+            out.append(("warn", f"Period {lbl} has {blk['reported_days']} days of data "
+                                f"across a {blk['days']}-day window — the comparison is "
+                                f"not like for like."))
+    return out
+
+
+def cmp_presets(dates: list) -> dict:
+    """Named period pairs. Values are (a_start, a_end, b_start, b_end)."""
+    if not dates:
+        return {}
+    ds = sorted(dates)
+    last = ds[-1]
+    out = {}
+    if len(ds) >= 8:
+        a_s = last - _dt.timedelta(days=6)
+        b_e = a_s - _dt.timedelta(days=1)
+        out["Last 7 days vs prior 7"] = (a_s, last, b_e - _dt.timedelta(days=6), b_e)
+    if len(ds) >= 4:
+        n = min(len(ds) // 2, 14)
+        a_s = last - _dt.timedelta(days=n - 1)
+        b_e = a_s - _dt.timedelta(days=1)
+        out[f"Last {n} days vs prior {n}"] = (a_s, last, b_e - _dt.timedelta(days=n - 1), b_e)
+    m_start = last.replace(day=1)
+    prev_end = m_start - _dt.timedelta(days=1)
+    if prev_end >= ds[0]:
+        out["This month vs last month"] = (m_start, last, prev_end.replace(day=1), prev_end)
+        try:
+            same = prev_end.replace(day=min(last.day, prev_end.day))
+            out["Same period last month"] = (m_start, last, prev_end.replace(day=1), same)
+        except ValueError:
+            pass
+    return out
