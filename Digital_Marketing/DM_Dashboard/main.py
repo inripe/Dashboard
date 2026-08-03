@@ -30,7 +30,8 @@ import streamlit as st
 import dm_engine as E
 import sharepoint_loader as SP
 
-st.set_page_config(page_title="Inripe DM 2026", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Dashboard | Digital Marketing Performance",
+                   page_icon="📊", layout="wide")
 
 LOCAL_FALLBACKS = ["DM_Model_2026_V3_5.xlsx", "DM_Model_2026_V3.xlsx"]
 
@@ -288,7 +289,8 @@ if pw and not st.session_state.get("auth"):
     st.markdown("<div style='height:60px'></div>", unsafe_allow_html=True)
     _, mid, _ = st.columns([1, 1.2, 1])
     with mid:
-        st.markdown("<div class='hero'><div><h1>📊 Inripe DM 2026</h1>"
+        st.markdown("<div class='hero'><div>"
+                    "<h1>📊 Dashboard | Digital Marketing Performance</h1>"
                     "<p>Internal dashboard. Sign in to continue.</p></div></div>",
                     unsafe_allow_html=True)
         entry = st.text_input("Password", type="password",
@@ -330,7 +332,7 @@ if not periods:
 stamp = (META["modified"].replace("T", " ")[:16] + " UTC") if META.get("modified") else "local file"
 who = META.get("modified_by")
 st.markdown(f"""<div class='hero'>
-<div><h1>📊 Inripe DM 2026</h1>
+<div><h1>📊 Dashboard | Digital Marketing Performance</h1>
 <p>Plan, actuals and allocation across markets and channels</p></div>
 <div class='meta'>Workbook updated <b style='color:white'>{stamp}</b>{f'<br>by {who}' if who else ''}</div>
 </div>""", unsafe_allow_html=True)
@@ -1162,5 +1164,22 @@ with T_DATA:
 
 src = (f"SharePoint · {META.get('name')}" if not META.get("local")
        else f"local file · {META.get('name')}")
-st.caption(f"Source: {src} · {sel_p} · day {COV.days_elapsed} of {COV.days_in_month} · "
-           f"engine V2 · refreshes every 60s")
+period_txt = (sel_p if COV.days_remaining == 0 or COV.days_elapsed == 0
+              else f"{sel_p} · day {COV.days_elapsed} of {COV.days_in_month}")
+st.markdown(
+    f"<div style='margin:34px -18px 0;padding:16px 18px;background:#1B4F8A;"
+    f"border-radius:12px 12px 0 0;color:#BDD7F5;font-size:11.5px;"
+    f"line-height:1.75'>"
+    f"<div style='color:#FFFFFF;font-weight:600;font-size:12.5px;"
+    f"margin-bottom:4px'>© {dt.date.today().year} Inripe. All rights reserved."
+    f"</div>"
+    f"Confidential and proprietary. This dashboard and the data within it are the "
+    f"property of Inripe and are provided for internal use only. Copying, "
+    f"exporting, screenshotting or distributing any part of it outside the company "
+    f"is a breach of company policy and of the terms under which access was granted."
+    f"</div>"
+    f"<div style='margin:0 -18px;padding:9px 18px 12px;background:#163F6E;"
+    f"border-radius:0 0 12px 12px;color:#8FB6E0;font-size:11px'>"
+    f"Source: {src} &nbsp;·&nbsp; {period_txt} &nbsp;·&nbsp; engine V2 "
+    f"&nbsp;·&nbsp; refreshes every 60s</div>",
+    unsafe_allow_html=True)
