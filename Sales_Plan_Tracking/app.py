@@ -1,15 +1,13 @@
 """Inripe — Sales performance.
 
-Presentation only. Every number comes from plan_engine or variance_engine.
-No calculation happens in this file.
+Presentation only. Every figure comes from metrics_engine, which holds the
+definitions, so a number cannot mean two things on two screens.
 
-The executive block is generated, not written: findings are ranked by money at
-stake, so the top card is the thing that costs the most this month. Each tab
-carries its own one-line read for the same reason.
-
-One market reports in its own currency. Across markets everything consolidates
-to AED using the plan workbook's rates, because SAR, QAR, AED and EGP cannot
-be added.
+Two levels. The management screen is five cards on one page: orders, units
+and revenue as a chain, then margin as the outcome. Each card opens a
+drill-down that explains it, in four blocks that are always in the same
+order — where the gap went, the cross-tab, the dimensional split, and the
+structural view. A manager learns the shape once.
 """
 
 from __future__ import annotations
@@ -21,21 +19,19 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
+import metrics_engine as me
 import plan_engine as pe
-import pricing_engine as px
 import variance_engine as ve
-from data_loader import load_plan, load_actuals_any, load_previous_plan
+from data_loader import load_plan, load_actuals_any
 
 YEAR = 2026
-MARKETS = ["UAE", "QA", "KSA", "EG"]
+MARKETS = me.MARKETS
+MONTHS = me.MONTHS
 ALL_MK, YTD = "All markets", "Full year"
-MONTHS = pe.MONTHS
-BLUE, ORANGE, TEAL, YELLOW, PINK, GREY = (
-    "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#888780",
-)
-SERIES = [BLUE, ORANGE, TEAL, YELLOW, PINK, GREY]
-GOOD, WARN, BAD, NEUT = "#1baf7a", "#eda100", "#e0553a", "#c2c0b8"
-SEV = {"bad": BAD, "warn": YELLOW, "good": GOOD}
+
+BLUE, ORANGE, TEAL, AMBER, GREY = "#378ADD", "#D85A30", "#1D9E75", "#EF9F27", "#B4B2A9"
+GOOD, WARN, BAD, NEUT = "#1D9E75", "#EF9F27", "#D85A30", "#C2C0B8"
+SERIES = [BLUE, ORANGE, TEAL, AMBER, "#E87BA4", GREY]
 
 st.set_page_config(page_title="Inripe · Sales performance", layout="wide")
 
@@ -52,82 +48,74 @@ pio.templates["inripe"] = go.layout.Template(layout=dict(
     legend=dict(font=dict(size=11.5), bgcolor="rgba(0,0,0,0)"),
     hoverlabel=dict(bgcolor="#ffffff", bordercolor="#dfe3e8",
                     font=dict(size=12, color="#17181a")),
-    margin=dict(l=0, r=0, t=10, b=0),
-))
+    margin=dict(l=0, r=0, t=10, b=0)))
 pio.templates.default = "inripe"
 
 st.markdown("""
 <style>
-/* Streamlit's own toolbar overlaps the top of the page on a deployed app,
-   so the container needs clearance the local server does not. */
-.block-container {padding-top: 3.4rem; padding-bottom: 3rem; max-width: 1540px;}
+.block-container {padding-top: 3rem; padding-bottom: 3rem; max-width: 1500px;}
 header[data-testid="stHeader"] {background: transparent; height: 0;}
 #MainMenu, footer {visibility: hidden;}
-/* The scope selectors stay in reach. Changing market or month from the
-   bottom of a long tab should not mean scrolling back to the top. */
-.stElementContainer:has(.scope-anchor) + div[data-testid="stHorizontalBlock"] {
-  position: sticky; top: 0; z-index: 99; background: #fff;
-  padding: 8px 0 10px; border-bottom: 1px solid #eceff3; margin-bottom: 2px;}
-div[data-testid="stDataFrame"] {border-radius: 8px;}
-.band {background: #123a63; border-radius: 12px; padding: 20px 24px 18px;
-       margin: 0 0 1rem; display: flex; justify-content: space-between;
-       align-items: flex-end; flex-wrap: wrap; gap: 12px;
-       box-shadow: 0 1px 3px rgba(18,58,99,.14);}
-.band .ttl {font-size: 22px; font-weight: 500; color: #f4f7fa;
-            letter-spacing: -.015em; line-height: 1.35; padding-top: 2px;}
-.band .sc {font-size: 12.5px; color: #9db6cf; margin-top: 5px;}
-.band .mt {text-align: right; font-size: 11.5px; line-height: 1.7;
-           color: #93aac2;}
-.band .mt b {color: #dde7f1; font-weight: 500;}
-.sec {font-size: 12px; font-weight: 500; letter-spacing: .06em;
-      text-transform: uppercase; color: #85888f; margin: 1.35rem 0 .55rem;}
-.kpi {background: #fff; border: 1px solid #e4e7ec; border-radius: 12px;
-      padding: 13px 15px 12px; position: relative; overflow: hidden; height: 100%;}
-.kpi:before {content: ""; position: absolute; left: 0; top: 0; bottom: 0;
-             width: 3px; background: var(--acc, #d5d8dd);}
-.kpi .lab {font-size: 12px; color: #6d7076; margin-bottom: 3px;}
-.kpi .val {font-size: 25px; font-weight: 500; color: #17181a; line-height: 1.15;
-           letter-spacing: -.02em;}
-.kpi .dl {font-size: 12px; font-weight: 500; margin-top: 2px;}
-.kpi .sub {font-size: 11.5px; color: #8a8d93; margin-top: 4px; line-height: 1.45;}
-.fin {background: #fff; border: 1px solid #e4e7ec; border-radius: 12px;
-      padding: 12px 15px 13px; height: 100%; border-left: 3px solid var(--acc);}
-.fin .t {font-size: 13.5px; font-weight: 500; color: #17181a; line-height: 1.4;}
-.fin .d {font-size: 12px; color: #6d7076; margin-top: 5px; line-height: 1.55;}
-.fin .s {font-size: 11px; color: var(--acc); font-weight: 500;
-         letter-spacing: .04em; text-transform: uppercase; margin-bottom: 4px;}
-.note {font-size: 12.5px; color: #55585e; background: #f4f6f9;
-       border-radius: 8px; padding: 9px 13px; margin: 0 0 .9rem;
-       line-height: 1.55;}
-div[data-baseweb="tab-list"] {gap: 2px;}
+.band {background:#123A63;border-radius:12px;padding:16px 22px 15px;
+  margin:0 0 .9rem;display:flex;justify-content:space-between;
+  align-items:flex-end;flex-wrap:wrap;gap:10px}
+.band .ttl {font-size:20px;font-weight:500;color:#F4F7FA;line-height:1.35}
+.band .sc {font-size:12px;color:#9DB6CF;margin-top:4px}
+.band .mt {text-align:right;font-size:11px;line-height:1.7;color:#93AAC2}
+.band .mt b {color:#DDE7F1;font-weight:500}
+.sec {font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;
+  color:#85888f;margin:1.2rem 0 .5rem}
+.k {background:#fff;border:0.5px solid #e4e7ec;border-radius:12px;
+  padding:13px 15px;height:100%}
+.k .lab {font-size:12px;color:#6d7076}
+.k .row {display:flex;align-items:baseline;gap:8px}
+.k .val {font-size:26px;font-weight:500;color:#17181a;line-height:1.25;
+  letter-spacing:-.02em}
+.k .dl {font-size:12px;font-weight:500}
+.k .pl {display:flex;justify-content:space-between;font-size:11px;
+  color:#6d7076;margin:6px 0 4px}
+.k .track {position:relative;height:5px;background:#f1f3f6;border-radius:3px}
+.k .fill {height:100%;border-radius:3px}
+.k .tick {position:absolute;left:100%;top:-3px;width:1px;height:11px;background:#b0b3b8}
+.k .seg {display:flex;height:4px;margin-top:10px;border-radius:2px;
+  overflow:hidden;gap:1px}
+.k .lg {display:flex;justify-content:space-between;font-size:10.5px;margin-top:4px}
+.k .ft {font-size:10.5px;color:#8a8d93;margin-top:8px;padding-top:8px;
+  border-top:0.5px solid #e4e7ec;line-height:1.55}
+.k .note {margin-top:9px;padding:8px 10px;background:#FAEEDA;border-radius:8px;
+  font-size:10.5px;color:#633806;line-height:1.5}
+.take {background:#f4f6f9;border-radius:8px;padding:11px 14px;font-size:13px;
+  line-height:1.65;color:#17181a;margin-top:.6rem}
+.defs {font-size:11px;color:#8a8d93;line-height:1.8;border-top:0.5px solid #e4e7ec;
+  padding-top:10px;margin-top:1.5rem}
+.defs b {color:#55585e;font-weight:500}
+div[data-baseweb="tab-list"] {gap:2px}
 </style>
 """, unsafe_allow_html=True)
 
+
+# ------------------------------------------------------------------- data
 
 @st.cache_data(ttl=900)
 def get_data(year: int):
     raw, fx, pmeta, aliases, cost_log = load_plan()
     plan = pe.attach_fx(pe.derive(raw), fx)
     actuals, ameta, lines = load_actuals_any(year, cost_log, plan)
-    combined = ve.combine(plan, actuals, year, aliases)
-    return (plan, actuals, lines, combined, pmeta, ameta, aliases, cost_log,
-            raw, datetime.now())
+    return plan, lines, pmeta, ameta, aliases, cost_log, datetime.now()
 
 
-# The first load pulls every order from all four stores, which takes a couple
-# of minutes. Without this the page is simply blank and looks broken.
 with st.spinner("Reading the plan from SharePoint and every order from the "
-                "four Shopify stores. The first load takes a minute or two; "
-                "after that it is cached for 15 minutes."):
+                "four Shopify stores. The first load takes a minute or two."):
     try:
-        (plan, actuals, lines, combined, pmeta, ameta, aliases,
-         cost_log, raw_plan, pulled) = get_data(YEAR)
+        plan, lines, pmeta, ameta, aliases, cost_log, pulled = get_data(YEAR)
     except Exception as exc:
         st.error(f"Could not load: {exc}")
         st.stop()
 
 HAS_LINES = lines is not None and len(lines) > 0
-HAS_TIERS = "net_confirmed_lc" in combined.columns
+if not HAS_LINES:
+    st.error("No order data. The dashboard needs the Shopify API source.")
+    st.stop()
 
 
 def n(v, f="{:,.0f}"):
@@ -138,20 +126,6 @@ def p(v):
     return "n/a" if v is None or pd.isna(v) else f"{v:.0%}"
 
 
-def delta(v):
-    return None if v is None or pd.isna(v) else f"{(v - 1) * 100:+.0f} pts vs plan"
-
-
-def pts(now, prev, label, invert=False):
-    """Month-on-month movement, so a quiet drift is visible."""
-    if now is None or prev is None or pd.isna(now) or pd.isna(prev):
-        return None
-    d = (now - prev) * 100
-    if abs(d) < 0.5:
-        return f"flat vs {label}"
-    return f"{d:+.1f} pts vs {label}"
-
-
 def tone(v, good=1.0, warn=0.9, invert=False):
     if v is None or pd.isna(v):
         return NEUT
@@ -160,1465 +134,894 @@ def tone(v, good=1.0, warn=0.9, invert=False):
     return GOOD if v >= good else WARN if v >= warn else BAD
 
 
-def kpi(col, label, value, dl=None, sub=None, accent=NEUT, dl_good=None):
-    d = ""
-    if dl:
-        pos = dl_good if dl_good is not None else dl.strip().startswith("+")
-        colr = GOOD if pos else (NEUT if dl.startswith("flat") else BAD)
-        d = f"<div class='dl' style='color:{colr}'>{dl}</div>"
-    col.markdown(f"<div class='kpi' style='--acc:{accent}'>"
-                 f"<div class='lab'>{label}</div><div class='val'>{value}</div>{d}"
-                 f"<div class='sub'>{sub or ''}</div></div>",
-                 unsafe_allow_html=True)
+def card(col, label, value, delta=None, delta_good=None, pace=None,
+         pace_label=None, segs=None, footer=None, note=None, accent=None):
+    """One metric card. Value, movement, pace bar, split, footer.
+
+    Every card is built from this so two cards cannot drift apart in shape.
+    """
+    h = [f"<div class='k'><div class='lab'>{label}</div><div class='row'>",
+         f"<div class='val'>{value}</div>"]
+    if delta:
+        c = GOOD if (delta_good if delta_good is not None
+                     else delta.strip().startswith("+")) else BAD
+        h.append(f"<div class='dl' style='color:{c}'>{delta}</div>")
+    h.append("</div>")
+
+    if pace is not None:
+        pct = max(0.0, min(1.0, pace))
+        col_ = accent or tone(pace)
+        h.append(f"<div class='pl'><span>{pace:.0%} of pace</span>"
+                 f"<span style='color:#8a8d93'>{pace_label or ''}</span></div>"
+                 f"<div class='track'><div class='fill' style='width:{pct*100:.1f}%;"
+                 f"background:{col_}'></div><div class='tick'></div></div>")
+
+    if segs:
+        total = sum(abs(v) for _, v, _ in segs) or 1
+        bars = "".join(
+            f"<div style='width:{abs(v)/total*100:.1f}%;background:{c}'></div>"
+            for _, v, c in segs)
+        labs = "".join(
+            f"<span style='color:{c}'>{lab}</span>" for lab, _, c in segs)
+        h.append(f"<div class='seg'>{bars}</div><div class='lg'>{labs}</div>")
+
+    if note:
+        h.append(f"<div class='note'>{note}</div>")
+    if footer:
+        h.append(f"<div class='ft'>{footer}</div>")
+    h.append("</div>")
+    col.markdown("".join(h), unsafe_allow_html=True)
+
+
+def waterfall(steps, title=None, height=300):
+    """The gap decomposition bar that opens every drill-down."""
+    if not steps:
+        return None
+    measure, x, y, text = [], [], [], []
+    for s in steps:
+        x.append(s["label"])
+        if s["kind"] == "start":
+            measure.append("absolute"); y.append(s["value"])
+        elif s["kind"] == "end":
+            measure.append("total"); y.append(None)
+        else:
+            measure.append("relative"); y.append(s["value"])
+        text.append(f"{s['value']:,.0f}")
+    f = go.Figure(go.Waterfall(
+        orientation="v", measure=measure, x=x, y=y, text=text,
+        textposition="outside",
+        connector={"line": {"color": GREY, "width": 1}},
+        increasing={"marker": {"color": TEAL}},
+        decreasing={"marker": {"color": ORANGE}},
+        totals={"marker": {"color": BLUE}}))
+    f.update_layout(height=height, margin=dict(t=24), showlegend=False,
+                    yaxis_title=title)
+    return f
 
 
 def table(df, height=None, empty="Nothing in this scope.", into=None, **kw):
-    """Every table renders through here, so formatting is decided once.
-
-    Money carries thousands separators, counts stay whole, and a ratio shows
-    as a percentage whether it was stored as 0.42 or as 42. A frame that
-    comes back empty says so, rather than leaving a blank grid for the reader
-    to interpret.
-
-    `into` takes a column or container so a table can sit where it was placed
-    rather than always spanning the page.
-    """
-    target = into if into is not None else st
+    """One formatter for every table, so precision never drifts."""
+    t = into if into is not None else st
     if df is None or len(df) == 0:
-        target.caption(empty)
+        t.caption(empty)
         return
-
     d = df.copy()
     cfg = {}
-    for col in d.columns:
-        name = str(col).lower()
-        if d[col].dtype.kind not in "if":
+    for c in d.columns:
+        nm = str(c).lower()
+        if d[c].dtype.kind not in "if":
             continue
-        mx = float(d[col].abs().max() or 0)
-        if any(k in name for k in ("%", "pct", "share", " att", "rate",
-                                   "realisation")):
-            # Ratios arrive as 0.42 from the engine and as 42 from a chart
-            # frame, so both are normalised before formatting.
+        mx = float(d[c].abs().max() or 0)
+        if any(k in nm for k in ("%", "pct", "share", "rate", "index",
+                                 "attainment")):
             if mx <= 1.5:
-                d[col] = d[col] * 100
-            cfg[col] = st.column_config.NumberColumn(format="%.1f%%")
-        elif any(k in name for k in ("unit", "box", "order", "count", "days",
-                                     "product", "rows", "lost", "items")):
-            cfg[col] = st.column_config.NumberColumn(format="%d")
-        elif "fx" in name:
-            cfg[col] = st.column_config.NumberColumn(format="%.4f")
-        elif any(k in name for k in ("price", "cost", "aov", "per box",
-                                     "cm/box", "basket")):
-            cfg[col] = st.column_config.NumberColumn(format="%.2f")
+                d[c] = d[c] * 100
+            cfg[c] = st.column_config.NumberColumn(format="%.1f%%")
+        elif any(k in nm for k in ("order", "unit", "box", "count", "days",
+                                   "product")):
+            cfg[c] = st.column_config.NumberColumn(format="%d")
+        elif any(k in nm for k in ("price", "cost", "aov", "per box")):
+            cfg[c] = st.column_config.NumberColumn(format="%.2f")
         else:
-            cfg[col] = st.column_config.NumberColumn(format="%,.0f")
-    # Streamlit rejects height=None outright, so the argument is omitted
-    # rather than passed empty.
+            cfg[c] = st.column_config.NumberColumn(format="%,.0f")
     if height is not None:
         kw["height"] = height
-    target.dataframe(d, hide_index=True, width="stretch",
-                     column_config=cfg, **kw)
-
-def note(text):
-    st.markdown(f"<div class='note'>{text}</div>", unsafe_allow_html=True)
+    t.dataframe(d, hide_index=True, width="stretch", column_config=cfg, **kw)
 
 
-# ---------------------------------------------------------------- header
+def footer_definitions():
+    st.markdown(
+        "<div class='defs'>"
+        + " &nbsp;·&nbsp; ".join(f"<b>{k}</b> {v}" for k, v in me.DEFINITIONS)
+        + "</div>", unsafe_allow_html=True)
+
+
+# -------------------------------------------------------------- selectors
+
+c = st.columns([1, 1.1, 1.4, 1.5, 1.6])
+market = c[0].selectbox("Market", [ALL_MK] + MARKETS, index=3)
+month = c[1].selectbox("Period", [YTD] + MONTHS, index=MONTHS.index("July") + 1)
+cats = sorted(plan["category"].dropna().unique())
+sel_cats = c[2].multiselect("Category", cats, default=[])
+pool = plan[plan.category.isin(sel_cats)] if sel_cats else plan
+sel_prods = c[3].multiselect("Product",
+                             sorted(pool["product"].dropna().unique()),
+                             default=[])
+
+# The month selection sets the default range; the range can then be narrowed.
+# Both sides are filtered by it, so a partial range compares like with like.
+if month == YTD:
+    d0, d1 = date(YEAR, 1, 1), date(YEAR, 12, 31)
+else:
+    import calendar as _cal
+    _n = MONTHS.index(month) + 1
+    d0 = date(YEAR, _n, 1)
+    d1 = date(YEAR, _n, _cal.monthrange(YEAR, _n)[1])
+picked = c[4].date_input("Date range", value=(d0, d1),
+                         min_value=date(YEAR, 1, 1),
+                         max_value=date(YEAR, 12, 31),
+                         key=f"range_{month}",
+                         help="Filters orders and plan together. A partial "
+                              "range takes a pro-rated share of the month's "
+                              "plan, so attainment stays comparable.")
+start, end = (picked if isinstance(picked, tuple) and len(picked) == 2
+              else (d0, d1))
+
+scope = me.Scope(year=YEAR,
+                 market=None if market == ALL_MK else market,
+                 month=None if month == YTD else month,
+                 categories=sel_cats, products=sel_prods,
+                 start=start, end=end)
+
+CUR = "AED" if scope.consolidated else plan[
+    plan.market == market]["currency"].iloc[0]
+
+try:
+    C = me.cards(lines, plan, scope, cost_log)
+except Exception as exc:
+    st.error(f"Could not compute: {exc}")
+    st.stop()
+
+problems = me.check_chain(C)
 
 st.markdown(
     f"<div class='band'><div><div class='ttl'>Inripe — Sales performance</div>"
-    f"<div class='sc' id='scope'>plan against actual, {YEAR}</div></div>"
-    f"<div class='mt'>Actuals · <b>{ameta.get('source')}</b> · "
-    f"read {pulled:%d %b %H:%M}<br>Plan · <b>{pmeta.get('name','')}</b> · "
-    f"{'edited ' + (pmeta.get('modified') or '')[:16].replace('T', ' ')}"
-    f"</div></div>", unsafe_allow_html=True)
+    f"<div class='sc'>{market} · {scope.label} {YEAR}"
+    + (f" · day {C['days_elapsed']} of {C['days_total']}"
+       if not C.get("empty") and C["pace_fraction"] < 1 else "")
+    + (" · plan pro-rated to the range"
+       if not scope.full_year and scope.days
+       < (scope.end.replace(day=28) - scope.start).days + 5 and
+       scope.label != month else "")
+    + f" · {CUR}</div></div>"
+    f"<div class='mt'>Actuals · <b>Shopify</b> · read {pulled:%d %b %H:%M}<br>"
+    f"Plan · <b>{pmeta.get('name','')}</b>"
+    + (f" · cost log {C['dated_share']:.0%} dated" if not C.get("empty") else "")
+    + "</div></div>", unsafe_allow_html=True)
 
-mode = st.radio("View", ["Tracking", "Plan"], horizontal=True,
-                label_visibility="collapsed")
+if problems:
+    st.error("The cards do not reconcile: " + " · ".join(problems)
+             + ". Figures below should not be trusted until this is fixed.")
 
-st.markdown("<div class='scope-anchor'></div>", unsafe_allow_html=True)
-c = st.columns([1.1, 1.2, 1.5, 1.7, 1.2])
-market = c[0].selectbox("Market", [ALL_MK] + MARKETS, index=3)
-month = c[1].selectbox("Month", [YTD] + MONTHS,
-                       index=MONTHS.index("July") + 1)
-mk_scope = MARKETS if market == ALL_MK else [market]
-base = combined[combined.market.isin(mk_scope)]
-cats = sorted(base["category"].dropna().unique())
-sel_cats = c[2].multiselect("Category", cats, default=[])
-pool = base[base.category.isin(sel_cats)] if sel_cats else base
-LBL = "product_label" if "product_label" in combined.columns else "product"
-label_of = (combined.drop_duplicates("product")
-            .set_index("product")[LBL].to_dict())
-name_of = {v: k for k, v in label_of.items()}
-sel_labels = c[3].multiselect("Product",
-                              sorted(set(label_of.values())), default=[])
-sel_prods = [name_of[x] for x in sel_labels if x in name_of]
-as_of = c[4].date_input("As of", value=date.today())
-
-# A single market normally reads best in its own currency, but comparing it
-# against another needs a common one. Across markets AED is the only honest
-# choice, so the toggle is offered rather than assumed.
-if market != ALL_MK:
-    ccy = st.radio("Report in", ["Local currency", "AED"], horizontal=True,
-                   index=0, label_visibility="collapsed",
-                   help="AED uses the rates on the FX sheet, matched by "
-                        "market and month.")
-else:
-    ccy = "AED"
-
-CONSOL = market == ALL_MK
-IN_AED = CONSOL or ccy == "AED"
-SUF = "_aed" if IN_AED else "_lc"
-LOCAL = "AED" if CONSOL else plan[plan.market == market]["currency"].iloc[0]
-cur = "AED" if IN_AED else LOCAL
-ATT = "revenue_attainment_aed" if IN_AED else "revenue_attainment"
-CMP_ = "act_cm_pct_aed" if IN_AED else "act_cm_pct"
-
-sel = base if month == YTD else base[base.month == month]
-if sel_cats:
-    sel = sel[sel.category.isin(sel_cats)]
-if sel_prods:
-    sel = sel[sel["product"].isin(sel_prods)]
-if sel.empty:
-    st.info("No plan and no sales in this scope.")
+if C.get("empty"):
+    st.info("No orders in this scope.")
+    footer_definitions()
     st.stop()
 
+view = st.radio("View", ["Management", "Forecast", "Portfolio pricing",
+                         "Orders", "Units", "Revenue", "Margin",
+                         "Payment and exceptions"],
+                horizontal=True, label_visibility="collapsed")
 
-def agg(df):
-    pu, au = df.plan_units.sum(), df.act_units.sum()
-    pr, ar = df[f"plan_revenue{SUF}"].sum(), df[f"act_net{SUF}"].sum()
-    pc, ac = df[f"plan_cm{SUF}"].sum(), df[f"act_cm_at_plan{SUF}"].sum()
-    return dict(plan_units=pu, act_units=au, unit_att=au / pu if pu else None,
-                plan_rev=pr, act_rev=ar, rev_att=ar / pr if pr else None,
-                plan_cm=pc, act_cm=ac, cm_att=ac / pc if pc else None,
-                plan_cm_pct=pc / pr if pr else None,
-                act_cm_pct=ac / ar if ar else None)
+O, U, R, M = C["orders"], C["units"], C["revenue"], C["margin"]
 
 
-A = agg(sel)
-SINGLE = (not CONSOL) and month != YTD
-if month != YTD:
-    land = (ve.landing_all(combined, month, as_of, YEAR) if CONSOL
-            else ve.landing(combined, market, month, as_of, YEAR))
-else:
-    land = None
-conc = ve.concentration(sel, by=["market"]) if not CONSOL else pd.DataFrame()
-cb = ve.cm_per_box(sel)
-oq = ve.order_quality(lines, plan, YEAR) if HAS_LINES else pd.DataFrame()
-oqs = oq[oq.market.isin(mk_scope)] if len(oq) else oq
-if len(oqs) and month != YTD:
-    oqs = oqs[oqs.month == month]
-orders = (ve.order_count(lines, YEAR, None if CONSOL else market,
-                         None if month == YTD else month) if HAS_LINES else None)
-mom = ve.momentum(combined, lines, plan, market, month, YEAR) if SINGLE else {}
-tb = (ve.traffic_basket(lines, combined, YEAR, market,
-                        None if month == YTD else month)
-      if HAS_LINES and not CONSOL else {})
+# ------------------------------------------------------------- management
 
-scope_txt = " · ".join(filter(None, [
-    market, f"{month} {YEAR}",
-    f"day {land['days_elapsed']} of {land['days_total']}" if land else None,
-    ", ".join(sel_cats[:2]) if sel_cats else None,
-    f"{len(sel_prods)} products" if sel_prods else None,
-    f"reported in {cur}"
-    + ("" if cur == LOCAL else f", converted from {LOCAL}")]))
-st.caption(scope_txt + ". Plan is compared against net sales. Cancelled, "
-           "refunded and voided orders are excluded, not zeroed. Margin is at "
-           "planned unit cost.")
+if view == "Management":
+    st.markdown("<div class='sec'>The chain</div>", unsafe_allow_html=True)
+    k = st.columns(3)
 
+    o_pace = O["total"] / O["paced"] if O["paced"] else None
+    card(k[0], "Orders", n(O["total"]),
+         n(O["total"] - O["paced"], "{:+,.0f}"), delta_good=None,
+         pace=o_pace, pace_label=f"pace {n(O['paced'])}",
+         segs=[(f"{O['delivered']} delivered", O["delivered"], "#0F6E56"),
+               (f"{O['open']} open", O["open"], "#185FA5")],
+         footer=f"plan {n(O['plan_full'])} · AOV {n(O['aov'])} {CUR}")
 
-# ------------------------------------------------------- executive block
+    u_pace = U["total"] / U["paced"] if U["paced"] else None
+    card(k[1], "Units", n(U["total"]),
+         n(U["total"] - U["paced"], "{:+,.0f}"),
+         pace=u_pace, pace_label=f"pace {n(U['paced'])}",
+         segs=[(f"{n(U['delivered'])} delivered", U["delivered"], "#0F6E56"),
+               (f"{n(U['open'])} open", U["open"], "#185FA5")],
+         footer=f"plan {n(U['plan_full'])} · "
+                f"{n(U['per_order'], '{:.1f}')} boxes per order")
 
-if month != YTD:
-    fnd = (ve.findings_all(combined, lines, plan, month, as_of, YEAR)
-           if CONSOL
-           else ve.findings(combined, lines, plan, market, month, as_of, YEAR))
-    if fnd:
-        st.markdown("<div class='sec'>Executive summary · ranked by money at "
-                    "stake</div>", unsafe_allow_html=True)
-        top = fnd[:3]
-        cols = st.columns(len(top))
-        for i, f in enumerate(top):
-            cols[i].markdown(
-                f"<div class='fin' style='--acc:{SEV[f['severity']]}'>"
-                f"<div class='s'>{n(f['stake'])} {cur} at stake</div>"
-                f"<div class='t'>{f['title']}</div>"
-                f"<div class='d'>{f['detail']}</div></div>",
-                unsafe_allow_html=True)
-        if len(fnd) > 3:
-            with st.expander(f"{len(fnd) - 3} further findings"):
-                for f in fnd[3:]:
-                    st.markdown(
-                        f"<div class='fin' style='--acc:{SEV[f['severity']]};"
-                        f"margin-bottom:8px'>"
-                        f"<div class='s'>{n(f['stake'])} {cur} at stake</div>"
-                        f"<div class='t'>{f['title']}</div>"
-                        f"<div class='d'>{f['detail']}</div></div>",
-                        unsafe_allow_html=True)
-else:
-    note("The executive summary needs a single month, so each finding can be "
-         "attributed to a period. Pick one from the Month selector. Everything "
-         "below still works across the full year.")
+    r_pace = R["total"] / R["paced"] if R["paced"] else None
+    card(k[2], f"Revenue {CUR}", n(R["total"]),
+         n(R["total"] - R["paced"], "{:+,.0f}"),
+         pace=r_pace, pace_label=f"pace {n(R['paced'])}",
+         segs=[(f"{n(R['collected'])} collected", R["collected"], "#0F6E56"),
+               (f"{n(R['owed'])} owed", R["owed"], "#854F0B"),
+               (f"{n(R['at_risk'] + R['prepaid'])} at risk",
+                R["at_risk"] + R["prepaid"], "#185FA5")],
+         footer=f"plan {n(R['plan_full'])} · discount {n(R['discount'])}")
 
+    st.markdown("<div class='sec'>The outcome</div>", unsafe_allow_html=True)
+    k2 = st.columns([1.25, 1, 1])
 
-# ------------------------------------------------------ plan vs actual
+    m_pace = M["cm"] / M["paced"] if M["paced"] else None
+    cost_note = None
+    if C["cost_basis"] == "dated" and abs(M["cost_effect"]) > 1:
+        cc = me.cost_changes(cost_log, plan, scope)
+        if len(cc):
+            top = cc.head(3)
+            names = " · ".join(
+                f"{r['product'].split()[-1]} {r['vs_plan_pct']:+.0%}"
+                for _, r in top.iterrows() if pd.notna(r["vs_plan_pct"]))
+            cost_note = (f"<b>Cost moved</b> · {names}<br>"
+                         f"{n(abs(M['cost_effect']))} {CUR} of margin "
+                         f"{'lost' if M['cost_effect'] < 0 else 'gained'}")
+    card(k2[0], f"Contribution margin {CUR}", n(M["cm"]),
+         n(M["cm"] - M["paced"], "{:+,.0f}"),
+         pace=m_pace, pace_label=f"pace {n(M['paced'])}",
+         segs=[(f"{n(M['commercial_effect'], '{:+,.0f}')} commercial",
+                abs(M["commercial_effect"]), "#993C1D"),
+               (f"{n(M['cost_effect'], '{:+,.0f}')} cost",
+                abs(M["cost_effect"]), "#854F0B")],
+         note=cost_note,
+         footer=f"plan {n(M['plan_full'])} · at {C['cost_basis']} cost · "
+                f"{n(M['per_box'], '{:.2f}')} per box")
 
+    pts = ((M["cm_pct"] - M["plan_pct"]) * 100
+           if M["cm_pct"] is not None and M["plan_pct"] else None)
+    card(k2[1], "CM %", p(M["cm_pct"]),
+         None if pts is None else f"{pts:+.1f} pts",
+         delta_good=(pts or 0) >= 0,
+         pace=(M["cm_pct"] / M["plan_pct"]
+               if M["cm_pct"] and M["plan_pct"] else None),
+         pace_label=f"plan {p(M['plan_pct'])}",
+         footer=f"price {p(M['price_index'])} of plan · "
+                f"cost {p(M['cost_index'])} of plan<br>"
+                f"weighted by actual mix")
 
-# ------------------------------------------------------------- plan view
+    # Lost sits on its own card rather than inside orders. It is not a
+    # smaller sale, it is no sale, and every other headline excludes it.
+    card(k2[2], "Lost", n(O["lost"]) + " orders",
+         None if O.get("cancel_rate") is None
+         else f"{O['cancel_rate']:.1%} of placed",
+         delta_good=False,
+         pace=None,
+         segs=[(f"{n(U['lost'])} boxes", U["lost"], "#993C1D"),
+               (f"{n(R['lost'])} {CUR}", R["lost"] / 100
+                if R["lost"] else 0, "#F0997B")],
+         footer=f"{n(O['placed'])} orders placed · "
+                f"{n(M['lost_cm'])} {CUR} of margin never earned",
+         accent=BAD)
 
-if mode == "Plan":
-    pscope = plan[plan.market.isin(mk_scope)]
-    if month != YTD:
-        pscope = pscope[pscope.month == month]
-    if sel_cats:
-        pscope = pscope[pscope.category.isin(sel_cats)]
-    if sel_prods:
-        pscope = pscope[pscope["product"].isin(sel_prods)]
-    filled = pscope[pscope.plan_units > 0]
-
-    PSUF = SUF
-    st.markdown("<div class='sec'>The plan</div>", unsafe_allow_html=True)
-    pk = st.columns(5)
-    prev_u = filled.plan_units.sum()
-    prev_r = filled[f"plan_revenue{PSUF}"].sum()
-    prev_c = filled[f"plan_cm{PSUF}"].sum()
-    kpi(pk[0], "Units", n(prev_u), None,
-        f"{filled['product'].nunique()} products · "
-        f"{filled.month.nunique()} months", NEUT)
-    kpi(pk[1], f"Revenue {cur}", n(prev_r), None,
-        f"{n(prev_r / prev_u if prev_u else None, '{:,.2f}')} average price",
-        NEUT)
-    kpi(pk[2], f"CM {cur}", n(prev_c), None,
-        f"{n((prev_r - prev_c) / prev_u if prev_u else None, '{:,.2f}')} "
-        f"average cost", NEUT)
-    kpi(pk[3], "CM %", p(prev_c / prev_r if prev_r else None), None,
-        "weighted by the planned mix",
-        tone(prev_c / prev_r if prev_r else None, good=0.40, warn=0.30))
-    kpi(pk[4], "Rows", f"{len(filled):,}", None,
-        f"of {len(pscope):,} in scope · {len(pscope) - len(filled):,} blank",
-        NEUT)
-
-    mq = pe.plan_margin_quality(filled)
-    if mq:
-        bits = []
-        if mq["below_cost_rows"]:
-            bits.append(f"<b>{mq['below_cost_rows']} rows are planned at or "
-                        f"below cost</b>, losing {abs(mq['below_cost_cm']):,.0f}")
-        if mq["thin_rows"]:
-            bits.append(f"{mq['thin_rows']} rows sit under 15% margin, "
-                        f"{mq['thin_revenue_share']:.0%} of planned revenue")
-        bits.append(f"CM% across rows runs {mq['cm_pct_min']:.0%} to "
-                    f"{mq['cm_pct_max']:.0%}, median {mq['cm_pct_median']:.0%}")
-        note("Every one of these is knowable before anything is sold. "
-             + ". ".join(bits) + ".")
-
-    ptabs = st.tabs(["Shape", "Detail table", "Concentration",
-                     "Margin quality", "Coverage", "What changed"])
-
-    with ptabs[0]:
-        st.caption("Where the year is loaded.")
-        sh = pe.shape(filled, ["market", "month"])
-        f = go.Figure()
-        for i, mk in enumerate([m for m in MARKETS if m in set(sh.market)]):
-            d = sh[sh.market == mk]
-            f.add_trace(go.Bar(x=d.month.astype(str), y=d[f"plan_revenue{PSUF}"],
-                               name=mk, marker_color=SERIES[i % len(SERIES)]))
-        f.update_layout(barmode="stack", height=320,
-                        yaxis_title=f"Planned revenue {cur}",
-                        legend=dict(orientation="h", y=1.15, x=0))
-        st.plotly_chart(f, width="stretch")
-
-        cat = pe.shape(filled, ["category"]).sort_values(
-            f"plan_revenue{PSUF}", ascending=False)
-        c1, c2 = st.columns(2)
-        f2 = go.Figure(go.Bar(x=cat[f"plan_revenue{PSUF}"], y=cat.category,
-                              orientation="h", marker_color=BLUE,
-                              text=[f"{v:,.0f}" for v in cat[f"plan_revenue{PSUF}"]],
-                              textposition="auto"))
-        f2.update_layout(height=max(300, 26 * len(cat)),
-                         xaxis_title=f"Planned revenue {cur}",
-                         yaxis=dict(autorange="reversed"))
-        c1.plotly_chart(f2, width="stretch")
-        f3 = go.Figure(go.Bar(x=cat.cm_pct * 100, y=cat.category,
-                              orientation="h",
-                              marker_color=[TEAL if v >= .35 else YELLOW
-                                            if v >= .2 else ORANGE
-                                            for v in cat.cm_pct],
-                              text=[f"{v:.0%}" for v in cat.cm_pct],
-                              textposition="auto"))
-        f3.update_layout(height=max(300, 26 * len(cat)),
-                         xaxis_title="Planned CM %",
-                         yaxis=dict(autorange="reversed"))
-        c2.plotly_chart(f3, width="stretch")
-        st.caption("Left is where the money is planned. Right is how well it "
-                   "converts. A tall bar on the left with a short one on the "
-                   "right is volume bought at a poor rate.")
-
-    with ptabs[1]:
-        st.caption("Every planned row, as entered. Sortable and filterable — "
-                   "the figures finance will look up directly.")
-        cols = ["product_id", "category", "product", "market", "currency",
-                "month", "plan_units", "plan_price_lc", "plan_cogs_unit_lc",
-                "plan_revenue_lc", "plan_cogs_lc", "plan_cm_lc",
-                "plan_revenue_aed", "plan_cm_aed", "fx_to_aed"]
-        det = filled[[c for c in cols if c in filled.columns]].copy()
-        det["plan_cm_pct"] = (det["plan_cm_lc"] / det["plan_revenue_lc"]).where(
-            det["plan_revenue_lc"].ne(0))
-        table(det, height=460)
-        st.caption(f"{len(det):,} rows · "
-                   f"{det.plan_units.sum():,.0f} units · "
-                   f"AED {det.get('plan_revenue_aed', pd.Series(dtype=float)).sum():,.0f} "
-                   f"consolidated")
-
-        st.caption("Market by month, both currencies")
-        mm_ = pe.shape(filled, ["market", "currency", "month"])
-        keep = ["market", "currency", "month", "plan_units", "plan_revenue_lc",
-                "plan_cogs_lc", "plan_cm_lc", "cm_pct", "wavg_price",
-                "wavg_cost", "plan_revenue_aed", "plan_cm_aed"]
-        table(mm_[[c for c in keep if c in mm_.columns]],
-                     height=340)
-
-        st.caption("Product by market, full year")
-        bp = pe.shape(filled, ["market", "category", "product"])
-        keep2 = ["market", "category", "product", "plan_units",
-                 "plan_revenue_lc", "plan_cm_lc", "cm_pct", "wavg_price",
-                 "wavg_cost", "plan_revenue_aed"]
-        table(bp[[c for c in keep2 if c in bp.columns]].sort_values(
-            "plan_revenue_lc", ascending=False),
-            height=340)
-
-    with ptabs[2]:
-        st.caption("A plan can be achievable and still fragile.")
-        cc = pe.plan_concentration(filled)
-        if cc.empty:
-            st.info("Nothing planned in this scope.")
-        else:
-            for r in cc.itertuples():
-                note(f"<b>{r.market}: {r.top1_share:.0%} of planned revenue "
-                     f"rests on {r.largest}</b>, top three carry "
-                     f"{r.top3_share:.0%} across {r.items} products. "
-                     f"It takes only {r.items_to_half} product"
-                     f"{'s' if r.items_to_half != 1 else ''} to reach half the "
-                     f"plan. Peak month {r.peak_month} is "
-                     f"{r.peak_month_share:.0%} of the year.")
-            show = cc[["market", "items", "largest", "top1_share", "top3_share",
-                       "top5_share", "items_to_half", "peak_month",
-                       "peak_month_share"]]
-            table(show)
-
-    with ptabs[3]:
-        if not mq:
-            st.info("Nothing planned in this scope.")
-        else:
-            if mq["below_cost_rows"]:
-                st.caption(f"Planned at or below cost · {mq['below_cost_rows']}")
-                table(mq["below_cost_detail"])
-            if mq["thin_rows"]:
-                st.caption(f"Under 15% margin · {mq['thin_rows']}")
-                table(mq["thin_detail"], height=300)
-            dist = filled.copy()
-            dist["cm_pct"] = (dist["plan_cm_lc"] / dist["plan_revenue_lc"])
-            f = go.Figure(go.Histogram(x=dist["cm_pct"] * 100, nbinsx=30,
-                                       marker_color=BLUE))
-            f.update_layout(height=280, xaxis_title="Planned CM % per row",
-                            yaxis_title="Rows")
-            st.plotly_chart(f, width="stretch")
-            st.caption("A wide spread means the plan is not priced to a "
-                       "consistent margin. That may be deliberate.")
-
-    with ptabs[4]:
-        st.caption("Where the plan is silent. Blank is not zero.")
-        cov = pe.coverage(plan)
-        piv = cov.pivot(index="market", columns="month", values="planned")
-        piv = piv.reindex([m for m in MARKETS if m in piv.index])
-        piv = piv.reindex(columns=[m for m in MONTHS if m in piv.columns])
-        h = go.Figure(go.Heatmap(
-            z=piv.astype(float).values, x=list(piv.columns), y=list(piv.index),
-            colorscale=[[0, "#f6cfc8"], [1, "#bfe6d5"]], showscale=False,
-            text=[["planned" if v else "no plan" for v in rv]
-                  for rv in piv.values],
-            texttemplate="%{text}",
-            hovertemplate="%{y} · %{x}<br>%{text}<extra></extra>"))
-        h.update_layout(height=230)
-        st.plotly_chart(h, width="stretch")
-        gaps = cov[(cov.market.isin(mk_scope)) & (~cov.planned)]
-        if len(gaps):
-            table(gaps[["market", "month"]])
-
-    with ptabs[5]:
-        st.caption("The workbook against its previous saved version in "
-                   "SharePoint. No one has to remember what they edited.")
-        prev, pinfo = load_previous_plan()
-        if prev is None:
-            st.info(f"No comparison available: {pinfo}")
-        else:
-            try:
-                dp = pe.diff_plans(raw_plan, prev)
-            except Exception as e:
-                st.warning(f"Could not compare versions: {e}")
-                dp = None
-            if dp:
-                who = (pinfo.get("modified_by") or "someone")
-                when = (pinfo.get("modified") or "")[:16].replace("T", " ")
-                d1 = st.columns(4)
-                kpi(d1[0], "Rows changed", f"{dp['n_changed']:,}", None,
-                    f"{dp['n_added']:,} added · {dp['n_removed']:,} removed",
-                    NEUT)
-                kpi(d1[1], "Units", n(dp["units_after"]),
-                    n(dp["units_delta"], "{:+,.0f}"),
-                    f"was {n(dp['units_before'])}",
-                    GOOD if dp["units_delta"] >= 0 else BAD)
-                kpi(d1[2], "Revenue", n(dp["revenue_after"]),
-                    n(dp["revenue_delta"], "{:+,.0f}"),
-                    f"was {n(dp['revenue_before'])} · local currency", NEUT)
-                kpi(d1[3], "CM", n(dp["cm_after"]),
-                    n(dp["cm_delta"], "{:+,.0f}"),
-                    f"was {n(dp['cm_before'])}",
-                    GOOD if dp["cm_delta"] >= 0 else BAD)
-                note(f"Compared against the version saved {when} by "
-                     f"<b>{who}</b>. {pinfo.get('versions_kept', 0)} versions "
-                     f"kept by SharePoint.")
-                if len(dp["newly_below_cost"]):
-                    st.warning(
-                        f"{len(dp['newly_below_cost'])} rows moved to or below "
-                        f"cost in this edit: "
-                        + ", ".join(dp["newly_below_cost"]["product"].head(6)))
-                if dp["n_changed"]:
-                    st.caption("Changed rows, largest CM impact first")
-                    ch = dp["changed"][[
-                        "market", "month", "product", "what", "units_delta",
-                        "price_delta", "cost_delta", "revenue_delta",
-                        "cm_delta"]].copy()
-                    table(ch.reindex(
-                        ch["cm_delta"].abs().sort_values(
-                            ascending=False).index),
-                        height=320)
-                if dp["n_added"]:
-                    st.caption(f"Added · {dp['n_added']}")
-                    table(dp["added"][[
-                        "market", "month", "product", "plan_units_now",
-                        "plan_price_lc_now", "revenue_now", "cm_now"]],
-                        height=220)
-                if dp["n_removed"]:
-                    st.caption(f"Removed · {dp['n_removed']}")
-                    table(dp["removed"][[
-                        "market", "month", "product", "plan_units_was",
-                        "plan_price_lc_was", "revenue_was", "cm_was"]],
-                        height=220)
-
-    st.stop()
+    bits = []
+    if o_pace and u_pace:
+        bits.append(f"Orders {o_pace:.0%}, units {u_pace:.0%}"
+                    + (", so baskets are smaller as well as fewer"
+                       if u_pace < o_pace - 0.03 else
+                       ", and baskets are holding"))
+    if m_pace:
+        share = (abs(M["cost_effect"])
+                 / max(1e-9, abs(M["commercial_effect"]) + abs(M["cost_effect"])))
+        bits.append(f"margin {m_pace:.0%}"
+                    + (f", {share:.0%} of the gap from cost"
+                       if C["cost_basis"] == "dated" and share > 0.1 else ""))
+    if bits:
+        st.markdown(f"<div class='take'>{'. '.join(bits).capitalize()}.</div>",
+                    unsafe_allow_html=True)
 
 
-st.markdown("<div class='sec'>Plan against actual</div>", unsafe_allow_html=True)
-k = st.columns(5)
-kpi(k[0], "Units", n(A["act_units"]), delta(A["unit_att"]),
-    f"plan {n(A['plan_units'])} boxes", tone(A["unit_att"]))
-
-if orders and tb.get("implied_plan_orders"):
-    kpi(k[1], "Orders", n(orders),
-        f"{(orders / tb['implied_plan_orders'] - 1) * 100:+.0f} pts vs implied",
-        f"basket {n(tb['basket'], '{:.1f}')} boxes · implied plan "
-        f"{n(tb['implied_plan_orders'])} orders",
-        tone(orders / tb["implied_plan_orders"]))
-else:
-    kpi(k[1], "Orders", n(orders), None,
-        (f"{n(A['act_units'] / orders, '{:.1f}')} boxes per order"
-         if orders else "needs the API source"), NEUT)
-
-kpi(k[2], f"Revenue {cur}", n(A["act_rev"]), delta(A["rev_att"]),
-    f"plan {n(A['plan_rev'])}", tone(A["rev_att"]))
-kpi(k[3], f"CM {cur}", n(A["act_cm"]), delta(A["cm_att"]),
-    f"plan {n(A['plan_cm'])}", tone(A["cm_att"]))
-cmp_pts = ((A["act_cm_pct"] - A["plan_cm_pct"]) * 100
-           if A["act_cm_pct"] is not None and A["plan_cm_pct"] is not None
-           else None)
-kpi(k[4], "CM %", p(A["act_cm_pct"]),
-    None if cmp_pts is None else f"{cmp_pts:+.1f} pts vs plan",
-    f"plan {p(A['plan_cm_pct'])}",
-    NEUT if cmp_pts is None else (GOOD if cmp_pts >= 0
-                                  else WARN if cmp_pts > -3 else BAD))
-
-if tb.get("units_from_orders") is not None:
-    note(f"<b>Unit gap decomposed.</b> "
-         f"{n(tb['units_from_orders'], '{:+,.0f}')} boxes from order count and "
-         f"{n(tb['units_from_basket'], '{:+,.0f}')} from basket size, against "
-         f"an implied {n(tb['implied_plan_orders'])} orders at the achieved "
-         f"basket of {n(tb['basket'], '{:.1f}')}. Fewer orders is a demand "
-         f"problem; a smaller basket is a merchandising one.")
+# ------------------------------------------------------------- drill-downs
 
 
-# ------------------------------------------------------- quality and risk
-
-st.markdown("<div class='sec'>Quality and risk</div>", unsafe_allow_html=True)
-q = st.columns(5)
-pm = mom.get("prev_month", "")
-prev = mom.get("prev", {})
-now = mom.get("now", {})
-
-if len(conc):
-    cc = conc.iloc[0]
-    kpi(q[0], "Concentration", p(cc.top1_share),
-        pts(now.get("top1_share"), prev.get("top1_share"), pm),
-        f"{cc.top1_product} · top 3 = {p(cc.top3_share)}",
-        tone(cc.top1_share, good=0.30, warn=0.45, invert=True), dl_good=False)
-else:
-    kpi(q[0], "Concentration", "per market", None,
-        "select a single market to see it")
-
-if len(oqs):
-    lost, tot_o = oqs.orders_lost.sum(), oqs.orders.sum()
-    rate = lost / tot_o if tot_o else None
-    kpi(q[1], "Cancellation rate", p(rate),
-        pts(now.get("cancel_rate"), prev.get("cancel_rate"), pm),
-        f"{int(lost)} of {int(tot_o)} orders · "
-        f"{n(oqs.cost_lost_lc.sum())} of cost written off",
-        tone(rate, good=0.05, warn=0.10, invert=True), dl_good=False)
-else:
-    kpi(q[1], "Cancellation rate", "n/a", None, "needs the API source")
-
-denom = (sel.act_units * sel.plan_price_lc.fillna(0)).sum()
-pr_ = sel.act_net_lc.sum() / denom if denom else None
-kpi(q[2], "Price realisation", p(pr_), None,
-    f"{int((cb.price_realisation < 0.90).sum()) if len(cb) else 0} products "
-    f"below 90% of plan price", tone(pr_, good=0.98, warn=0.93))
-
-if HAS_TIERS and sel.act_net_lc.sum():
-    soft = 1 - sel.net_confirmed_lc.sum() / sel.act_net_lc.sum()
-    kpi(q[3], "Revenue at risk", p(soft), None,
-        "not yet delivered or paid, can still move",
-        tone(soft, good=0.30, warn=0.60, invert=True))
-else:
-    kpi(q[3], "Revenue at risk", "n/a", None, "needs the API source")
-
-if land:
-    kpi(q[4], "Landing estimate", p(land["projected_attainment"]), None,
-        f"{n(land['projected'])} {cur} if the run rate holds · paced at "
-        f"{p(land['vs_paced'])}", tone(land["projected_attainment"]))
-else:
-    kpi(q[4], "Months in scope",
-        str(sel[(sel.plan_units > 0) | (sel.act_units > 0)].month.nunique()),
-        None, "landing estimate needs a single month")
-
-
-# ------------------------------------------------------------ trend
-
-if HAS_LINES:
-    d = lines.copy()
-    d["ts"] = pd.to_datetime(d.processed_at, utc=True, format="mixed")
-    d = d[(d.market.isin(mk_scope)) & (d.ts.dt.year == YEAR) & (~d.cancelled)
-          & (~d.financial_status.isin(ve.DEAD_STATUSES))]
-    if sel_prods:
-        d = d[d["product"].isin(sel_prods)]
-    g = go.Figure()
-    if month != YTD:
-        dm = d[d.ts.dt.month == MONTHS.index(month) + 1]
-        total = land["days_total"] if land else 31
-        days = list(range(1, total + 1))
-        daily = (dm.assign(day=dm.ts.dt.day).groupby("day")["net_line_lc"].sum()
-                 .reindex(days, fill_value=0).cumsum())
-        cut = max(1, land["days_elapsed"] if land else total)
-        g.add_trace(go.Scatter(x=days, y=[A["plan_rev"] * i / total for i in days],
-                               name="Plan, paced",
-                               line=dict(color=GREY, width=2, dash="dash")))
-        g.add_trace(go.Scatter(x=days[:cut], y=list(daily.values)[:cut],
-                               name="Actual", line=dict(color=BLUE, width=2.5),
-                               fill="tozeroy", fillcolor="rgba(42,120,214,.07)"))
-        if land and land["projected"] and cut < total:
-            g.add_trace(go.Scatter(x=[cut, total],
-                                   y=[daily.values[cut - 1], land["projected"]],
-                                   name="Landing estimate",
-                                   line=dict(color=YELLOW, width=2, dash="dot")))
-        g.update_layout(xaxis_title=f"Day of {month}")
+elif view == "Forecast":
+    fc = me.forecast(lines, plan, scope, cost_log)
+    if not fc:
+        st.info("The period has finished, so there is nothing left to "
+                "forecast. Pick a period that is still running.")
     else:
-        grid = ve.rollup(sel, ["month"])
-        g.add_trace(go.Bar(x=grid.month.astype(str), y=grid[f"plan_revenue{SUF}"],
-                           name="Plan", marker_color="#dfe3e8"))
-        g.add_trace(go.Bar(x=grid.month.astype(str), y=grid[f"act_net{SUF}"],
-                           name="Actual", marker_color=BLUE))
-        g.update_layout(barmode="overlay")
-    g.update_layout(height=300, legend=dict(orientation="h", y=1.15, x=0),
-                    yaxis_title=f"Revenue {cur}")
-    st.plotly_chart(g, width="stretch")
+        st.caption(f"{market} · {scope.label} · day {fc['elapsed']} of "
+                   f"{fc['days']} · {fc['remaining']} days remaining")
 
-if ameta.get("missing"):
-    st.caption(f"Not connected yet: {', '.join(ameta['missing'])}")
-for m_, e in (ameta.get("errors") or {}).items():
-    st.warning(f"{m_}: {e}")
+        basis = st.radio(
+            "Basis", ["Run rate", "Attainment", "Plan"], horizontal=True,
+            help="Run rate assumes the last 7 days repeat. Attainment assumes "
+                 "the rate achieved so far continues. Plan assumes the "
+                 "remaining days run exactly to plan.")
+        key = {"Run rate": "run_rate", "Attainment": "attainment",
+               "Plan": "at_plan"}[basis]
+        b = fc["bases"][key]
+        P, SF = fc["plan"], fc["so_far"]
 
+        st.markdown("<div class='sec'>Demand</div>", unsafe_allow_html=True)
+        st.caption("Orders and basket are forecast separately because they "
+                   "fail for different reasons. Boxes follow from them.")
+        dk = st.columns(3)
+        dk[0].markdown(
+            f"<div class='k'><div class='lab'>Orders</div>"
+            f"<div class='val'>{n(b['orders'])}</div>"
+            f"<div class='dl' style='color:{tone(b['orders_pct'])}'>"
+            f"{p(b['orders_pct'])} of plan</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:5px'>"
+            f"{n(SF['orders'])} placed · {n(b['orders'] - SF['orders'])} to come"
+            f"</div></div>", unsafe_allow_html=True)
+        bk_pct = b["basket"] / P["basket"] if P.get("basket") else None
+        dk[1].markdown(
+            f"<div class='k'><div class='lab'>Basket</div>"
+            f"<div class='val'>{n(b['basket'], '{:.2f}')}</div>"
+            f"<div class='dl' style='color:{tone(bk_pct)}'>"
+            f"{'holding' if bk_pct and abs(bk_pct - 1) < .03 else p(bk_pct)}</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:5px'>"
+            f"boxes per order · so far {n(P['basket'], '{:.2f}')}</div></div>",
+            unsafe_allow_html=True)
+        dk[2].markdown(
+            f"<div class='k'><div class='lab'>Boxes</div>"
+            f"<div class='val'>{n(b['units'])}</div>"
+            f"<div class='dl' style='color:{tone(b['units_pct'])}'>"
+            f"{p(b['units_pct'])} of plan</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:5px'>"
+            f"orders × basket · plan {n(P['units'])}</div></div>",
+            unsafe_allow_html=True)
 
-# ------------------------------------------------------------------ tabs
+        if P.get("orders") and P.get("basket"):
+            ord_gap = b["orders"] - P["orders"]
+            bkt_gap = (b["basket"] - P["basket"]) * b["orders"]
+            driver = "order count" if abs(ord_gap * P["basket"]) > abs(bkt_gap) \
+                else "basket size"
+            st.markdown(
+                f"<div class='take'>The projected box shortfall is mostly "
+                f"<b>{driver}</b> — {n(ord_gap, '{:+,.0f}')} orders against "
+                f"plan, basket {n(b['basket'] - P['basket'], '{:+.2f}')}. "
+                + ("Fewer customers is a demand question."
+                   if driver == "order count"
+                   else "Smaller baskets is a merchandising question.")
+                + "</div>", unsafe_allow_html=True)
 
-st.divider()
-HAS_COST = "act_cm_dated_lc" in combined.columns
-tabs = st.tabs(["Attainment", "Daily", "Comparison", "Revenue bridge",
-                "Cost & margin", "Price simulator", "Pricing advisor",
-                "Portfolio", "Demand origin", "Order quality",
-                "Exceptions"])
+        st.markdown("<div class='sec'>Financials</div>", unsafe_allow_html=True)
+        st.caption("Derived from the demand above, so the two cannot "
+                   "contradict.")
+        fk = st.columns(3)
+        fk[0].markdown(
+            f"<div class='k'><div class='lab'>Revenue {CUR}</div>"
+            f"<div class='val'>{n(b['revenue'])}</div>"
+            f"<div class='dl' style='color:{tone(b['revenue_pct'])}'>"
+            f"{p(b['revenue_pct'])} of plan</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:5px'>"
+            f"{n(b['price'], '{:.2f}')} a box · plan "
+            f"{n(P['price'], '{:.2f}')}</div></div>", unsafe_allow_html=True)
+        fk[1].markdown(
+            f"<div class='k'><div class='lab'>Cost {CUR}</div>"
+            f"<div class='val'>{n(b['cogs'])}</div>"
+            f"<div class='dl' style='color:{NEUT}'>at {fc['cost_basis']} cost</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:5px'>"
+            f"{n(b['cost_per_box'], '{:.2f}')} a box · plan "
+            f"{n(P['cost'], '{:.2f}')}</div></div>", unsafe_allow_html=True)
+        fk[2].markdown(
+            f"<div class='k'><div class='lab'>Margin {CUR}</div>"
+            f"<div class='val'>{n(b['cm'])}</div>"
+            f"<div class='dl' style='color:{tone(b['cm_pct_of_plan'])}'>"
+            f"{p(b['cm_pct_of_plan'])} of plan · {p(b['cm_pct'])}</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:5px'>"
+            f"plan {n(P['cm'])} at {p(P['cm'] / P['revenue'] if P['revenue'] else None)}"
+            f"</div></div>", unsafe_allow_html=True)
 
-with tabs[0]:
-    grid = ve.rollup(combined, ["market", "month"])
-    piv = grid.pivot(index="market", columns="month",
-                     values="revenue_attainment_aed")
-    piv = piv.reindex([m for m in MARKETS if m in piv.index])
-    piv = piv.reindex(columns=[m for m in MONTHS if m in piv.columns])
-    flat = piv.stack().dropna() if len(piv) else pd.Series(dtype=float)
-    if len(flat):
-        worst = flat.idxmin()
-        note(f"<b>{len(flat)} market-months have both a plan and sales.</b> "
-             f"Weakest is {worst[0]} in {worst[1]} at {flat.min():.0%} of plan; "
-             f"strongest is {flat.idxmax()[0]} in {flat.idxmax()[1]} at "
-             f"{flat.max():.0%}. Blank cells mean no plan and no sales, which "
-             f"is not the same as zero.")
-    h = go.Figure(go.Heatmap(
-        z=piv.values * 100, x=list(piv.columns), y=list(piv.index),
-        colorscale=[[0, "#f6cfc8"], [0.5, "#fdf1da"], [1, "#bfe6d5"]],
-        zmin=0, zmax=140,
-        text=[[f"{v*100:.0f}%" if pd.notna(v) else "" for v in rv]
-              for rv in piv.values],
-        texttemplate="%{text}", hoverongaps=False,
-        hovertemplate="%{y} · %{x}<br>%{text} of plan<extra></extra>",
-        colorbar=dict(title="% of plan")))
-    h.update_layout(height=250)
-    st.plotly_chart(h, width="stretch")
+        ms = fc["margin_split"]
+        w = waterfall([
+            {"label": "plan", "value": P["cm"], "kind": "start"},
+            {"label": "volume", "value": ms["volume"],
+             "kind": "up" if ms["volume"] >= 0 else "down"},
+            {"label": "price", "value": ms["price"],
+             "kind": "up" if ms["price"] >= 0 else "down"},
+            {"label": "cost", "value": ms["cost"],
+             "kind": "up" if ms["cost"] >= 0 else "down"},
+            {"label": "projected", "value": b["cm"], "kind": "end"},
+        ], title=f"Margin {CUR}", height=300)
+        if w:
+            st.plotly_chart(w, width="stretch")
+        tot = abs(ms["volume"]) + abs(ms["cost"]) + abs(ms["price"])
+        if tot:
+            st.caption(
+                f"Of the projected margin gap, {abs(ms['volume'])/tot:.0%} is "
+                f"volume, {abs(ms['cost'])/tot:.0%} cost and "
+                f"{abs(ms['price'])/tot:.0%} price.")
 
-    mm = ve.rollup(sel, ["month"])
-    show = mm[["month", "plan_units", "act_units", "unit_attainment",
-               f"plan_revenue{SUF}", f"act_net{SUF}", ATT,
-               f"plan_cm{SUF}", f"act_cm_at_plan{SUF}", CMP_]].copy()
-    show.columns = ["month", "plan units", "actual units", "unit att",
-                    f"plan rev {cur}", f"actual rev {cur}", "rev att",
-                    f"plan CM {cur}", f"actual CM {cur}", "CM%"]
-    table(show, height=300)
+        st.markdown("<div class='sec'>Revenue to period end</div>",
+                    unsafe_allow_html=True)
+        daily = fc["daily"]
+        if len(daily):
+            g = go.Figure()
+            g.add_trace(go.Scatter(x=daily["date"], y=daily["revenue"],
+                                   name="actual",
+                                   line=dict(color=BLUE, width=2.5)))
+            last_d = daily["date"].iloc[-1]
+            last_v = float(daily["revenue"].iloc[-1])
+            end_ts = pd.Timestamp(scope.end)
+            for lab, kk, colr in (("run rate", "run_rate", ORANGE),
+                                  ("attainment", "attainment", AMBER),
+                                  ("plan", "at_plan", GREY)):
+                g.add_trace(go.Scatter(
+                    x=[last_d, end_ts],
+                    y=[last_v, fc["bases"][kk]["revenue"]], name=lab,
+                    line=dict(color=colr, width=2,
+                              dash="dash" if kk == "at_plan" else "dot")))
+            g.update_layout(height=300, yaxis_title=f"Cumulative revenue {CUR}",
+                            legend=dict(orientation="h", y=1.12, x=0))
+            st.plotly_chart(g, width="stretch")
 
-with tabs[1]:
-    st.caption("Orders, units and revenue read together. One of them moving "
-               "without the others is the whole point, so none of them is "
-               "hidden behind a selector.")
-    if not HAS_LINES:
-        st.info("The daily view needs the Shopify API source.")
-    else:
-        dly = ve.daily(lines, plan, YEAR,
-                       None if CONSOL else market,
-                       None if month == YTD else month, cost_log)
-        if dly.empty:
-            st.info("No billable days in this scope.")
-        else:
-            pm = sel[f"plan_revenue{SUF}"].sum() if month != YTD else None
-            dim = land["days_total"] if land else None
-            sm = ve.daily_summary(dly, pm, dim)
-            wk = dly.tail(7)
-            pw = dly.iloc[-14:-7] if len(dly) >= 14 else None
-
-            def vs7(col):
-                if pw is None or not pw[col].mean():
-                    return None
-                return wk[col].mean() / pw[col].mean() - 1
-
-            m = st.columns(3)
-            kpi(m[0], "Orders", n(wk.orders.sum()),
-                (f"{vs7('orders') * 100:+.0f}% on the week before"
-                 if vs7("orders") is not None else None),
-                f"last 7 days · {n(wk.orders.mean(), '{:.0f}')} a day",
-                tone(1 + (vs7("orders") or 0)))
-            kpi(m[1], "Units", n(wk.boxes.sum()),
-                (f"{vs7('boxes') * 100:+.0f}% on the week before"
-                 if vs7("boxes") is not None else None),
-                f"{n(wk.boxes.sum() / max(1, wk.orders.sum()), '{:.1f}')} "
-                f"boxes per order",
-                tone(1 + (vs7("boxes") or 0)))
-            kpi(m[2], f"Revenue {cur}", n(wk.revenue.sum()),
-                (f"{vs7('revenue') * 100:+.0f}% on the week before"
-                 if vs7("revenue") is not None else None),
-                f"avg order {n(wk.revenue.sum() / max(1, wk.orders.sum()))} · "
-                f"CM {p(wk.cm.sum() / wk.revenue.sum() if wk.revenue.sum() else None)}",
-                tone(1 + (vs7("revenue") or 0)))
-
-            dn = ve.demand_note(dly)
-            if dn:
-                note(f"<b>{dn}</b>")
-
-            c1, c2, c3 = st.columns(3)
-            for col, (lbl, field, planline) in zip(
-                    (c1, c2, c3),
-                    [("Orders per day", "orders", None),
-                     ("Units per day", "boxes", None),
-                     (f"Revenue per day", "revenue",
-                      sm.get("plan_per_day"))]):
-                f = go.Figure()
-                f.add_trace(go.Bar(x=dly.date, y=dly[field], name=lbl,
-                                   marker_color=BLUE))
-                f.add_trace(go.Scatter(
-                    x=dly.date,
-                    y=dly[field].rolling(7, min_periods=1).mean(),
-                    name="7-day", line=dict(color=ORANGE, width=2)))
-                if planline:
-                    f.add_trace(go.Scatter(
-                        x=dly.date, y=[planline] * len(dly), name="Plan",
-                        line=dict(color=GREY, width=2, dash="dash")))
-                f.update_layout(height=190, showlegend=False, bargap=0.2,
-                                margin=dict(l=4, r=4, t=26, b=20),
-                                title=dict(text=lbl, font=dict(size=12), x=0,
-                                           xanchor="left"),
-                                xaxis=dict(showticklabels=False),
-                                yaxis=dict(title=None))
-                col.plotly_chart(f, width="stretch")
-
-            st.divider()
-            st.markdown("<div class='sec'>Products moving</div>",
-                        unsafe_allow_html=True)
-            mv = ve.daily_products(lines, YEAR, None if CONSOL else market,
-                                   None if month == YTD else month)
-            if mv.empty:
-                st.caption("Not enough history for a movers view.")
-            else:
-                rising = mv[mv.status == "rising"].nlargest(6, "revenue_change")
-                fading = mv[mv.status == "fading"].nsmallest(6, "revenue_change")
-                stopped = mv[mv.status == "stopped"]
-                new = mv[mv.status == "new"]
-
-                bits = []
-                if len(rising):
-                    bits.append(f"{len(rising)} rising, led by "
-                                f"{rising.iloc[0]['product']} at "
-                                f"{rising.iloc[0]['revenue_change']:+,.0f}")
-                if len(fading):
-                    bits.append(f"{len(fading)} fading, worst "
-                                f"{fading.iloc[0]['product']} at "
-                                f"{fading.iloc[0]['revenue_change']:+,.0f}")
-                if len(stopped):
-                    bits.append(f"{len(stopped)} stopped selling entirely")
-                if bits:
-                    note("<b>Last 7 days against the 7 before.</b> "
-                         + ". ".join(bits) + ". A product that stops selling "
-                         "on a perishable is a stronger signal than one that "
-                         "merely sells less.")
-
-                mvt = mv.head(20)
-                f = go.Figure(go.Bar(
-                    x=mvt.revenue_change, y=mvt["product"], orientation="h",
-                    marker_color=[TEAL if v >= 0 else ORANGE
-                                  for v in mvt.revenue_change],
-                    text=[f"{v:+,.0f}" for v in mvt.revenue_change],
-                    textposition="auto"))
-                f.update_layout(height=max(300, 24 * len(mvt)),
-                                xaxis_title=f"Revenue change {cur}, "
-                                            f"7 days against the 7 before",
-                                yaxis=dict(autorange="reversed"))
-                st.plotly_chart(f, width="stretch")
-
-                show = mv[["product", "status", "orders_now", "units_now",
-                           "revenue_now", "share_now", "revenue_change",
-                           "revenue_change_pct", "price_now", "price_prev",
-                           "days_since_sale"]].copy()
-                show.columns = ["product", "status", "orders", "units",
-                                "revenue", "share", "change", "change %",
-                                "price now", "price before",
-                                "days since sale"]
-                table(show, height=360)
-
-            mix = ve.daily_product_mix(lines, YEAR,
-                                       None if CONSOL else market,
-                                       None if month == YTD else month)
-            if len(mix):
-                st.caption("Daily revenue by product, leaders and the rest")
-                f = go.Figure()
-                bands = (mix.groupby("band")["revenue"].sum()
-                         .sort_values(ascending=False).index.tolist())
-                for i, bd in enumerate(bands):
-                    dd = mix[mix.band == bd]
-                    f.add_trace(go.Scatter(
-                        x=dd.date, y=dd.revenue, name=bd, stackgroup="one",
-                        line=dict(width=0.5,
-                                  color=(GREY if bd == "Other"
-                                         else SERIES[i % len(SERIES)]))))
-                f.update_layout(height=300, yaxis_title=f"Revenue {cur}",
-                                legend=dict(orientation="h", y=1.12, x=0,
-                                            font=dict(size=11)))
-                st.plotly_chart(f, width="stretch")
-
-            st.divider()
-            w1, w2 = st.columns([1.3, 1])
-            w1.caption("Orders by weekday")
-            w2.caption("New against returning, share of orders by week")
-            wd = (dly[dly.revenue > 0].groupby("weekday")
-                  .agg(days=("date", "count"), orders=("orders", "mean"),
-                       revenue=("revenue", "mean")).reset_index())
-            ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
-                     "Saturday", "Sunday"]
-            wd["_o"] = wd.weekday.map({w: i for i, w in enumerate(ORDER)})
-            wd = wd.sort_values("_o").drop(columns="_o")
-            if len(wd):
-                avg = wd.orders.mean()
-                f = go.Figure(go.Bar(
-                    x=wd.weekday.str[:3], y=wd.orders,
-                    marker_color=[TEAL if v >= avg else GREY
-                                  for v in wd.orders],
-                    text=[f"{v / avg - 1:+.0%}" for v in wd.orders],
-                    textposition="outside"))
-                f.update_layout(height=230, showlegend=False,
-                                margin=dict(l=4, r=4, t=34, b=20),
-                                yaxis=dict(title=None), xaxis=dict(title=None))
-                w1.plotly_chart(f, width="stretch")
-
-            if "customer_type" in lines.columns:
-                cd = lines.copy()
-                cd["date"] = pd.to_datetime(cd.processed_at, utc=True,
-                                            format="mixed").dt.tz_localize(None)
-                cd = cd[(cd.date.dt.year == YEAR) & (~cd.cancelled)
-                        & (~cd.financial_status.isin(ve.DEAD_STATUSES))]
-                if not CONSOL:
-                    cd = cd[cd.market == market]
-                if month != YTD:
-                    cd = cd[cd.date.dt.month == MONTHS.index(month) + 1]
-                if len(cd):
-                    cd["week"] = cd.date.dt.isocalendar().week
-                    ct = (cd.groupby(["week", "customer_type"], observed=True)
-                          ["order"].nunique().reset_index(name="orders"))
-                    tot = ct.groupby("week")["orders"].transform("sum")
-                    ct["share"] = ct.orders / tot
-                    f = go.Figure()
-                    for i, seg in enumerate(["New", "Returning", "Unknown"]):
-                        dd = ct[ct.customer_type == seg]
-                        if dd.empty:
-                            continue
-                        f.add_trace(go.Bar(
-                            x=dd.week.astype(str), y=dd.share, name=seg,
-                            marker_color=[BLUE, YELLOW, GREY][i]))
-                    # The title lives in the caption above, so the chart
-                    # only carries the legend. Two stacked headings in a
-                    # 230px chart collide.
-                    f.update_layout(height=230, barmode="stack",
-                                    margin=dict(l=4, r=4, t=34, b=20),
-                                    yaxis=dict(tickformat=".0%", title=None),
-                                    xaxis=dict(title=None),
-                                    legend=dict(orientation="h", y=1.16, x=0,
-                                                font=dict(size=11)))
-                    w2.plotly_chart(f, width="stretch")
-
-            st.caption("Every day, newest first")
-            show = dly[["date", "weekday", "orders", "boxes",
-                        "boxes_per_order", "aov", "revenue", "discount", "cm",
-                        "cm_pct", "rolling_7", "cumulative"]].copy()
-            show.columns = ["date", "day", "orders", "boxes", "boxes/order",
-                            "avg order", "revenue", "discount", "CM", "CM%",
-                            "7-day avg", "cumulative"]
-            table(show.iloc[::-1], height=380)
-
-
-with tabs[2]:
-    cc1, cc2 = st.columns([1, 3])
-    dim = cc1.selectbox("Compare by", ["Market", "Month", "Category", "Product"])
-    col = {"Market": "market", "Month": "month", "Category": "category",
-           "Product": "product"}[dim]
-    universe = (MARKETS if col == "market" else
-                [m for m in MONTHS if m in set(base.month)] if col == "month"
-                else sorted(base[col].dropna().unique()))
-    picked = cc2.multiselect(f"{dim}s", universe,
-                             default=list(universe[:3]) if universe else [])
-    if not picked:
-        st.info("Pick at least one to compare.")
-    else:
-        scope = base if col in ("market", "month") else sel
-        if col != "month" and month != YTD:
-            scope = scope[scope.month == month]
-        scope = scope[scope[col].isin(picked)]
-        g = ve.rollup(scope, [col]).set_index(col).reindex(picked).reset_index()
-        if ATT not in g.columns:
-            g[ATT] = pd.NA
-        if CMP_ not in g.columns:
-            g[CMP_] = pd.NA
-        has_att = g[ATT].notna().any()
-        best = g.loc[g[ATT].idxmax()] if has_att else None
-        wrst = g.loc[g[ATT].idxmin()] if has_att else None
-        if g[[c for c in g.columns if c.startswith("act_") or
-              c.startswith("plan_")]].fillna(0).abs().sum().sum() == 0:
-            note("Nothing planned and nothing sold in this selection.")
-        if best is not None and wrst is not None and len(g) > 1:
-            note(f"<b>{best[col]} leads at {best[ATT]:.0%} of plan; "
-                 f"{wrst[col]} trails at {wrst[ATT]:.0%}.</b> "
-                 f"A spread of {(best[ATT] - wrst[ATT]) * 100:.0f} points on the "
-                 f"same plan basis, worth "
-                 f"{abs(best[f'var_revenue{SUF}'] - wrst[f'var_revenue{SUF}']):,.0f} "
-                 f"{cur} of variance between them.")
-        cols = st.columns(len(picked))
-        for i, rowi in g.iterrows():
-            kpi(cols[i], str(rowi[col]), n(rowi[f"act_net{SUF}"]),
-                delta(rowi[ATT]),
-                f"plan {n(rowi[f'plan_revenue{SUF}'])} {cur} · "
-                f"{n(rowi.act_units)} boxes · CM {p(rowi[CMP_])}",
-                tone(rowi[ATT]))
-        f = go.Figure()
-        f.add_trace(go.Bar(x=g[col].astype(str), y=g[f"plan_revenue{SUF}"],
-                           name="Plan", marker_color="#dfe3e8"))
-        f.add_trace(go.Bar(x=g[col].astype(str), y=g[f"act_net{SUF}"],
-                           name="Actual", marker_color=BLUE))
-        f.update_layout(barmode="group", height=320,
-                        legend=dict(orientation="h", y=1.15, x=0),
-                        yaxis_title=f"Revenue {cur}")
-        st.plotly_chart(f, width="stretch")
-        show = g[[col, "plan_units", "act_units", "unit_attainment",
-                  f"plan_revenue{SUF}", f"act_net{SUF}", ATT,
-                  f"act_cm_at_plan{SUF}", CMP_]].copy()
-        show.columns = [dim.lower(), "plan units", "actual units", "unit att",
-                        f"plan rev {cur}", f"actual rev {cur}", "rev att",
-                        f"CM {cur}", "CM%"]
-        table(show)
-
-with tabs[3]:
-    st.caption("Where planned revenue went, from plan down to cash invoiced. "
-               "The parts reconcile exactly, so nothing hides in a residual.")
-    L = ve.leakage(combined, lines, plan,
-                   None if CONSOL else market,
-                   None if month == YTD else month, YEAR)
-    if not L:
-        st.info("Nothing in this scope.")
-    elif abs(L["residual"]) > 1:
-        st.warning(f"The decomposition does not reconcile — residual "
-                   f"{L['residual']:,.0f}. Not shown, because a bridge that "
-                   f"does not add up is worse than none.")
-    else:
-        lk = st.columns(4)
-        kpi(lk[0], "Discount", n(L["discount_value"]),
-            None, f"{p(L['discount_rate'])} of gross · "
-                  f"{n(L['discount_value'] / L['act_units'] if L['act_units'] else None, '{:,.2f}')} a box",
-            tone(L["discount_rate"], good=0.02, warn=0.05, invert=True))
-        kpi(lk[1], "Returns and reversals", n(L["reversal_value"]),
-            None, f"{p(L['reversal_rate'])} of gross",
-            tone(L["reversal_rate"], good=0.03, warn=0.08, invert=True))
-        kpi(lk[2], "Volume not sold", n(abs(L["volume"])),
-            None, f"{n(abs(L['act_units'] - L['plan_units']))} boxes at the "
-                  f"plan price of {n(L['plan_price'], '{:,.2f}')}",
-            BAD if L["volume"] < 0 else GOOD)
-        kpi(lk[3], "Total gap", n(L["gap"], "{:+,.0f}"),
-            None, f"{n(L['actual_net'])} against a plan of "
-                  f"{n(L['plan_revenue'])}",
-            BAD if L["gap"] < 0 else GOOD)
-
-        steps = [("Plan revenue", L["plan_revenue"], "absolute"),
-                 ("Volume", L["volume"], "relative"),
-                 ("Price", L["price"], "relative"),
-                 ("Discount", L["discount"], "relative"),
-                 ("Returns", L["reversals"], "relative"),
-                 ("Net revenue", None, "total")]
-        w = go.Figure(go.Waterfall(
-            orientation="v",
-            measure=[m for _, _, m in steps],
-            x=[x for x, _, _ in steps],
-            y=[v for _, v, _ in steps],
-            text=[f"{v:,.0f}" if v is not None else f"{L['actual_net']:,.0f}"
-                  for _, v, _ in steps],
-            textposition="outside",
-            connector={"line": {"color": GREY, "width": 1}},
-            increasing={"marker": {"color": TEAL}},
-            decreasing={"marker": {"color": ORANGE}},
-            totals={"marker": {"color": BLUE}}))
-        w.update_layout(height=360, margin=dict(t=24), showlegend=False,
-                        yaxis_title=f"Revenue {LOCAL}")
-        st.plotly_chart(w, width="stretch")
-
-        biggest = max([("volume", abs(L["volume"])),
-                       ("discount", abs(L["discount"])),
-                       ("returns", abs(L["reversals"]))], key=lambda t: t[1])
-        note(f"<b>{biggest[0].title()} is the largest leak at "
-             f"{biggest[1]:,.0f} {LOCAL}.</b> "
-             f"Discount is {p(L['discount_rate'])} of gross and returns are "
-             f"{p(L['reversal_rate'])}. "
-             f"Every unit of discount is a unit of margin — the cost of a box "
-             f"does not fall when its price does, so "
-             f"{n(L['discount_value'])} of discount is "
-             f"{n(L['discount_value'])} straight off contribution. "
-             + (f"{n(L['cancelled_units'])} boxes were ordered and then "
-                f"cancelled, which sits inside the volume figure rather than "
-                f"on top of it."
-                if L.get("cancelled_units") else ""))
-
-        st.caption("Price path per box")
-        pp = pd.DataFrame([{
-            "plan price": L["plan_price"],
-            "gross achieved": L["act_gross_price"],
-            "after discount": L["act_net_price"],
-            "vs plan": ((L["act_net_price"] / L["plan_price"] - 1) * 100
-                        if L["plan_price"] else None)}])
-        table(pp)
-
-        st.caption("Discount by product — every point of discount is a point "
-                   "of margin")
-        dd = ve.discount_detail(combined, "product",
-                                None if CONSOL else market,
-                                None if month == YTD else month)
-        if len(dd):
-            top = dd.head(15)
-            f = go.Figure()
-            f.add_trace(go.Bar(x=top.discount, y=top["product"],
-                               orientation="h", name="Discount value",
-                               marker_color=ORANGE,
-                               text=[f"{v:,.0f}" for v in top.discount],
-                               textposition="auto"))
-            f.update_layout(height=max(300, 26 * len(top)),
-                            xaxis_title=f"Discount given {LOCAL}",
-                            yaxis=dict(autorange="reversed"))
-            st.plotly_chart(f, width="stretch")
-            show = dd[["market", "product", "units", "gross", "discount",
-                       "discount_rate", "discount_per_box", "cm_pct",
-                       "cm_pct_undiscounted", "cm_points_lost"]].copy()
-            show.columns = ["market", "product", "units", "gross", "discount",
-                            "discount rate", "discount/box", "CM%",
-                            "CM% if undiscounted", "CM points lost"]
-            table(show, height=340)
-        else:
-            st.caption("No discounts recorded in this scope.")
-
-        if not CONSOL and month != YTD:
-            st.caption("The same decomposition by month")
-            rows = []
-            for mo in MONTHS:
-                Lm = ve.leakage(combined, lines, plan, market, mo, YEAR)
-                if Lm and (Lm["plan_revenue"] or Lm["actual_net"]):
-                    rows.append({
-                        "month": mo, "plan": Lm["plan_revenue"],
-                        "volume": Lm["volume"], "price": Lm["price"],
-                        "discount": Lm["discount"],
-                        "returns": Lm["reversals"],
-                        "actual": Lm["actual_net"],
-                        "discount rate": Lm["discount_rate"],
-                        "return rate": Lm["reversal_rate"]})
-            table(pd.DataFrame(rows), height=320)
+        lo = min(v["revenue"] for v in fc["bases"].values())
+        hi = max(v["revenue"] for v in fc["bases"].values())
+        st.markdown(
+            f"<div style='font-size:12px;color:#6d7076;line-height:1.7;"
+            f"background:#f4f6f9;border-radius:8px;padding:10px 13px;"
+            f"max-width:900px'><b style='font-weight:500;color:#17181a'>"
+            f"None of these is a prediction.</b> Each is arithmetic from a "
+            f"stated assumption. Run rate follows the last {fc['window']} days "
+            f"and turns fastest. Attainment assumes the shape so far holds. "
+            f"Plan is the ceiling — what a perfect rest of period would give. "
+            f"The {n(hi - lo)} {CUR} spread between them is the honest measure "
+            f"of how uncertain the period is.</div>",
+            unsafe_allow_html=True)
 
 
 
-    st.divider()
-    st.caption("Volume, price and mix per category, so the gap has an owner. "
-               "Mix is the one effect the leakage view above cannot show: the "
-               "same boxes sold at a different blend of products.")
-    cat_rows = [{"category": cat_} | dict(ve.bridge(sel, category=cat_))
-                for cat_ in sorted(sel.category.dropna().unique())]
-    if cat_rows:
-        table(pd.DataFrame(cat_rows).sort_values("gap"), height=280)
-
-
-    st.divider()
-    st.caption("Achieved price against plan price, per product.")
-    if cb.empty:
+elif view == "Portfolio pricing":
+    pf = me.portfolio(lines, plan, scope, cost_log)
+    if not pf:
         st.info("No sales in this scope.")
     else:
-        weak = cb[cb.price_realisation < 0.90]
-        lost = ((cb.plan_wavg_price - cb.act_wavg_price) * cb.act_units)
-        note(f"<b>{len(weak)} of {len(cb)} products sold below 90% of plan "
-             f"price.</b> Net effect across all products is "
-             f"{-lost.sum():+,.0f} against plan price on units actually sold. "
-             + (f"Worst is {weak.iloc[0]['product']} at "
-                f"{weak.iloc[0]['price_realisation']:.0%}. " if len(weak) else "")
-             + "A low realisation is either discounting or a shift to cheaper "
-               "grades within the same product.")
-        d = cb.sort_values("price_realisation")
-        f = go.Figure(go.Bar(
-            x=(d.price_realisation - 1) * 100, y=d[LBL], orientation="h",
-            marker_color=[ORANGE if v < 1 else TEAL for v in d.price_realisation],
-            text=[f"{v:.0%}" for v in d.price_realisation], textposition="auto"))
-        f.update_layout(height=max(300, 28 * len(d)),
-                        xaxis_title="Achieved vs plan price, percentage points",
-                        yaxis=dict(autorange="reversed"))
-        st.plotly_chart(f, width="stretch")
-        show = d[[LBL, "product", "act_units", "plan_wavg_price",
-                  "act_wavg_price", "price_realisation",
-                  "act_cm_at_plan_lc"]].copy()
-        show.columns = ["product", "store name", "units", "plan price",
-                        "achieved price", "realisation", "CM"]
-        table(show, height=280)
+        gk = st.columns(3)
+        gk[0].markdown(
+            f"<div class='k'><div class='lab'>Mix CM%</div>"
+            f"<div class='val'>{p(pf['cm_pct'])}</div>"
+            f"<div class='dl' style='color:"
+            f"{GOOD if (pf['points'] or 0) >= 0 else BAD}'>"
+            f"{pf['points']:+.1f} pts vs plan {p(pf['plan_cm_pct'])}</div>"
+            f"</div>", unsafe_allow_html=True)
+        gk[1].markdown(
+            f"<div class='k'><div class='lab'>Margin gap</div>"
+            f"<div class='val' style='color:"
+            f"{BAD if pf['gap'] < 0 else GOOD}'>{n(pf['gap'], '{:+,.0f}')}</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
+            f"{CUR}, at the volume actually sold</div></div>",
+            unsafe_allow_html=True)
+        gk[2].markdown(
+            f"<div class='k'><div class='lab'>Working on</div>"
+            f"<div class='val'>{'Recovery' if pf['gap'] < 0 else 'Surplus'}</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
+            + ("where can a price rise be absorbed"
+               if pf["gap"] < 0 else "how much can be spent on demand")
+            + f" · at {pf['cost_basis']} cost</div></div>",
+            unsafe_allow_html=True)
 
-with tabs[4]:
-    st.caption("Plan cost is what you forecast. Dated cost is what the product "
-               "actually cost on the day each box was sold. The gap between "
-               "them is cost movement, not commercial performance.")
-    if not HAS_COST:
-        st.info("Add a Cost_Log sheet to the plan workbook to see margin at "
-                "actual dated cost. Columns: store_product_name, market, "
-                "valid_from, cogs_unit_lc, note. Append a row when a cost "
-                "changes — never edit an old one.")
+        st.markdown(
+            f"<div class='take'>"
+            + ("Below plan, so this is a recovery. Set a move on the products "
+               "that can carry it — nothing is proposed that you have not "
+               "allowed."
+               if pf["gap"] < 0 else
+               "Above plan, so there is room to spend. A negative move is a "
+               "price cut or an offer.")
+            + "</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='sec'>Set your moves</div>",
+                    unsafe_allow_html=True)
+        st.caption("Alone is what that product would need to close the whole "
+                   "gap by itself — a feasibility test, not a proposal. "
+                   "Anything past 10% is not a candidate.")
+
+        g = pf["products"]
+        editable = g[["product", "units", "price", "cost", "cm_pct",
+                      "alone_pct", "share"]].copy()
+        editable["move_pct"] = 0.0
+        editable.columns = ["product", "boxes", "price", "cost", "CM%",
+                            "alone", "share", "your move %"]
+        edited = st.data_editor(
+            editable, hide_index=True, width="stretch", height=320,
+            disabled=["product", "boxes", "price", "cost", "CM%", "alone",
+                      "share"],
+            column_config={
+                "CM%": st.column_config.NumberColumn(format="%.1f%%"),
+                "alone": st.column_config.NumberColumn(
+                    format="%.1f%%",
+                    help="The rise this product alone would need to close the "
+                         "whole gap."),
+                "share": st.column_config.NumberColumn(format="%.1f%%"),
+                "price": st.column_config.NumberColumn(format="%.2f"),
+                "cost": st.column_config.NumberColumn(format="%.2f"),
+                "boxes": st.column_config.NumberColumn(format="%d"),
+                "your move %": st.column_config.NumberColumn(
+                    format="%.1f", step=0.5, min_value=-50.0, max_value=50.0,
+                    help="Type a percentage. Positive raises price, negative "
+                         "cuts it."),
+            }, key="pf_editor")
+
+        moves = dict(zip(edited["product"], edited["your move %"].fillna(0)))
+        res = me.apply_moves(pf, moves)
+
+        if res.get("moved"):
+            st.markdown("<div class='sec'>Result</div>", unsafe_allow_html=True)
+            rk = st.columns(3)
+            rk[0].markdown(
+                f"<div class='k' style='background:#E1F5EE;border-color:#9FE1CB'>"
+                f"<div class='lab' style='color:#0F6E56'>"
+                f"{'Margin recovered' if pf['gap'] < 0 else 'Margin spent'}</div>"
+                f"<div class='val' style='color:#04342C'>"
+                f"{n(res['recovered'], '{:+,.0f}')}</div>"
+                f"<div class='ft' style='border:none;padding:0;margin-top:4px;"
+                f"color:#0F6E56'>"
+                + (f"{p(res['closed_share'])} of the {n(-pf['gap'])} gap"
+                   if res.get("closed_share") else f"of a {n(pf['gap'])} surplus")
+                + "</div></div>", unsafe_allow_html=True)
+            rk[1].markdown(
+                f"<div class='k' style='background:#E1F5EE;border-color:#9FE1CB'>"
+                f"<div class='lab' style='color:#0F6E56'>New mix CM%</div>"
+                f"<div class='val' style='color:#04342C'>"
+                f"{p(res['new_cm_pct'])}</div>"
+                f"<div class='ft' style='border:none;padding:0;margin-top:4px;"
+                f"color:#0F6E56'>plan {p(pf['plan_cm_pct'])} · "
+                f"{(res['new_cm_pct'] - pf['plan_cm_pct']) * 100:+.1f} pts"
+                f"</div></div>", unsafe_allow_html=True)
+            rk[2].markdown(
+                f"<div class='k' style='background:#E1F5EE;border-color:#9FE1CB'>"
+                f"<div class='lab' style='color:#0F6E56'>Volume you can lose"
+                f"</div><div class='val' style='color:#04342C'>"
+                f"{p(res['breakeven_volume'])}</div>"
+                f"<div class='ft' style='border:none;padding:0;margin-top:4px;"
+                f"color:#0F6E56'>before this is worse than doing nothing"
+                f"</div></div>", unsafe_allow_html=True)
+
+            t = res["table"]
+            t = t[t["move"].abs() > 0]
+            show = t[["product", "units", "price", "move", "new_price",
+                      "cm_pct", "new_cm_pct", "cm_change"]].copy()
+            show["move"] = show["move"] * 100
+            show.columns = ["product", "boxes", "current price", "move %",
+                            "new price", "CM% now", "CM% after",
+                            f"margin change {CUR}"]
+            st.caption("New prices")
+            table(show)
+
+            if res.get("below_cost"):
+                st.warning("These fall below cost at the new price: "
+                           + ", ".join(res["below_cost"]))
+
+            st.download_button(
+                "Download the new price list",
+                show.to_csv(index=False).encode(),
+                file_name=f"price_moves_{market}_{month}_{YEAR}.csv",
+                mime="text/csv", key="dl_prices")
+        else:
+            st.caption("Type a move against a product to see the result.")
+
+        st.markdown(
+            f"<div style='font-size:12px;color:#6d7076;line-height:1.7;"
+            f"background:#f4f6f9;border-radius:8px;padding:10px 13px;"
+            f"margin-top:14px;max-width:900px'>"
+            f"<b style='font-weight:500;color:#17181a'>Volume is held flat on "
+            f"purpose.</b> The tool does not predict what a price rise does to "
+            f"demand — it states the break-even, so the person who knows the "
+            f"market can judge whether the trade is worth taking. An "
+            f"elasticity estimated from this data would be seasonal demand "
+            f"wearing a price label, because price and season moved together "
+            f"all year.</div>", unsafe_allow_html=True)
+
+
+elif view in ("Orders", "Units", "Revenue", "Margin"):
+    metric = view.lower()
+
+    strip = st.columns(4)
+    if metric == "orders":
+        for i, (lab, v, sub) in enumerate([
+                ("Orders", n(O["total"]), f"{p(O['total']/O['paced']) if O['paced'] else 'n/a'} of pace"),
+                ("Delivered", n(O["delivered"]), p(O["delivered"]/O["total"] if O["total"] else None)),
+                ("Open", n(O["open"]), p(O["open"]/O["total"] if O["total"] else None)),
+                ("Lost", n(O["lost"]), f"{p(O['cancel_rate'])} of {n(O['placed'])} placed")]):
+            strip[i].metric(lab, v, sub, delta_color="off")
+    elif metric == "units":
+        for i, (lab, v, sub) in enumerate([
+                ("Units", n(U["total"]), f"{p(U['total']/U['paced']) if U['paced'] else 'n/a'} of pace"),
+                ("Delivered", n(U["delivered"]), p(U["delivered"]/U["total"] if U["total"] else None)),
+                ("Open", n(U["open"]), p(U["open"]/U["total"] if U["total"] else None)),
+                ("Lost", n(U["lost"]), p(U["lost"]/(U["total"]+U["lost"]) if U["total"] else None))]):
+            strip[i].metric(lab, v, sub, delta_color="off")
+    elif metric == "revenue":
+        for i, (lab, v, sub) in enumerate([
+                (f"Revenue {CUR}", n(R["total"]), f"{p(R['total']/R['paced']) if R['paced'] else 'n/a'} of pace"),
+                ("Collected", n(R["collected"]), p(R["collected"]/R["total"] if R["total"] else None)),
+                ("Owed", n(R["owed"]), p(R["owed"]/R["total"] if R["total"] else None)),
+                ("At risk", n(R["at_risk"]), p(R["at_risk"]/R["total"] if R["total"] else None))]):
+            strip[i].metric(lab, v, sub, delta_color="off")
     else:
-        g = ve.rollup(sel, ["month"])
-        c1, c2, c3 = st.columns(3)
-        pc = sel["act_cm_at_plan_lc"].sum()
-        dc = sel["act_cm_dated_lc"].sum()
-        rv = sel["act_net_lc"].sum()
-        kpi(c1, "CM at plan cost", n(pc), None,
-            p(pc / rv if rv else None) + " of net revenue", NEUT)
-        kpi(c2, "CM at dated cost", n(dc), None,
-            p(dc / rv if rv else None) + " of net revenue",
-            tone(dc / rv if rv else None, good=0.40, warn=0.30))
-        kpi(c3, "Cost movement", n(dc - pc, "{:+,.0f}"), None,
-            "dated cost against plan cost",
-            GOOD if dc >= pc else BAD)
+        for i, (lab, v, sub) in enumerate([
+                (f"CM {CUR}", n(M["cm"]), f"{p(M['cm']/M['paced']) if M['paced'] else 'n/a'} of pace"),
+                ("CM %", p(M["cm_pct"]), f"plan {p(M['plan_pct'])}"),
+                ("CM per box", n(M["per_box"], "{:.2f}"), f"plan {n(M['plan_per_box'], '{:.2f}')}"),
+                ("Lost to cancellation", n(M["lost_cm"]), "margin never earned")]):
+            strip[i].metric(lab, v, sub, delta_color="off")
 
-        f = go.Figure()
-        f.add_trace(go.Bar(x=g.month.astype(str), y=g.act_cm_at_plan_lc,
-                           name="At plan cost", marker_color="#dfe3e8"))
-        f.add_trace(go.Bar(x=g.month.astype(str), y=g.act_cm_dated_lc,
-                           name="At dated cost", marker_color=TEAL))
-        f.update_layout(barmode="group", height=310,
-                        legend=dict(orientation="h", y=1.15, x=0),
-                        yaxis_title="Contribution margin")
-        st.plotly_chart(f, width="stretch")
-
-        show = g[["month", "act_units", "act_net_lc", "act_cm_at_plan_lc",
-                  "act_cm_dated_lc", "act_cm_dated_pct",
-                  "dated_vs_plan_cost"]].copy()
-        show.columns = ["month", "units", "net revenue", "CM at plan cost",
-                        "CM at dated cost", "CM%", "cost movement"]
-        table(show)
-
-        if HAS_LINES and cost_log is not None:
-            cov = ve.cost_coverage(lines, cost_log, plan, YEAR)
-            cov = cov[cov.market.isin(mk_scope)]
-            if len(cov):
-                gap = cov[cov.cost_source != "dated"]
-                if len(gap):
-                    note(f"<b>{gap.share.sum():.0%} of revenue in scope has no "
-                         f"dated cost entry</b> and falls back to the planned "
-                         f"cost. Those months will restate when you add the "
-                         f"missing Cost_Log rows.")
-                st.caption("Where the cost figure came from")
-                table(cov)
-
-        st.caption("The log is append-only. To change a cost, add a row with a "
-                   "new valid_from — never edit an existing one, or history "
-                   "silently rewrites itself.")
-
-
-with tabs[5]:
-    st.caption("Change a price and see what would have to be true. Volume is "
-               "held flat on purpose — the number that decides it is the "
-               "break-even, not a guess at how customers respond.")
-
-    s1, s2, s3, s4 = st.columns([1.4, 1.4, 1.6, 1])
-    scope = s1.radio("Apply to", ["Whole market", "One category", "One product"],
-                     index=0)
-    sim_cat = sim_prod = None
-    if scope == "One category":
-        sim_cat = s2.selectbox("Category", sorted(sel.category.dropna().unique()))
-    elif scope == "One product":
-        opts = sorted(sel[sel.act_units > 0]["product"].dropna().unique())
-        sim_prod = s2.selectbox("Product", opts) if len(opts) else None
-    else:
-        s2.markdown("&nbsp;", unsafe_allow_html=True)
-    pct = s3.slider("Price change %", -30, 30, -10, 1)
-    basis = s4.radio("Basis", ["Actual", "Plan"], index=0,
-                     help="Actual uses what was really sold and achieved. "
-                          "Plan is for months that have not happened yet.")
-
-    scope_df = combined[combined.market.isin(mk_scope)]
-    if month != YTD:
-        scope_df = scope_df[scope_df.month == month]
-
-    try:
-        sim = px.simulate(
-            scope_df,
-            [px.Scenario(pct=pct, category=sim_cat, product=sim_prod)],
-            use_actual=(basis == "Actual"))
-    except px.PricingError as e:
-        st.info(str(e))
-        sim = None
-
-    if sim:
-        be = sim["breakeven_volume_pct"]
-        k1 = st.columns(4)
-        kpi(k1[0], f"CM at {pct:+d}%", n(sim["new_cm"]),
-            n(sim["cm_change"], "{:+,.0f}"),
-            f"from {n(sim['base_cm'])} {cur}",
-            GOOD if sim["cm_change"] >= 0 else BAD)
-        kpi(k1[1], "Break-even volume",
-            "n/a" if be is None else f"{be:+.0f}%", None,
-            "units needed to hold CM" if (be or 0) > 0
-            else "units you could afford to lose",
-            NEUT if be is None else tone(-abs(be), good=-15, warn=-30))
-        kpi(k1[2], "CM %", p(sim["new_cm_pct"]), None,
-            f"from {p(sim['base_cm_pct'])}",
-            tone(sim["new_cm_pct"], good=0.35, warn=0.25))
-        kpi(k1[3], "Revenue", n(sim["new_revenue"]),
-            n(sim["revenue_change"], "{:+,.0f}"),
-            f"on {n(sim['base_units'])} boxes held flat", NEUT)
-
-        if be is not None:
-            verdict = ("easy" if abs(be) < 10 else
-                       "demanding" if abs(be) < 30 else "unlikely")
-            note(f"<b>A {abs(pct)}% "
-                 f"{'cut' if pct < 0 else 'rise'} needs "
-                 f"{'+' if be > 0 else ''}{be:.0f}% volume to hold "
-                 f"contribution margin — {verdict}.</b> "
-                 f"Margin here is {p(sim['base_cm_pct'])}, and the thinner the "
-                 f"margin the more volume a cut has to find. Costed at "
-                 f"{sim['cost_basis']} cost.")
-        if sim["rows_below_cost_after"]:
-            st.warning(
-                f"{sim['rows_below_cost_after']} rows fall below cost at this "
-                f"price: {', '.join(sim['products_below_cost_after'][:6])}")
-
-        sens = px.sensitivity(scope_df, category=sim_cat, product=sim_prod,
-                              use_actual=(basis == "Actual"))
-        f = go.Figure()
-        f.add_trace(go.Bar(x=sens.price_change_pct, y=sens.cm, name="CM",
-                           marker_color=[TEAL if v >= sim["base_cm"] else ORANGE
-                                         for v in sens.cm]))
-        f.add_trace(go.Scatter(x=sens.price_change_pct,
-                               y=sens.breakeven_volume_pct, name="Break-even %",
-                               yaxis="y2", line=dict(color=BLUE, width=2.5)))
-        f.update_layout(height=330, yaxis_title=f"CM {cur}",
-                        yaxis2=dict(title="Break-even volume %", overlaying="y",
-                                    side="right", showgrid=False),
-                        xaxis_title="Price change %",
-                        legend=dict(orientation="h", y=1.15, x=0))
-        st.plotly_chart(f, width="stretch")
-        st.caption("Break-even is not linear in the price change. A small cut "
-                   "on a thin margin can need more volume than a larger cut on "
-                   "a fat one.")
-
-        bt = px.breakeven_table(scope_df, pct, by="product",
-                               use_actual=(basis == "Actual"))
-        if len(bt):
-            st.caption(f"What each product would need at {pct:+d}%")
-            show = bt[["market", "product", "units", "cm_pct_before",
-                       "breakeven_volume_pct", "verdict"]].copy()
-            show.columns = ["market", "product", "units", "CM% now",
-                            "volume needed %", "verdict"]
-            table(show, height=300)
-
-with tabs[6]:
-    st.caption("What the margin arithmetic says, ranked by money at stake. "
-               "No recommendation names an optimal price — that needs an "
-               "elasticity this data cannot yet identify.")
-    adv = px.advise(combined, plan, cost_log,
-                    market=None if CONSOL else market,
-                    month=None if month == YTD else month)
-    if adv.empty:
-        note("Nothing flagged in this scope. Either the pricing is sound or "
-             "there is not enough volume yet to judge — the advisor ignores "
-             "products under 20 boxes.")
-    else:
-        counts = adv.severity.value_counts().to_dict()
-        note("<b>" + " · ".join(f"{v} {k}" for k, v in counts.items())
-             + f"</b> · {n(adv.stake.sum())} {cur} at stake in total. "
-               "Each recommendation states what is wrong, what it costs, and "
-               "what would have to be true to fix it with price.")
-        SEV_C = {"urgent": BAD, "high": ORANGE, "medium": YELLOW, "low": NEUT}
-        for r in adv.head(12).itertuples():
-            st.markdown(
-                f"<div class='fin' style='--acc:{SEV_C.get(r.severity, NEUT)};"
-                f"margin-bottom:9px'>"
-                f"<div class='s'>{n(r.stake)} {cur} · {r.severity}</div>"
-                f"<div class='t'>{r.product} · {r.market} · {r.month} — "
-                f"{r.issue}</div>"
-                f"<div class='d'>{r.detail}<br><b>{r.action}</b></div></div>",
+    st.markdown("<div class='sec'>1 · Where the gap went</div>",
                 unsafe_allow_html=True)
-        if len(adv) > 12:
-            with st.expander(f"{len(adv) - 12} more"):
-                table(adv[["severity", "stake", "product", "market",
-                                  "month", "issue", "action"]],
-                             )
+    steps = me.gap_decomposition(C, metric)
+    f = waterfall(steps, title=metric.title() if metric != "revenue"
+                  else f"Revenue {CUR}")
+    if f:
+        st.plotly_chart(f, width="stretch")
 
-    health = px.portfolio_price_health(combined,
-                                       None if CONSOL else market)
-    if len(health):
-        st.caption("Price health by product — what it earns a box, its share "
-                   "of margin, and the volume a 5% cut would have to find.")
-        show = health[["market", "product", "units", "price", "cost", "cm_box",
-                       "cm_pct", "cm_share", "realisation",
-                       "breakeven_at_minus5"]].copy()
-        show.columns = ["market", "product", "units", "price", "cost",
-                        "CM/box", "CM%", "CM share", "realisation",
-                        "vol needed at -5%"]
+    if metric in ("orders", "revenue"):
+        st.markdown("<div class='sec'>2 · Status against payment</div>",
+                    unsafe_allow_html=True)
+        g = me.state_payment_grid(lines, plan, scope,
+                                  "orders" if metric == "orders" else "money",
+                                  cost_log)
+        if len(g):
+            g = g.reindex(index=["delivered", "open"]).fillna(0)
+            gg = g.reset_index()
+            gg.columns = ["state"] + list(g.columns)
+            gg["total"] = g.sum(axis=1).values
+            table(gg)
+    else:
+        st.markdown("<div class='sec'>2 · By product against plan</div>",
+                    unsafe_allow_html=True)
+        pp = me.product_performance(lines, plan, scope, cost_log)
+        if len(pp):
+            d = pp.head(14).iloc[::-1]
+            f = go.Figure()
+            if metric == "units":
+                f.add_trace(go.Bar(y=d["product"], x=d.plan_units, name="plan",
+                                   orientation="h", marker_color="#D3D1C7"))
+                f.add_trace(go.Bar(y=d["product"], x=d.units, name="actual",
+                                   orientation="h", marker_color=BLUE))
+                f.update_layout(barmode="group", xaxis_title="Boxes")
+            else:
+                f.add_trace(go.Bar(y=d["product"], x=d.cm, orientation="h",
+                                   marker_color=[TEAL if v >= 0 else ORANGE
+                                                 for v in d.cm]))
+                f.update_layout(xaxis_title=f"Contribution margin {CUR}")
+            f.update_layout(height=max(320, 26 * len(d)),
+                            legend=dict(orientation="h", y=1.1, x=0))
+            st.plotly_chart(f, width="stretch")
+
+    st.markdown("<div class='sec'>3 · By channel, city and customer</div>",
+                unsafe_allow_html=True)
+    bd = me.by_dimension(lines, plan, scope, cost_log=cost_log)
+    if len(bd):
+        cols = {
+            "orders": ["dimension", "value", "orders", "share", "cancel_rate",
+                       "aov"],
+            "units": ["dimension", "value", "units", "share",
+                      "boxes_per_order", "cancel_rate"],
+            "revenue": ["dimension", "value", "revenue", "share", "aov",
+                        "discount_rate"],
+            "margin": ["dimension", "value", "cm", "share", "cm_pct",
+                       "cm_per_box"],
+        }[metric]
+        show = bd[cols].copy()
+        show.columns = [c.replace("_", " ") for c in cols]
         table(show, height=340)
 
-
-with tabs[7]:
-    if cb.empty:
-        st.info("No sales in this scope.")
-    else:
-        rng = cb.cm_per_box.max() / cb.cm_per_box.min() if cb.cm_per_box.min() else None
-        note(f"<b>CM per box ranges "
-             f"{cb.cm_per_box.min():,.1f} to {cb.cm_per_box.max():,.1f}"
-             + (f", a {rng:.1f}× spread." if rng else ".")
-             + f"</b> {cb.iloc[0]['product']} contributes "
-               f"{cb.iloc[0]['cm_share']:.0%} of all margin. When freight "
-               f"capacity binds, the per-box ranking on the right is the "
-               f"allocation decision, not the total on the left.")
-        c1, c2 = st.columns(2)
-        d = cb.head(14)
-        f = go.Figure(go.Bar(x=d.act_cm_at_plan_lc, y=d[LBL],
-                             orientation="h", marker_color=BLUE,
-                             text=[f"{v:,.0f}" for v in d.act_cm_at_plan_lc],
-                             textposition="auto"))
-        f.update_layout(height=max(320, 28 * len(d)),
-                        xaxis_title="CM contribution",
-                        yaxis=dict(autorange="reversed"))
-        c1.plotly_chart(f, width="stretch")
-        d2 = cb.sort_values("cm_per_box", ascending=False)
-        f2 = go.Figure(go.Bar(x=d2.cm_per_box, y=d2[LBL], orientation="h",
-                              marker_color=TEAL,
-                              text=[f"{v:,.1f}" for v in d2.cm_per_box],
-                              textposition="auto"))
-        f2.update_layout(height=max(320, 28 * len(d2)),
-                         xaxis_title="CM per box",
-                         yaxis=dict(autorange="reversed"))
-        c2.plotly_chart(f2, width="stretch")
-        cy = ve.concentration(base)
-        if len(cy):
-            st.caption("Concentration across the year.")
-            show = cy[["market", "month", "products", "top1_product",
-                       "top1_share", "top3_share", "revenue_lc"]].copy()
-            show.columns = ["market", "month", "products sold", "largest",
-                            "largest share", "top 3 share", "revenue"]
+    if metric == "orders":
+        st.markdown("<div class='sec'>4 · Order concentration</div>",
+                    unsafe_allow_html=True)
+        st.caption("Share of orders containing each product. Shares sum past "
+                   "100% because an order holds several.")
+        oc = me.order_concentration(lines, plan, scope)
+        if len(oc):
+            cat = oc[oc.level == "category"].head(8)
+            f = go.Figure(go.Bar(
+                y=cat["product"].iloc[::-1], x=cat["share"].iloc[::-1] * 100,
+                orientation="h", marker_color=BLUE,
+                text=[f"{v:.0%}" for v in cat["share"].iloc[::-1]],
+                textposition="auto"))
+            f.update_layout(height=max(240, 28 * len(cat)),
+                            xaxis_title="Share of orders %")
+            st.plotly_chart(f, width="stretch")
+            show = oc[["level", "product", "orders", "share"]].head(25)
             table(show, height=320)
 
-with tabs[8]:
-    if not HAS_LINES:
-        st.info("This needs the Shopify API source.")
+    elif metric == "units":
+        st.markdown("<div class='sec'>4 · Basket composition</div>",
+                    unsafe_allow_html=True)
+        bc = me.basket_composition(lines, scope)
+        if len(bc):
+            c1, c2 = st.columns([1, 1])
+            f = go.Figure(go.Bar(
+                x=bc.band, y=bc.share * 100,
+                marker_color=[ORANGE, AMBER, TEAL, TEAL, TEAL][:len(bc)],
+                text=[f"{v:.0%}" for v in bc.share], textposition="outside"))
+            f.update_layout(height=250, margin=dict(t=26),
+                            xaxis_title="products in order",
+                            yaxis_title="share of orders %")
+            c1.plotly_chart(f, width="stretch")
+            show = bc[["band", "orders", "share", "avg_order", "avg_units"]].copy()
+            show.columns = ["products", "orders", "share", "avg order",
+                            "avg boxes"]
+            table(show, into=c2)
+
+    elif metric == "revenue":
+        st.markdown("<div class='sec'>4 · Price realisation by product</div>",
+                    unsafe_allow_html=True)
+        pp = me.product_performance(lines, plan, scope, cost_log)
+        pp = pp[pp.price_index.notna()].sort_values("price_index")
+        if len(pp):
+            f = go.Figure(go.Bar(
+                y=pp["product"], x=pp.price_index * 100, orientation="h",
+                marker_color=[TEAL if v >= 1 else AMBER if v >= .95 else ORANGE
+                              for v in pp.price_index],
+                text=[f"{v:.0%}" for v in pp.price_index], textposition="auto"))
+            f.update_layout(height=max(300, 26 * len(pp)),
+                            xaxis_title="Achieved against plan price %",
+                            xaxis=dict(range=[80, 115]))
+            st.plotly_chart(f, width="stretch")
+            show = pp[["product", "units", "plan_price", "price",
+                       "price_index", "revenue"]].copy()
+            show.columns = ["product", "units", "plan price", "achieved",
+                            "index", f"revenue {CUR}"]
+            table(show, height=320)
+
     else:
-        mk = None if CONSOL else market
-        mo = None if month == YTD else month
-        segs = {dim_: ve.by_segment(lines, dim_, plan, YEAR, mk, mo)
-                for dim_ in ve.SEGMENTS}
-        bits = []
-        for dim_, label in ve.SEGMENTS.items():
-            g = segs[dim_]
-            if g.empty:
-                continue
-            t = g.iloc[0]
-            bits.append(f"{t[dim_]} is {t.revenue_share:.0%} of revenue at "
-                        f"{t.cm_pct:.0%} margin and {t.units_per_order:.1f} "
-                        f"boxes per order")
-        if bits:
-            note("<b>Where the demand sits.</b> " + "; ".join(bits) +
-                 ". These dimensions live on the order, not the plan, so they "
-                 "say where demand came from rather than whether plan was met.")
-        cols = st.columns(3)
-        for i, (dim_, label) in enumerate(ve.SEGMENTS.items()):
-            g = segs[dim_]
-            if g.empty:
-                cols[i].info(f"No {label.lower()} data.")
-                continue
-            # A city typed by the customer produces a very long tail. The
-            # chart shows what carries the revenue and folds the rest into
-            # one bar; the table below keeps every row.
-            TOP = 8
-            if len(g) > TOP:
-                head = g.head(TOP)
-                tail = g.tail(len(g) - TOP)
-                gc = pd.concat([
-                    head[[dim_, "revenue_lc", "revenue_share"]],
-                    pd.DataFrame([{
-                        dim_: f"Other · {len(tail)}",
-                        "revenue_lc": tail.revenue_lc.sum(),
-                        "revenue_share": tail.revenue_share.sum()}])],
-                    ignore_index=True)
-            else:
-                gc = g[[dim_, "revenue_lc", "revenue_share"]]
-            fig = go.Figure(go.Bar(x=gc[dim_].astype(str), y=gc.revenue_lc,
-                                   marker_color=(SERIES * 3)[: len(gc)],
-                                   text=[f"{v:.0%}" for v in gc.revenue_share],
-                                   textposition="outside"))
-            # Three charts sit side by side, so they have to be dimensioned
-            # identically. The y-axis title is dropped because in a third of
-            # the page width it costs more room than it explains — the
-            # caption above already says these are revenue.
-            fig.update_layout(
-                height=300, margin=dict(l=4, r=4, t=30, b=70),
-                title=dict(text=label, font=dict(size=13), x=0, xanchor="left"),
-                yaxis=dict(title=None, tickformat=",.0s"),
-                xaxis=dict(tickangle=-40, automargin=True, title=None),
-                showlegend=False, bargap=0.25, autosize=True)
-            cols[i].plotly_chart(fig, width="stretch")
-        for dim_, label in ve.SEGMENTS.items():
-            g = segs[dim_]
-            if g.empty:
-                continue
-            st.caption(f"{label} · orders, basket size and margin")
-            show = g[[dim_, "orders", "units", "units_per_order", "aov_lc",
-                      "revenue_lc", "revenue_share", "cm_lc", "cm_pct",
-                      "products"]].copy()
-            show.columns = [label.lower(), "orders", "units", "boxes/order",
-                            "avg order", "revenue", "share", "CM", "CM%",
-                            "products"]
-            table(show)
+        st.markdown("<div class='sec'>4 · Cost movement</div>",
+                    unsafe_allow_html=True)
+        cc = me.cost_changes(cost_log, plan, scope)
+        if not len(cc):
+            st.caption("No dated costs recorded. Margin above is at plan cost, "
+                       "so it measures commercial performance only and cost "
+                       "movement is invisible.")
+        else:
+            d = cc[cc.vs_plan_pct.notna()].head(20).iloc[::-1]
+            f = go.Figure(go.Bar(
+                y=d["product"], x=d.vs_plan_pct * 100, orientation="h",
+                marker_color=[ORANGE if v > .10 else AMBER if v > .02
+                              else TEAL if v < -.02 else GREY
+                              for v in d.vs_plan_pct],
+                text=[f"{v:+.0%}" for v in d.vs_plan_pct], textposition="auto"))
+            f.update_layout(height=max(300, 26 * len(d)),
+                            xaxis_title="Actual cost against plan %")
+            st.plotly_chart(f, width="stretch")
+            show = cc[["product", "plan_cost", "previous", "cogs_unit_lc",
+                       "vs_plan_pct", "vs_previous_pct", "changes"]].copy()
+            show.columns = ["product", "plan cost", "previous", "current",
+                            "vs plan", "vs previous", "changes"]
+            table(show, height=320)
 
-with tabs[9]:
-    if oq.empty:
-        st.info("Order quality needs the Shopify API source.")
+
+# --------------------------------------------------- cash and exceptions
+
+else:
+    st.markdown("<div class='sec'>Payment</div>", unsafe_allow_html=True)
+    pay = me.payment(lines, plan, scope, cost_log)
+    if not pay or not pay.get("delivered_orders"):
+        st.caption("Nothing delivered in this scope.")
     else:
-        d = oq[oq.market.isin(mk_scope)]
-        note(f"<b>{int(d.orders_lost.sum())} of {int(d.orders.sum())} orders "
-             f"lost across the scope, {d.orders_lost.sum()/d.orders.sum():.0%}.</b> "
-             f"{d.units_lost.sum():,.0f} boxes and "
-             f"{d.cost_lost_lc.sum():,.0f} of cost at plan rates. On "
-             f"make-to-order air freight that fruit was already procured and "
-             f"flown, so this is a write-off rather than a lost sale.")
-        g = go.Figure()
-        g.add_trace(go.Bar(x=d.month.astype(str), y=d.orders - d.orders_lost,
-                           name="Kept", marker_color=TEAL))
-        g.add_trace(go.Bar(x=d.month.astype(str), y=d.orders_lost,
-                           name="Cancelled or voided", marker_color=ORANGE))
-        g.update_layout(barmode="stack", height=300, yaxis_title="Orders",
-                        legend=dict(orientation="h", y=1.15, x=0))
-        st.plotly_chart(g, width="stretch")
-        show = d[["market", "month", "orders", "orders_lost", "cancel_rate",
-                  "units_lost", "value_lost_lc", "cost_lost_lc"]].copy()
-        show.columns = ["market", "month", "orders", "lost", "rate",
-                        "units lost", "revenue lost", "cost written off"]
-        table(show)
-        if HAS_TIERS:
-            st.caption("Of what survived, how much is settled.")
-            tot = sel[["net_confirmed_lc", "net_committed_lc",
-                       "net_potential_lc"]].sum()
-            t3 = st.columns(3)
-            for i, (lab, sub, key) in enumerate([
-                    ("Confirmed", "delivered and paid", "net_confirmed_lc"),
-                    ("Committed", "delivered, COD open", "net_committed_lc"),
-                    ("Potential", "not yet delivered", "net_potential_lc")]):
-                kpi(t3[i], lab, n(tot[key]), None,
-                    p(tot[key] / tot.sum() if tot.sum() else None) + " · " + sub,
-                    {"Confirmed": GOOD, "Committed": BLUE,
-                     "Potential": WARN}[lab])
+        def arrow(v, good_down=True, fmt="{:+.0%}"):
+            """A movement against the previous seven days.
 
-with tabs[10]:
-    e = ve.exceptions(base)
-    ns = e[e.presence == "sold, not planned"].copy()
-    npl = e[e.presence == "planned, not sold"].copy()
-    thin = plan[(plan.market.isin(mk_scope))
-                & (plan.plan_cogs_unit_lc >= plan.plan_price_lc)]
-    note(f"<b>Ranked by money at stake, not by row order.</b> "
-         f"{len(npl)} planned rows sold nothing, worth "
-         f"{npl.plan_revenue_lc.sum():,.0f} of plan. "
-         f"{len(ns)} products sold without a plan, worth "
-         f"{ns.act_net_lc.sum():,.0f} of revenue the plan never expected. "
-         f"{len(thin)} rows are planned at or below cost.")
-    a1, a2 = st.columns(2)
-    a1.caption(f"Sold but not planned · {len(ns)} · highest value first")
-    table(ns.sort_values("act_net_lc", ascending=False)[
-        ["market", "month", "product_label", "product", "act_units",
-         "act_net_lc"]],
-        height=260)
-    a2.caption(f"Planned but not sold · {len(npl)} · highest value first")
-    table(npl.sort_values("plan_revenue_lc", ascending=False)[
-        ["market", "month", "product_label", "product", "plan_units",
-         "plan_revenue_lc"]],
-        height=260)
-    if len(thin):
-        st.caption(f"Planned at or below cost · {len(thin)}")
-        table(thin[["market", "month", "product", "plan_units",
-                        "plan_price_lc", "plan_cogs_unit_lc"]])
-    um = ve.unmatched_products(actuals, plan, aliases)
-    if len(um):
-        st.caption(f"Store product names that do not reach a plan product · "
-                   f"{len(um)} · highest revenue first")
-        table(um, height=260)
-        st.caption(
-            "Each of these means sales going unattributed and a plan row "
-            "looking unsold. Add an Aliases sheet to the plan workbook with "
-            "columns store_name and plan_name to close them. Word-order "
-            "differences resolve on their own; only genuinely different names "
-            "need an entry.")
+            Direction alone is not meaning: rising cash outstanding is bad,
+            rising collection speed is good. Each caller says which.
+            """
+            if v is None or pd.isna(v):
+                return ""
+            up = v > 0
+            bad = up if good_down else not up
+            icon = "↗" if up else "↘"
+            colr = BAD if bad else GOOD
+            return (f"<span style='color:{colr};font-weight:500;font-size:12px'>"
+                    f"{icon} {fmt.format(abs(v))}</span>")
 
-    cov = pe.coverage(plan)
-    gaps = cov[(cov.market.isin(mk_scope)) & (~cov.planned)]
-    if len(gaps):
-        st.caption("Months with no plan at all")
-        table(gaps[["market", "month"]])
+        k = st.columns(3)
+        lag = pay.get("median_lag")
+        k[0].markdown(
+            f"<div class='k'><div class='lab'>Days to reconcile</div>"
+            f"<div class='row'><div class='val'>{'n/a' if lag is None else f'{lag:.0f}'}</div>"
+            f"{arrow(pay.get('lag_change'), True, '{:.0f}')}</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
+            f"median, delivery to paid"
+            + (f" · was {pay['lag_prev']:.0f}" if pay.get("lag_prev") is not None else "")
+            + "</div></div>", unsafe_allow_html=True)
+        k[1].markdown(
+            f"<div class='k'><div class='lab'>Cash outstanding</div>"
+            f"<div class='row'><div class='val'>{n(pay['outstanding'])}</div>"
+            f"{arrow(pay.get('outstanding_change'), True)}</div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
+            f"{pay['orders']} orders delivered, not paid</div></div>",
+            unsafe_allow_html=True)
+        k[2].markdown(
+            f"<div class='k'><div class='lab'>Stuck past "
+            f"{pay['stuck_after']} days</div>"
+            f"<div class='row'><div class='val' style='color:{BAD}'>"
+            f"{n(pay['stuck_value'])}</div></div>"
+            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
+            f"{pay['stuck_orders']} orders · oldest {pay['oldest']} days"
+            f"</div></div>", unsafe_allow_html=True)
+
+        c1, c2 = st.columns([1.15, 1])
+        bb = pay["by_band"]
+        f = go.Figure(go.Bar(
+            x=bb.band, y=bb.outstanding,
+            marker_color=[TEAL, "#5DCAA5", AMBER, ORANGE, "#A32D2D"][:len(bb)],
+            text=[f"{v:,.0f}" for v in bb.outstanding], textposition="outside"))
+        f.update_layout(height=250, margin=dict(t=26),
+                        xaxis_title="days since delivery",
+                        yaxis_title=f"Outstanding {CUR}")
+        c1.plotly_chart(f, width="stretch")
+
+        if pay["stuck_orders"]:
+            c2.markdown(
+                f"<div style='background:#FCEBEB;border-radius:8px;"
+                f"padding:12px 14px;font-size:12.5px;color:#791F1F;"
+                f"line-height:1.65;margin-top:14px'>"
+                f"<b style='font-weight:500'>{pay['stuck_orders']} orders past "
+                f"{pay['stuck_after']} days, worth {n(pay['stuck_value'])} "
+                f"{CUR}.</b><br>Beyond any reconciliation window. Either the "
+                f"cash has not been remitted, or the goods never reached the "
+                f"customer.</div>", unsafe_allow_html=True)
+            st_ = pay["stuck_table"]
+            keep = [c for c in ["order", "days_since_delivery", "outstanding",
+                                "boxes", "channel", "delivered_on", "basis"]
+                    if c in st_.columns]
+            c2.download_button(
+                f"Download the {pay['stuck_orders']} stuck orders",
+                st_[keep].to_csv(index=False).encode(),
+                file_name=f"stuck_orders_{market}_{month}_{YEAR}.csv",
+                mime="text/csv", key="dl_stuck")
+        else:
+            c2.caption("Nothing is stuck beyond the window.")
+
+        ot = pay["orders_table"]
+        if len(ot):
+            keep = [c for c in ["order", "days_since_delivery", "outstanding",
+                                "boxes", "channel", "delivered_on", "basis"]
+                    if c in ot.columns]
+            st.download_button(
+                f"Download all {pay['orders']} outstanding orders",
+                ot[keep].to_csv(index=False).encode(),
+                file_name=f"outstanding_{market}_{month}_{YEAR}.csv",
+                mime="text/csv", key="dl_out")
+
+        st.markdown("<div class='sec'>Delivered to customers</div>",
+                    unsafe_allow_html=True)
+        st.caption(f"{n(pay['delivered_boxes'])} boxes · "
+                   f"{pay['delivered_orders']} orders · "
+                   f"{n(pay['delivered_value'])} {CUR}")
+        bp = pay["by_product"].copy()
+        bp.columns = ["product", "boxes", "orders", f"value {CUR}"]
+        table(bp, height=320)
+        st.download_button(
+            "Download delivered by product",
+            bp.to_csv(index=False).encode(),
+            file_name=f"delivered_by_product_{market}_{month}_{YEAR}.csv",
+            mime="text/csv", key="dl_prod")
+
+        if pay.get("no_delivery_date"):
+            st.caption(f"{pay['no_delivery_date']} orders had no delivery date "
+                       f"and are aged from the order date instead.")
+
+    st.markdown("<div class='sec'>Exceptions</div>", unsafe_allow_html=True)
+    ex = me.exceptions(lines, plan, scope, cost_log)
+    if not ex:
+        st.caption("Nothing flagged in this scope.")
+    else:
+        colour = {"high": ORANGE, "medium": AMBER, "low": GREY}
+        for e in ex:
+            st.markdown(
+                f"<div style='background:#fff;border:0.5px solid #e4e7ec;"
+                f"border-left:3px solid {colour[e['severity']]};padding:11px 14px;"
+                f"margin-bottom:7px'>"
+                f"<div style='display:flex;justify-content:space-between;"
+                f"gap:8px;flex-wrap:wrap'>"
+                f"<span style='font-size:13px;font-weight:500'>{e['title']}</span>"
+                f"<span style='font-size:12px;color:{colour[e['severity']]};"
+                f"font-weight:500'>"
+                + (f"{e['value']:,.0f} {CUR}" if e["value"] else "")
+                + f"</span></div>"
+                f"<div style='font-size:12px;color:#6d7076;margin-top:3px'>"
+                f"{e['detail']} — {e['why']}</div></div>",
+                unsafe_allow_html=True)
+
+footer_definitions()

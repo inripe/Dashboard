@@ -1,0 +1,1351 @@
+"""Metrics engine — Inripe sales performance.
+
+One place where every headline figure is defined. The dashboard reads from
+here and computes nothing of its own, so a number cannot mean two things on
+two screens.
+
+The definitions, agreed and fixed:
+
+  Order state      delivered              fulfilment status is delivered
+                   open                   created, shipped, out for delivery,
+                                          on hold — not yet delivered
+                   lost                   cancelled, refunded, voided
+
+  Revenue          delivered + open. Lost is excluded entirely, never
+                   counted as zero, because it was never earned.
+
+  Cash certainty   collected              delivered and paid
+                   owed                   delivered, not paid
+                   at risk                not delivered, not paid
+                   prepaid                paid, not delivered
+
+  Cost             matched to the order date, not the delivery date.
+                   Revenue is recognised when the order is placed, so cost
+                   is matched to the same moment. Matching to delivery would
+                   let a later cost change land on a sale already priced.
+
+  Cost movement    against plan cost on the management cards — is the year
+                   still worth what we said. Against the previous cost entry
+                   in the drill-downs — what just moved.
+
+  Pace             plan x days elapsed / days in the month.
+
+  Margin           at dated cost where the cost log covers the period,
+                   at plan cost otherwise, and it always says which.
+
+Pure pandas. No Streamlit, no I/O, no network.
+"""
+
+from __future__ import annotations
+
+import calendar
+from dataclasses import dataclass, field
+from datetime import date
+
+import numpy as np
+import pandas as pd
+
+MONTHS = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+MARKETS = ["UAE", "QA", "KSA", "EG"]
+
+DELIVERED = {"FULFILLED"}
+LOST_FINANCIAL = {"REFUNDED", "VOIDED", "EXPIRED"}
+PAID = {"PAID"}
+NOT_PRODUCTS = {"Gift Wrapping", "Gift wrapping", "Tip", "Shipping",
+                "WooCommerce Order", "Woocommerce Order"}
+
+# Shown in the footer of every page so a figure and its definition are never
+# more than a glance apart.
+DEFINITIONS = [
+    ("Revenue", "delivered plus open orders. Cancelled, refunded and voided "
+                "are excluded entirely, not counted as zero."),
+    ("Order state", "delivered · open is created, shipped, out for delivery "
+                    "or on hold · lost is cancelled, refunded or voided."),
+    ("Cash", "collected is delivered and paid · owed is delivered, not paid · "
+             "at risk is neither."),
+    ("Cost", "matched to the order date, so cost and revenue are recognised "
+             "at the same moment."),
+    ("Cost movement", "against plan cost on the cards, against the previous "
+                      "cost entry in the drill-downs."),
+    ("Margin", "at dated cost where the cost log covers the period, at plan "
+               "cost otherwise. The card says which."),
+    ("Pace", "plan x days elapsed / days in the month."),
+]
+
+
+class MetricError(ValueError):
+    """Raised when a metric cannot be computed honestly."""
+
+
+@dataclass
+class Scope:
+    """What the page is showing. Everything downstream reads this.
+
+    A date range filters both sides. Filtering actuals without filtering the
+    plan — or the reverse — makes every comparison wrong, which is what the
+    old as_of control did: it moved the pace without moving the orders, so
+    a full month of sales was measured against a third of a month of plan.
+    """
+
+    year: int = 2026
+    market: str | None = None
+    month: str | None = None
+    categories: list[str] = field(default_factory=list)
+    products: list[str] = field(default_factory=list)
+    start: date | None = None
+    end: date | None = None
+
+    def __post_init__(self):
+        # A month selection is a date range. Holding one idea rather than two
+        # stops the two drifting apart.
+        if self.month and (self.start is None or self.end is None):
+            n = MONTHS.index(self.month) + 1
+            last = calendar.monthrange(self.year, n)[1]
+            self.start = self.start or date(self.year, n, 1)
+            self.end = self.end or date(self.year, n, last)
+        if self.start is None:
+            self.start = date(self.year, 1, 1)
+        if self.end is None:
+            self.end = date(self.year, 12, 31)
+        if self.end < self.start:
+            self.start, self.end = self.end, self.start
+
+    @property
+    def consolidated(self) -> bool:
+        return self.market is None
+
+    @property
+    def full_year(self) -> bool:
+        return self.month is None
+
+    @property
+    def days(self) -> int:
+        return (self.end - self.start).days + 1
+
+    @property
+    def label(self) -> str:
+        if self.month and self.start.day == 1:
+            n = MONTHS.index(self.month) + 1
+            if self.end.day == calendar.monthrange(self.year, n)[1]:
+                return self.month
+        if self.start == date(self.year, 1, 1) and \
+                self.end == date(self.year, 12, 31):
+            return str(self.year)
+        return f"{self.start:%d %b} – {self.end:%d %b}"
+
+    def plan_fraction(self, month: str) -> float:
+        """How much of a month's plan falls inside the range.
+
+        Plan is monthly, so a partial range takes a pro-rated share by days.
+        Crude, but it is the honest comparison — the alternative is measuring
+        half a month of sales against a whole month of plan.
+        """
+        n = MONTHS.index(month) + 1
+        last = calendar.monthrange(self.year, n)[1]
+        m_start, m_end = date(self.year, n, 1), date(self.year, n, last)
+        lo, hi = max(self.start, m_start), min(self.end, m_end)
+        if hi < lo:
+            return 0.0
+        return ((hi - lo).days + 1) / last
+
+
+# ---------------------------------------------------------------- shaping
+
+
+def prepare(lines: pd.DataFrame, scope: Scope) -> pd.DataFrame:
+    """Every line in scope, classified once.
+
+    Classification happens here and nowhere else. A page that needed to know
+    whether an order was lost would otherwise re-derive it, and two
+    derivations drift.
+    """
+    d = lines.copy()
+    d["ts"] = pd.to_datetime(d["processed_at"], utc=True,
+                             format="mixed").dt.tz_localize(None)
+    d["date"] = d["ts"].dt.normalize()
+    # One filter, applied to actuals and plan alike.
+    d = d[(d["date"].dt.date >= scope.start) & (d["date"].dt.date <= scope.end)]
+    d = d[~d["product"].isin(NOT_PRODUCTS)]
+
+    if scope.market:
+        d = d[d["market"] == scope.market]
+    if scope.products:
+        d = d[d["product"].isin(scope.products)]
+    if d.empty:
+        return d
+
+    d["month"] = d["date"].dt.month.map(lambda n: MONTHS[n - 1])
+
+    lost = d["cancelled"] | d["financial_status"].isin(LOST_FINANCIAL)
+    delivered = d["fulfillment_status"].isin(DELIVERED) & ~lost
+    d["state"] = np.where(lost, "lost",
+                          np.where(delivered, "delivered", "open"))
+
+    paid = d["financial_status"].isin(PAID)
+    d["cash"] = np.select(
+        [lost,
+         delivered & paid,
+         delivered & ~paid,
+         ~delivered & paid],
+        ["lost", "collected", "owed", "prepaid"],
+        default="at risk")
+
+    # Money on a lost line is not revenue, so it is zeroed rather than
+    # carried and filtered later — a filter that someone forgets is a bug,
+    # a zero is not.
+    ratio = (d["qty_current"] / d["qty_ordered"]).where(
+        d["qty_ordered"].ne(0), 1.0).clip(upper=1.0)
+    live = d["state"].ne("lost")
+    d["units"] = np.where(live, d["qty_current"], 0.0)
+    d["gross"] = np.where(live, d["gross_lc"] * ratio, 0.0)
+    d["revenue"] = np.where(live, d["net_line_lc"] * ratio, 0.0)
+    d["discount"] = (d["gross"] - d["revenue"]).clip(lower=0)
+
+    # What was ordered and then died, kept separately so the cost of losing
+    # it can be stated rather than merely implied by absence.
+    d["lost_units"] = np.where(~live, d["qty_ordered"], 0.0)
+    d["lost_revenue"] = np.where(~live, d["gross_lc"], 0.0)
+    return d
+
+
+def attach_cost(d: pd.DataFrame, cost_log: pd.DataFrame | None,
+                plan: pd.DataFrame | None) -> pd.DataFrame:
+    """Unit cost per line, matched to the order date.
+
+    Falls back to plan cost where the log does not reach, and records which
+    basis was used so the page can say so instead of implying a precision it
+    does not have.
+    """
+    import variance_engine as ve
+
+    if d.empty:
+        return d
+    out = d.copy()
+    out["unit_cost"] = np.nan
+    out["cost_basis"] = "none"
+
+    if cost_log is not None and len(cost_log):
+        cl = ve.normalise_cost_log(cost_log)
+        if len(cl):
+            parts = []
+            for (prod, mkt), grp in cl.groupby(["product", "market"],
+                                               sort=False):
+                sub = out[(out["product"] == prod) & (out["market"] == mkt)]
+                if sub.empty:
+                    continue
+                s = sub.sort_values("ts")
+                merged = pd.merge_asof(
+                    s, grp.sort_values("valid_from")[
+                        ["valid_from", "cogs_unit_lc"]],
+                    left_on="ts", right_on="valid_from", direction="backward")
+                merged.index = s.index
+                parts.append(merged["cogs_unit_lc"])
+            if parts:
+                found = pd.concat(parts).reindex(out.index)
+                out["unit_cost"] = found
+                out.loc[found.notna(), "cost_basis"] = "dated"
+
+    missing = out["unit_cost"].isna()
+    if plan is not None and missing.any():
+        pc = (plan.drop_duplicates(["product", "market", "month"])
+              .set_index(["product", "market", "month"])["plan_cogs_unit_lc"])
+        idx = pd.MultiIndex.from_arrays(
+            [out["product"], out["market"], out["month"]])
+        fb = pd.Series(pc.reindex(idx).to_numpy(), index=out.index)
+        out.loc[missing, "unit_cost"] = fb[missing]
+        out.loc[missing & fb.notna(), "cost_basis"] = "plan"
+
+    out["unit_cost"] = out["unit_cost"].fillna(0.0)
+    out["cogs"] = out["units"] * out["unit_cost"]
+    out["cm"] = out["revenue"] - out["cogs"]
+    out["lost_cogs"] = out["lost_units"] * out["unit_cost"]
+    return out
+
+
+def plan_scope(plan: pd.DataFrame, scope: Scope) -> pd.DataFrame:
+    """Plan rows for the same range, pro-rated where a month is partial."""
+    p = plan[plan["plan_units"] > 0].copy()
+    if scope.market:
+        p = p[p["market"] == scope.market]
+    if scope.categories:
+        p = p[p["category"].isin(scope.categories)]
+    if scope.products:
+        p = p[p["product"].isin(scope.products)]
+    if p.empty:
+        return p
+
+    frac = p["month"].map(scope.plan_fraction)
+    p = p[frac > 0].copy()
+    frac = frac[frac > 0]
+    for c in ("plan_units", "plan_revenue_lc", "plan_cogs_lc", "plan_cm_lc",
+              "plan_revenue_aed", "plan_cogs_aed", "plan_cm_aed"):
+        if c in p.columns:
+            p[c] = p[c] * frac
+    return p
+
+
+# ------------------------------------------------------------------ pace
+
+
+def pace_fraction(scope: Scope, today: date | None = None
+                  ) -> tuple[float, int, int]:
+    """How much of the selected range has elapsed.
+
+    The plan is already pro-rated to the range, so pace only asks how far
+    through that range we are. A range that ended in the past is complete,
+    and its plan is the whole of the pro-rated figure.
+    """
+    today = today or date.today()
+    total = scope.days
+    if today >= scope.end:
+        return 1.0, total, total
+    if today < scope.start:
+        return 0.0, 0, total
+    elapsed = (today - scope.start).days + 1
+    return elapsed / total, elapsed, total
+
+
+# --------------------------------------------------------------- the cards
+
+
+def cards(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+          cost_log: pd.DataFrame | None = None) -> dict:
+    """Every management figure, computed once.
+
+    The chain is deliberately consistent: orders x basket = units, and
+    units x price = revenue. `check_chain` asserts it holds rather than
+    trusting that it must.
+    """
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    p = plan_scope(plan, scope)
+    frac, elapsed, total = pace_fraction(scope)
+
+    plan_units = float(p["plan_units"].sum())
+    plan_rev = float(p["plan_revenue_lc"].sum())
+    plan_cogs = float(p["plan_cogs_lc"].sum())
+    plan_cm = plan_rev - plan_cogs
+
+    if d.empty:
+        return {"empty": True, "pace_fraction": frac,
+                "days_elapsed": elapsed, "days_total": total,
+                "plan": {"units": plan_units, "revenue": plan_rev,
+                         "cm": plan_cm}}
+
+    live = d[d["state"].ne("lost")]
+    by_state = d.groupby("state", observed=True)
+    by_cash = d.groupby("cash", observed=True)
+
+    def state_orders(s):
+        return int(d[d["state"] == s]["order"].nunique())
+
+    def cash_money(c):
+        return float(d[d["cash"] == c]["revenue"].sum())
+
+    # Orders that can still become revenue. A lost order is not a smaller
+    # sale, it is no sale, so it does not belong in a headline that units,
+    # revenue and margin all exclude it from. Counting it here also
+    # understated AOV and basket size, because their numerators came from
+    # surviving orders while the denominator counted every order placed.
+    orders_placed = int(d["order"].nunique())
+    orders_total = int(d[d["state"].ne("lost")]["order"].nunique())
+    units = float(live["units"].sum())
+    revenue = float(live["revenue"].sum())
+    cogs = float(live["cogs"].sum())
+    cm = revenue - cogs
+
+    # Cost movement: what the same boxes would have cost at plan cost. The
+    # difference is cost, everything else is commercial.
+    pc = (plan.drop_duplicates(["product", "market", "month"])
+          .set_index(["product", "market", "month"])["plan_cogs_unit_lc"])
+    idx = pd.MultiIndex.from_arrays(
+        [live["product"], live["market"], live["month"]])
+    plan_unit_cost = pd.Series(pc.reindex(idx).to_numpy(), index=live.index)
+    cogs_at_plan = float((live["units"] * plan_unit_cost.fillna(0)).sum())
+    cm_at_plan = revenue - cogs_at_plan
+    cost_effect = cm - cm_at_plan
+
+    paced_units = plan_units * frac
+    paced_rev = plan_rev * frac
+    paced_cm = plan_cm * frac
+    paced_orders = (plan_units / (units / orders_total) * frac
+                    if orders_total and units else 0.0)
+
+    basis = ("dated" if (d["cost_basis"] == "dated").any() else "plan")
+    dated_share = float((d["cost_basis"] == "dated").mean())
+
+    return {
+        "empty": False,
+        "pace_fraction": frac, "days_elapsed": elapsed, "days_total": total,
+        "cost_basis": basis, "dated_share": dated_share,
+
+        "orders": {
+            "total": orders_total,
+            "placed": orders_placed,
+            "delivered": state_orders("delivered"),
+            "open": state_orders("open"),
+            "lost": state_orders("lost"),
+            "cancel_rate": (state_orders("lost") / orders_placed
+                            if orders_placed else None),
+            "paced": paced_orders,
+            "plan_full": (plan_units / (units / orders_total)
+                          if orders_total and units else None),
+            "aov": revenue / orders_total if orders_total else None,
+        },
+        "units": {
+            "total": units,
+            "delivered": float(d[d["state"] == "delivered"]["units"].sum()),
+            "open": float(d[d["state"] == "open"]["units"].sum()),
+            "lost": float(d["lost_units"].sum()),
+            "paced": paced_units, "plan_full": plan_units,
+            "per_order": units / orders_total if orders_total else None,
+        },
+        "revenue": {
+            "total": revenue,
+            "collected": cash_money("collected"),
+            "owed": cash_money("owed"),
+            "prepaid": cash_money("prepaid"),
+            "at_risk": cash_money("at risk"),
+            "lost": float(d["lost_revenue"].sum()),
+            "discount": float(live["discount"].sum()),
+            "paced": paced_rev, "plan_full": plan_rev,
+        },
+        "margin": {
+            "cm": cm, "cm_pct": cm / revenue if revenue else None,
+            "cm_at_plan_cost": cm_at_plan,
+            "commercial_effect": cm_at_plan - paced_cm,
+            "cost_effect": cost_effect,
+            "paced": paced_cm, "plan_full": plan_cm,
+            "plan_pct": plan_cm / plan_rev if plan_rev else None,
+            "per_box": cm / units if units else None,
+            "plan_per_box": plan_cm / plan_units if plan_units else None,
+            "lost_cm": float(d["lost_revenue"].sum() - d["lost_cogs"].sum()),
+            "price_index": (revenue / units) / (plan_rev / plan_units)
+            if units and plan_units and plan_rev else None,
+            "cost_index": (cogs / units) / (plan_cogs / plan_units)
+            if units and plan_units and plan_cogs else None,
+        },
+    }
+
+
+def projection(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+               cost_log: pd.DataFrame | None = None,
+               today: date | None = None) -> dict:
+    """Where the period lands, on three bases with different assumptions.
+
+    Not a forecast. Each figure is arithmetic from a stated assumption, and
+    the spread between them is the honest measure of how uncertain the
+    period is. A single projected number would hide which assumption it
+    rested on.
+
+      run rate    the last seven days repeat to the end
+      attainment  the rest runs at the rate achieved so far
+      plan        the remaining days run exactly to plan
+
+    A statistical model was built and tested against this data and lost to a
+    trailing mean, so it is deliberately not used here.
+    """
+    today = today or date.today()
+    if today >= scope.end:
+        return {}
+
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return {}
+    live = d[d["state"].ne("lost")]
+
+    elapsed = max(1, (min(today, scope.end) - scope.start).days + 1)
+    remaining = (scope.end - min(today, scope.end)).days
+    if remaining <= 0:
+        return {}
+
+    p_scope = plan_scope(plan, scope)
+    out = {"elapsed": elapsed, "remaining": remaining, "days": scope.days,
+           "bases": {}}
+
+    week_start = pd.Timestamp(today) - pd.Timedelta(days=7)
+    recent = live[live["ts"] > week_start]
+
+    for name, actual_col, plan_col in (
+            ("revenue", "revenue", "plan_revenue_lc"),
+            ("units", "units", "plan_units"),
+            ("cm", "cm", None)):
+        banked = float(live[actual_col].sum())
+        if plan_col:
+            plan_total = float(p_scope[plan_col].sum())
+        else:
+            plan_total = float((p_scope["plan_revenue_lc"]
+                                - p_scope["plan_cogs_lc"]).sum())
+
+        per_day_recent = (float(recent[actual_col].sum()) / 7
+                          if len(recent) else banked / elapsed)
+        per_day_so_far = banked / elapsed
+        plan_per_day = plan_total / scope.days if scope.days else 0.0
+
+        out["bases"][name] = {
+            "banked": banked,
+            "plan": plan_total,
+            "run_rate": banked + per_day_recent * remaining,
+            "attainment": banked + per_day_so_far * remaining,
+            "at_plan": banked + plan_per_day * remaining,
+        }
+        for k in ("run_rate", "attainment", "at_plan"):
+            out["bases"][name][k + "_pct"] = (
+                out["bases"][name][k] / plan_total if plan_total else None)
+    return out
+
+
+def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+             cost_log: pd.DataFrame | None = None,
+             today: date | None = None, window: int = 7) -> dict:
+    """Where the period lands, demand first and financials derived from it.
+
+    Orders and basket are forecast separately because they fail for
+    different reasons and have different owners. Boxes are then orders times
+    basket, revenue is boxes times achieved price, and margin is revenue
+    less boxes times current cost.
+
+    Forecasting revenue independently of the orders that produce it is the
+    common mistake: the two then disagree and nobody can say which is right.
+    Here they cannot disagree, because only the drivers are forecast.
+
+    Three bases, each a stated assumption rather than a prediction:
+      run rate    the last `window` days repeat
+      attainment  the rate achieved so far continues
+      plan        the remaining days run exactly to plan
+    """
+    today = today or date.today()
+    if today >= scope.end:
+        return {}
+
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return {}
+    live = d[d["state"].ne("lost")]
+    if live.empty:
+        return {}
+
+    elapsed = max(1, (min(today, scope.end) - scope.start).days + 1)
+    remaining = (scope.end - min(today, scope.end)).days
+    if remaining <= 0:
+        return {}
+
+    p_scope = plan_scope(plan, scope)
+    plan_orders = None
+    plan_units = float(p_scope["plan_units"].sum())
+    plan_rev = float(p_scope["plan_revenue_lc"].sum())
+    plan_cogs = float(p_scope["plan_cogs_lc"].sum())
+
+    orders_so_far = int(live["order"].nunique())
+    units_so_far = float(live["units"].sum())
+    rev_so_far = float(live["revenue"].sum())
+    cogs_so_far = float(live["cogs"].sum())
+
+    cut = pd.Timestamp(today) - pd.Timedelta(days=window)
+    recent = live[live["ts"] > cut]
+    recent_orders = int(recent["order"].nunique()) if len(recent) else 0
+
+    basket_now = (float(recent["units"].sum()) / recent_orders
+                  if recent_orders else units_so_far / max(1, orders_so_far))
+    basket_all = units_so_far / max(1, orders_so_far)
+    plan_basket = (plan_units / (plan_units / basket_all)
+                   if basket_all else None)
+
+    price_now = (float(recent["revenue"].sum()) / float(recent["units"].sum())
+                 if len(recent) and recent["units"].sum()
+                 else rev_so_far / max(1e-9, units_so_far))
+    cost_now = (float(recent["cogs"].sum()) / float(recent["units"].sum())
+                if len(recent) and recent["units"].sum()
+                else cogs_so_far / max(1e-9, units_so_far))
+    plan_price = plan_rev / plan_units if plan_units else None
+    plan_cost = plan_cogs / plan_units if plan_units else None
+
+    # Orders per day on each basis. Everything else is derived from these.
+    per_day = {
+        "run_rate": recent_orders / window if recent_orders else
+        orders_so_far / elapsed,
+        "attainment": orders_so_far / elapsed,
+        "at_plan": ((plan_units / basket_all) / scope.days
+                    if basket_all and scope.days else 0.0),
+    }
+
+    bases = {}
+    for name, rate in per_day.items():
+        orders = orders_so_far + rate * remaining
+        basket = plan_basket if name == "at_plan" and plan_basket else basket_now
+        units = units_so_far + (orders - orders_so_far) * basket
+        price = plan_price if name == "at_plan" and plan_price else price_now
+        cost = plan_cost if name == "at_plan" and plan_cost else cost_now
+        revenue = rev_so_far + (units - units_so_far) * price
+        cogs = cogs_so_far + (units - units_so_far) * cost
+        bases[name] = {
+            "orders": orders, "basket": basket, "units": units,
+            "price": price, "revenue": revenue,
+            "cost_per_box": cost, "cogs": cogs,
+            "cm": revenue - cogs,
+            "cm_pct": (revenue - cogs) / revenue if revenue else None,
+            "orders_pct": (orders / (plan_units / basket_all)
+                           if basket_all and plan_units else None),
+            "units_pct": units / plan_units if plan_units else None,
+            "revenue_pct": revenue / plan_rev if plan_rev else None,
+            "cm_pct_of_plan": ((revenue - cogs) / (plan_rev - plan_cogs)
+                               if (plan_rev - plan_cogs) else None),
+        }
+
+    # Split the projected margin shortfall on the working basis, so the
+    # conversation it starts is the right one.
+    base = bases["run_rate"]
+    plan_cm = plan_rev - plan_cogs
+    vol_effect = ((base["units"] - plan_units) * (plan_price - plan_cost)
+                  if plan_price and plan_cost else 0.0)
+    cost_effect = (base["units"] * (plan_cost - base["cost_per_box"])
+                   if plan_cost else 0.0)
+    price_effect = base["cm"] - plan_cm - vol_effect - cost_effect
+
+    return {
+        "elapsed": elapsed, "remaining": remaining, "days": scope.days,
+        "bases": bases,
+        "so_far": {"orders": orders_so_far, "units": units_so_far,
+                   "revenue": rev_so_far, "cogs": cogs_so_far,
+                   "cm": rev_so_far - cogs_so_far},
+        "plan": {"units": plan_units, "revenue": plan_rev, "cogs": plan_cogs,
+                 "cm": plan_cm, "price": plan_price, "cost": plan_cost,
+                 "basket": basket_all,
+                 "orders": plan_units / basket_all if basket_all else None},
+        "basket_now": basket_now, "price_now": price_now,
+        "cost_now": cost_now, "window": window,
+        "margin_split": {"volume": vol_effect, "cost": cost_effect,
+                         "price": price_effect},
+        "cost_basis": ("dated" if (d["cost_basis"] == "dated").any()
+                       else "plan"),
+        "daily": (live.groupby("date", observed=True)["revenue"]
+                  .sum().cumsum().reset_index()),
+    }
+
+
+def check_chain(c: dict, tolerance: float = 0.01) -> list[str]:
+    """The chain must multiply. If it does not, the cards contradict.
+
+    orders x basket = units, units x price = revenue. Cheap to assert and
+    the only guard against three cards that each look right and cannot all
+    be true at once.
+    """
+    if c.get("empty"):
+        return []
+    problems = []
+    o, u, r = c["orders"], c["units"], c["revenue"]
+
+    if o["total"] and u["per_order"]:
+        implied = o["total"] * u["per_order"]
+        if abs(implied - u["total"]) > max(tolerance, u["total"] * tolerance):
+            problems.append(
+                f"orders x basket = {implied:,.1f}, units = {u['total']:,.1f}")
+
+    if u["total"] and r["total"]:
+        price = r["total"] / u["total"]
+        implied = u["total"] * price
+        if abs(implied - r["total"]) > max(tolerance, r["total"] * tolerance):
+            problems.append(
+                f"units x price = {implied:,.1f}, revenue = {r['total']:,.1f}")
+
+    # The headline counts surviving orders only; lost sits alongside it.
+    if abs((o["delivered"] + o["open"]) - o["total"]) > 0:
+        problems.append(
+            f"delivered plus open is {o['delivered'] + o['open']}, "
+            f"orders is {o['total']}")
+    if abs((o["total"] + o["lost"]) - o["placed"]) > 0:
+        problems.append(
+            f"orders plus lost is {o['total'] + o['lost']}, "
+            f"placed is {o['placed']}")
+
+    # AOV and basket must divide by the same order count the numerator came
+    # from. Getting this wrong is invisible to the chain check, because both
+    # errors cancel — which is exactly why it is asserted separately.
+    if o["total"] and u["total"] and o.get("aov"):
+        if abs(o["aov"] * o["total"] - r["total"]) > max(1.0, r["total"] * tolerance):
+            problems.append(
+                f"AOV x orders = {o['aov'] * o['total']:,.0f}, "
+                f"revenue = {r['total']:,.0f}")
+        if abs(u["per_order"] * o["total"] - u["total"]) > max(
+                tolerance, u["total"] * tolerance):
+            problems.append(
+                f"basket x orders = {u['per_order'] * o['total']:,.1f}, "
+                f"units = {u['total']:,.1f}")
+
+    cash = (r["collected"] + r["owed"] + r["prepaid"] + r["at_risk"])
+    if abs(cash - r["total"]) > max(1.0, r["total"] * tolerance):
+        problems.append(
+            f"cash buckets sum to {cash:,.0f}, revenue is {r['total']:,.0f}")
+
+    return problems
+
+
+# ------------------------------------------------------------- drill-downs
+
+
+def gap_decomposition(c: dict, metric: str) -> list[dict]:
+    """The bar that opens every drill-down: plan to actual, in named steps."""
+    if c.get("empty"):
+        return []
+
+    if metric == "orders":
+        o = c["orders"]
+        paced = o["paced"]
+        lost = o["lost"]
+        # The headline counts surviving orders, so the walk has to reach the
+        # same figure. Cancelled comes off first, then whatever is still
+        # missing is demand that never arrived. Subtracting cancelled from a
+        # total that already excludes it would double count it.
+        shortfall = paced - lost - o["total"]
+        return [
+            {"label": "plan to date", "value": paced, "kind": "start"},
+            {"label": "cancelled", "value": -lost, "kind": "down"},
+            {"label": "demand shortfall", "value": -shortfall,
+             "kind": "down" if shortfall >= 0 else "up"},
+            {"label": "actual", "value": o["total"], "kind": "end"},
+        ]
+
+    if metric == "units":
+        u, o = c["units"], c["orders"]
+        paced = u["paced"]
+        lost = u["lost"]
+
+        # Cancelled boxes come off first, so the remaining gap is about
+        # surviving demand rather than a mixture of demand and loss.
+        after_loss = paced - lost
+
+        # Of the orders that survived, what they should have carried at the
+        # planned basket. The basket term is then the remainder, which forces
+        # the three parts to sum to actual instead of leaving a residual to
+        # bury. Computing both from the plan basket independently is what
+        # broke the reconciliation.
+        plan_basket = (u["plan_full"] / o["plan_full"]
+                       if o.get("plan_full") else None)
+        live_orders = o["total"] - o["lost"]
+        if plan_basket and o["paced"]:
+            surviving_at_plan = live_orders * plan_basket
+            order_effect = surviving_at_plan - after_loss
+            basket_effect = u["total"] - surviving_at_plan
+        else:
+            order_effect = u["total"] - after_loss
+            basket_effect = 0.0
+
+        return [
+            {"label": "plan to date", "value": paced, "kind": "start"},
+            {"label": "cancelled", "value": -lost, "kind": "down"},
+            {"label": "fewer orders", "value": order_effect,
+             "kind": "up" if order_effect >= 0 else "down"},
+            {"label": "basket size", "value": basket_effect,
+             "kind": "up" if basket_effect >= 0 else "down"},
+            {"label": "actual", "value": u["total"], "kind": "end"},
+        ]
+
+    if metric == "revenue":
+        r, u = c["revenue"], c["units"]
+        paced = r["paced"]
+        plan_price = (r["plan_full"] / u["plan_full"]
+                      if u.get("plan_full") else None)
+        volume = ((u["total"] - u["paced"]) * plan_price) if plan_price else 0.0
+        price = (r["total"] + r["discount"]
+                 - u["total"] * plan_price) if plan_price else 0.0
+        return [
+            {"label": "plan to date", "value": paced, "kind": "start"},
+            {"label": "volume", "value": volume, "kind": "down"},
+            {"label": "price", "value": price,
+             "kind": "up" if price >= 0 else "down"},
+            {"label": "discount", "value": -r["discount"], "kind": "down"},
+            {"label": "actual", "value": r["total"], "kind": "end"},
+        ]
+
+    if metric == "margin":
+        m = c["margin"]
+        return [
+            {"label": "plan to date", "value": m["paced"], "kind": "start"},
+            {"label": "commercial", "value": m["commercial_effect"],
+             "kind": "up" if m["commercial_effect"] >= 0 else "down"},
+            {"label": "cost", "value": m["cost_effect"],
+             "kind": "up" if m["cost_effect"] >= 0 else "down"},
+            {"label": "actual", "value": m["cm"], "kind": "end"},
+        ]
+
+    raise MetricError(f"unknown metric {metric!r}")
+
+
+def state_payment_grid(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+                       measure: str = "orders",
+                       cost_log: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Order state against payment state. Counts or money."""
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return pd.DataFrame()
+    d = d[d["state"].ne("lost")]
+    d["paid"] = np.where(d["financial_status"].isin(PAID), "Paid", "Not paid")
+    if measure == "orders":
+        g = (d.groupby(["state", "paid"], observed=True)["order"]
+             .nunique().reset_index(name="value"))
+    else:
+        g = (d.groupby(["state", "paid"], observed=True)["revenue"]
+             .sum().reset_index(name="value"))
+    return g.pivot(index="state", columns="paid", values="value").fillna(0)
+
+
+def by_dimension(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+                 dims=("channel", "city", "customer_type"),
+                 cost_log: pd.DataFrame | None = None) -> pd.DataFrame:
+    """One table, several dimensions stacked, same measures throughout."""
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return pd.DataFrame()
+
+    frames = []
+    for dim in dims:
+        if dim not in d.columns:
+            continue
+        live = d[d["state"].ne("lost")]
+        g = live.groupby(dim, observed=True).agg(
+            orders=("order", "nunique"), units=("units", "sum"),
+            revenue=("revenue", "sum"), cm=("cm", "sum"),
+            discount=("discount", "sum")).reset_index()
+        lost = (d[d["state"] == "lost"].groupby(dim, observed=True)["order"]
+                .nunique().rename("lost_orders").reset_index())
+        all_o = (d.groupby(dim, observed=True)["order"]
+                 .nunique().rename("all_orders").reset_index())
+        g = g.merge(lost, on=dim, how="left").merge(all_o, on=dim, how="left")
+        g["lost_orders"] = g["lost_orders"].fillna(0)
+        g["dimension"] = dim.replace("_", " ").title()
+        g = g.rename(columns={dim: "value"})
+        frames.append(g)
+
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    out["share"] = out.groupby("dimension")["revenue"].transform(
+        lambda s: s / s.sum() if s.sum() else np.nan)
+    out["aov"] = (out["revenue"] / out["orders"]).where(out["orders"].ne(0))
+    out["boxes_per_order"] = (out["units"] / out["orders"]).where(
+        out["orders"].ne(0))
+    out["cancel_rate"] = (out["lost_orders"] / out["all_orders"]).where(
+        out["all_orders"].ne(0))
+    out["cm_pct"] = (out["cm"] / out["revenue"]).where(out["revenue"].ne(0))
+    out["cm_per_box"] = (out["cm"] / out["units"]).where(out["units"].ne(0))
+    out["discount_rate"] = (out["discount"] / (out["revenue"] + out["discount"])
+                            ).where(out["revenue"].ne(0))
+    return out
+
+
+def order_concentration(lines: pd.DataFrame, plan: pd.DataFrame,
+                        scope: Scope) -> pd.DataFrame:
+    """Share of orders containing each product, nested under its category.
+
+    Deliberately not a share of units. When a product that appears in half
+    the orders ends, those orders do not shrink — they disappear, taking
+    everything else in the basket with them.
+    """
+    d = prepare(lines, scope)
+    if d.empty:
+        return pd.DataFrame()
+    d = d[d["state"].ne("lost")]
+    total = d["order"].nunique()
+    if not total:
+        return pd.DataFrame()
+
+    cat = (plan.drop_duplicates("product").set_index("product")["category"]
+           if "category" in plan.columns else pd.Series(dtype=object))
+    d["category"] = d["product"].map(cat).fillna("(unassigned)")
+
+    sku = (d.groupby(["category", "product"], observed=True)["order"]
+           .nunique().reset_index(name="orders"))
+    sku["share"] = sku["orders"] / total
+    sku["level"] = "product"
+
+    grp = (d.groupby("category", observed=True)["order"]
+           .nunique().reset_index(name="orders"))
+    grp["product"] = grp["category"]
+    grp["share"] = grp["orders"] / total
+    grp["level"] = "category"
+
+    out = pd.concat([grp, sku], ignore_index=True)
+    out["total_orders"] = total
+    return out.sort_values(["orders"], ascending=False).reset_index(drop=True)
+
+
+def basket_composition(lines: pd.DataFrame, scope: Scope) -> pd.DataFrame:
+    """How many distinct products an order holds, and what each is worth."""
+    d = prepare(lines, scope)
+    if d.empty:
+        return pd.DataFrame()
+    d = d[d["state"].ne("lost")]
+    per_order = d.groupby("order", observed=True).agg(
+        products=("product", "nunique"), revenue=("revenue", "sum"),
+        units=("units", "sum"))
+    per_order["band"] = per_order["products"].clip(upper=5).map(
+        lambda n: "5+" if n >= 5 else str(int(n)))
+    g = per_order.groupby("band", observed=True).agg(
+        orders=("revenue", "size"), revenue=("revenue", "sum"),
+        avg_order=("revenue", "mean"), avg_units=("units", "mean")).reset_index()
+    g["share"] = g["orders"] / g["orders"].sum()
+    order = {"1": 0, "2": 1, "3": 2, "4": 3, "5+": 4}
+    return g.sort_values("band", key=lambda s: s.map(order)).reset_index(drop=True)
+
+
+def product_performance(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+                        cost_log: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Every product: plan against actual on units, price and margin."""
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return pd.DataFrame()
+    live = d[d["state"].ne("lost")]
+
+    g = live.groupby("product", observed=True).agg(
+        units=("units", "sum"), revenue=("revenue", "sum"),
+        cm=("cm", "sum"), cogs=("cogs", "sum"),
+        orders=("order", "nunique")).reset_index()
+
+    frac, _, _ = pace_fraction(scope)
+    p = plan_scope(plan, scope)
+    pg = p.groupby("product", observed=True).agg(
+        plan_units=("plan_units", "sum"),
+        plan_revenue=("plan_revenue_lc", "sum"),
+        plan_cogs=("plan_cogs_lc", "sum")).reset_index()
+    for c in ("plan_units", "plan_revenue", "plan_cogs"):
+        pg[c] = pg[c] * frac
+
+    out = g.merge(pg, on="product", how="outer").fillna(0)
+    out["price"] = (out["revenue"] / out["units"]).where(out["units"].ne(0))
+    out["plan_price"] = (out["plan_revenue"] / out["plan_units"]).where(
+        out["plan_units"].ne(0))
+    out["price_index"] = (out["price"] / out["plan_price"]).where(
+        out["plan_price"].ne(0))
+    out["unit_cost"] = (out["cogs"] / out["units"]).where(out["units"].ne(0))
+    out["plan_unit_cost"] = (out["plan_cogs"] / out["plan_units"]).where(
+        out["plan_units"].ne(0))
+    out["cost_index"] = (out["unit_cost"] / out["plan_unit_cost"]).where(
+        out["plan_unit_cost"].ne(0))
+    out["cm_pct"] = (out["cm"] / out["revenue"]).where(out["revenue"].ne(0))
+    out["cm_per_box"] = (out["cm"] / out["units"]).where(out["units"].ne(0))
+    out["cm_share"] = out["cm"] / out["cm"].sum() if out["cm"].sum() else np.nan
+    out["unit_attainment"] = (out["units"] / out["plan_units"]).where(
+        out["plan_units"].ne(0))
+    return out.sort_values("revenue", ascending=False).reset_index(drop=True)
+
+
+def cost_changes(cost_log: pd.DataFrame | None, plan: pd.DataFrame,
+                 scope: Scope) -> pd.DataFrame:
+    """Cost movement per product, against plan and against the previous entry.
+
+    Two baselines because they answer different questions. Against plan is
+    cumulative and belongs on the cards. Against the previous entry is the
+    alert, and belongs here.
+    """
+    import variance_engine as ve
+
+    if cost_log is None or not len(cost_log):
+        return pd.DataFrame()
+    cl = ve.normalise_cost_log(cost_log)
+    if not len(cl):
+        return pd.DataFrame()
+    if scope.market:
+        cl = cl[cl["market"] == scope.market]
+    if cl.empty:
+        return pd.DataFrame()
+
+    cl = cl.sort_values(["product", "market", "valid_from"])
+    cl["previous"] = cl.groupby(["product", "market"])["cogs_unit_lc"].shift()
+    latest = cl.groupby(["product", "market"], as_index=False).last()
+
+    p = plan_scope(plan, scope)
+    pc = (p.groupby(["product", "market"], observed=True)
+          .apply(lambda x: (x["plan_cogs_lc"].sum() / x["plan_units"].sum())
+                 if x["plan_units"].sum() else np.nan,
+                 include_groups=False).rename("plan_cost").reset_index())
+
+    out = latest.merge(pc, on=["product", "market"], how="left")
+    out["vs_plan"] = out["cogs_unit_lc"] - out["plan_cost"]
+    out["vs_plan_pct"] = (out["vs_plan"] / out["plan_cost"]).where(
+        out["plan_cost"].notna() & out["plan_cost"].ne(0))
+    out["vs_previous"] = out["cogs_unit_lc"] - out["previous"]
+    out["vs_previous_pct"] = (out["vs_previous"] / out["previous"]).where(
+        out["previous"].notna() & out["previous"].ne(0))
+    out["changes"] = out["product"].map(
+        cl.groupby("product").size().to_dict())
+    return out.sort_values("vs_plan_pct", ascending=False).reset_index(drop=True)
+
+
+def _median_lag(d: pd.DataFrame) -> float | None:
+    """Median days from delivery to payment on settled orders only.
+
+    An unpaid order has no lag yet, so including it would make the figure
+    move because a delivery happened rather than because collection changed.
+    """
+    if d.empty or "fulfilled_at" not in d.columns or "paid_at" not in d.columns:
+        return None
+    paid = d[d["cash"] == "collected"]
+    if paid.empty:
+        return None
+    ff = pd.to_datetime(paid["fulfilled_at"], utc=True, errors="coerce",
+                        format="mixed").dt.tz_localize(None)
+    pp = pd.to_datetime(paid["paid_at"], utc=True, errors="coerce",
+                        format="mixed").dt.tz_localize(None)
+    lag = (pp - ff).dt.days
+    lag = lag[lag.notna() & lag.ge(0)]
+    return float(lag.median()) if len(lag) else None
+
+
+def payment(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+            cost_log: pd.DataFrame | None = None,
+            stuck_after: int = 21) -> dict:
+    """Everything the payment section shows, including the week-on-week move.
+
+    The trend compares the last seven days against the seven before, not this
+    month against last. Reconciliation speed should not depend on which fruit
+    is in season, and month comparisons here would be comparing mango against
+    strawberry.
+    """
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return {}
+
+    delivered = d[d["state"] == "delivered"]
+    if delivered.empty:
+        return {"delivered_value": 0.0, "delivered_orders": 0,
+                "outstanding": 0.0, "orders": 0}
+
+    owed = d[d["cash"] == "owed"]
+    ff = (pd.to_datetime(owed["fulfilled_at"], utc=True, errors="coerce",
+                         format="mixed").dt.tz_localize(None)
+          if "fulfilled_at" in owed.columns
+          else pd.Series(pd.NaT, index=owed.index))
+    since = ff.fillna(owed["ts"]) if len(owed) else pd.Series(dtype="datetime64[ns]")
+    ref = pd.Timestamp(min(date.today(), scope.end))
+
+    if len(owed):
+        age = (ref.normalize() - since.dt.normalize()).dt.days.clip(lower=0)
+        o = owed.assign(age=age,
+                        basis=np.where(ff.notna(), "delivery", "order date")
+                        ).groupby("order", observed=True).agg(
+            outstanding=("revenue", "sum"), boxes=("units", "sum"),
+            age=("age", "max"), basis=("basis", "first"),
+            channel=("channel", "first"),
+            delivered_on=("ts", "min"))
+        bands = [(0, 7, "0–7"), (8, 14, "8–14"), (15, 21, "15–21"),
+                 (22, 30, "22–30"), (31, 10_000, "30+")]
+        o["band"] = o["age"].map(
+            lambda n: next(l for lo, hi, l in bands if lo <= n <= hi))
+        by_band = (o.groupby("band", observed=True)
+                   .agg(orders=("outstanding", "size"),
+                        outstanding=("outstanding", "sum"))
+                   .reindex([l for _, _, l in bands]).fillna(0).reset_index())
+        stuck = o[o["age"] > stuck_after]
+    else:
+        o = pd.DataFrame()
+        by_band = pd.DataFrame(columns=["band", "orders", "outstanding"])
+        stuck = pd.DataFrame()
+
+    # Week on week. The comparison window is the seven days before the
+    # reference date against the seven before that.
+    cut_a = ref - pd.Timedelta(days=7)
+    cut_b = ref - pd.Timedelta(days=14)
+    now = d[d["ts"] > cut_a]
+    prev = d[(d["ts"] > cut_b) & (d["ts"] <= cut_a)]
+
+    def move(a, b):
+        if b in (None, 0) or a is None:
+            return None
+        return a / b - 1
+
+    lag_now, lag_prev = _median_lag(now), _median_lag(prev)
+    out_now = float(now[now["cash"] == "owed"]["revenue"].sum())
+    out_prev = float(prev[prev["cash"] == "owed"]["revenue"].sum())
+
+    by_product = (delivered.groupby("product", observed=True)
+                  .agg(boxes=("units", "sum"), orders=("order", "nunique"),
+                       value=("revenue", "sum")).reset_index()
+                  .sort_values("value", ascending=False))
+
+    return {
+        "delivered_value": float(delivered["revenue"].sum()),
+        "delivered_orders": int(delivered["order"].nunique()),
+        "delivered_boxes": float(delivered["units"].sum()),
+        "outstanding": float(o["outstanding"].sum()) if len(o) else 0.0,
+        "orders": int(len(o)),
+        "median_lag": _median_lag(d),
+        "lag_change": (lag_now - lag_prev
+                       if lag_now is not None and lag_prev is not None else None),
+        "lag_prev": lag_prev,
+        "outstanding_change": move(out_now, out_prev),
+        "stuck_value": float(stuck["outstanding"].sum()) if len(stuck) else 0.0,
+        "stuck_orders": int(len(stuck)),
+        "stuck_after": stuck_after,
+        "oldest": int(o["age"].max()) if len(o) else 0,
+        "by_band": by_band,
+        "orders_table": (o.reset_index()
+                         .rename(columns={"age": "days_since_delivery"})
+                         .sort_values("days_since_delivery", ascending=False)
+                         if len(o) else pd.DataFrame()),
+        "stuck_table": (stuck.reset_index()
+                        .rename(columns={"age": "days_since_delivery"})
+                        .sort_values("days_since_delivery", ascending=False)
+                        if len(stuck) else pd.DataFrame()),
+        "by_product": by_product,
+        "no_delivery_date": int((o["basis"] == "order date").sum()) if len(o) else 0,
+    }
+
+
+def collection_lag(lines: pd.DataFrame, scope: Scope) -> float | None:
+    """Median days from delivery to payment, on orders already settled.
+
+    Measured only on orders that have been paid, because an unpaid order has
+    no lag yet — including them would make the figure move simply because a
+    delivery happened, not because collection changed.
+    """
+    d = prepare(lines, scope)
+    if d.empty or "fulfilled_at" not in d.columns or "paid_at" not in d.columns:
+        return None
+    paid = d[d["cash"] == "collected"]
+    if paid.empty:
+        return None
+    ff = pd.to_datetime(paid["fulfilled_at"], utc=True, errors="coerce",
+                        format="mixed").dt.tz_localize(None)
+    pp = pd.to_datetime(paid["paid_at"], utc=True, errors="coerce",
+                        format="mixed").dt.tz_localize(None)
+    lag = (pp - ff).dt.days
+    lag = lag[lag.notna() & lag.ge(0)]
+    return float(lag.median()) if len(lag) else None
+
+
+def receivables_aged(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+                     cost_log: pd.DataFrame | None = None) -> dict:
+    """Delivered and unpaid, aged from the delivery date."""
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return {}
+    owed = d[d["cash"] == "owed"]
+    if owed.empty:
+        return {"orders": 0, "outstanding": 0.0}
+
+    ff = (pd.to_datetime(owed["fulfilled_at"], utc=True, errors="coerce",
+                         format="mixed").dt.tz_localize(None)
+          if "fulfilled_at" in owed.columns else pd.Series(pd.NaT,
+                                                           index=owed.index))
+    basis = np.where(ff.notna(), "delivery", "order date")
+    since = ff.fillna(owed["ts"])
+    ref = pd.Timestamp(min(date.today(), scope.end))
+    age = (ref.normalize() - since.dt.normalize()).dt.days.clip(lower=0)
+
+    o = owed.assign(age=age, basis=basis).groupby("order", observed=True).agg(
+        outstanding=("revenue", "sum"), age=("age", "max"),
+        basis=("basis", "first"), city=("city", "first"),
+        channel=("channel", "first"))
+
+    bands = [(0, 3, "0–3"), (4, 7, "4–7"), (8, 14, "8–14"),
+             (15, 30, "15–30"), (31, 10_000, "30+")]
+    o["band"] = o["age"].map(
+        lambda n: next(l for lo, hi, l in bands if lo <= n <= hi))
+    by_band = (o.groupby("band", observed=True)
+               .agg(orders=("outstanding", "size"),
+                    outstanding=("outstanding", "sum"))
+               .reindex([l for _, _, l in bands]).fillna(0).reset_index())
+
+    total = float(o["outstanding"].sum())
+    revenue = float(d[d["state"].ne("lost")]["revenue"].sum())
+    return {
+        "orders": int(len(o)), "outstanding": total,
+        "over_14": float(o[o["age"] > 14]["outstanding"].sum()),
+        "oldest": int(o["age"].max()), "avg_age": float(o["age"].mean()),
+        "share_of_revenue": total / revenue if revenue else None,
+        "by_band": by_band,
+        "by_city": (o.groupby("city", observed=True)
+                    .agg(outstanding=("outstanding", "sum"),
+                         avg_age=("age", "mean")).reset_index()
+                    .sort_values("outstanding", ascending=False)),
+        "by_channel": (o.groupby("channel", observed=True)
+                       .agg(outstanding=("outstanding", "sum"),
+                            avg_age=("age", "mean")).reset_index()
+                       .sort_values("outstanding", ascending=False)),
+        "no_delivery_date": int((o["basis"] == "order date").sum()),
+        # The order-level rows, so the outstanding can be taken away and
+        # worked on rather than only looked at.
+        "orders_table": (o.reset_index()
+                         .rename(columns={"order": "order",
+                                          "age": "days_since_delivery"})
+                         .sort_values("days_since_delivery", ascending=False)),
+    }
+
+
+def exceptions(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+               cost_log: pd.DataFrame | None = None) -> list[dict]:
+    """Everything making the numbers wrong, ranked by what it is worth."""
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    p = plan_scope(plan, scope)
+    out = []
+
+    if not d.empty:
+        live = d[d["state"].ne("lost")]
+        planned = set(p["product"]) if len(p) else set()
+        unplanned = live[~live["product"].isin(planned)]
+        if len(unplanned):
+            g = (unplanned.groupby("product", observed=True)["revenue"]
+                 .sum().sort_values(ascending=False))
+            out.append({
+                "severity": "high", "value": float(g.sum()),
+                "title": f"{len(g)} products sold with no plan row",
+                "detail": ", ".join(g.head(5).index),
+                "why": "Revenue is counted but attainment cannot be.",
+            })
+
+        sold = set(live["product"])
+        dead = p[~p["product"].isin(sold)]
+        if len(dead):
+            g = (dead.groupby("product", observed=True)["plan_revenue_lc"]
+                 .sum().sort_values(ascending=False))
+            out.append({
+                "severity": "medium", "value": float(g.sum()),
+                "title": f"{len(g)} products planned, nothing sold",
+                "detail": ", ".join(g.head(5).index),
+                "why": "Delisted, out of stock, or never launched.",
+            })
+
+        pp = product_performance(lines, plan, scope, cost_log)
+        if len(pp):
+            below = pp[(pp["units"] > 0) & (pp["cm"] < 0)]
+            if len(below):
+                out.append({
+                    "severity": "high", "value": float(below["cm"].sum()),
+                    "title": f"{len(below)} products selling below cost",
+                    "detail": ", ".join(below["product"].head(5)),
+                    "why": "Every box sold loses money.",
+                })
+
+        plan_basis = float((d["cost_basis"] == "plan").mean())
+        if plan_basis > 0.05:
+            out.append({
+                "severity": "low", "value": 0.0,
+                "title": f"{plan_basis:.0%} of lines have no dated cost",
+                "detail": "Margin for those falls back to plan cost.",
+                "why": "Cost movement is invisible where the log does not reach.",
+            })
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    return sorted(out, key=lambda x: (order[x["severity"]], -abs(x["value"])))
+
+
+# ------------------------------------------------------------- portfolio
+
+
+TOLERANCE = {"None": 0.0, "Some": 0.05, "High": 0.12}
+
+
+def portfolio(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+              cost_log: pd.DataFrame | None = None) -> dict:
+    """Where a margin gap can be recovered, or a surplus spent.
+
+    Margin is a weighted average across a mix, so a cost rise on one product
+    does not have to be recovered on that product. It has to be recovered
+    somewhere, and the right somewhere is wherever demand can absorb it.
+
+    The tool computes what each product would need to close the gap alone —
+    a feasibility test, not a proposal — and then lets the business apply
+    moves within a tolerance it sets itself. That tolerance is deliberately
+    an input rather than an estimate: price and season moved together all
+    year in this data, so any elasticity derived from it would be seasonal
+    demand wearing a price label.
+    """
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return {}
+    live = d[d["state"].ne("lost")]
+    if live.empty:
+        return {}
+
+    p_scope = plan_scope(plan, scope)
+    plan_rev = float(p_scope["plan_revenue_lc"].sum())
+    plan_cm = float((p_scope["plan_revenue_lc"] - p_scope["plan_cogs_lc"]).sum())
+    plan_pct = plan_cm / plan_rev if plan_rev else None
+
+    revenue = float(live["revenue"].sum())
+    cogs = float(live["cogs"].sum())
+    cm = revenue - cogs
+    pct = cm / revenue if revenue else None
+
+    # The gap at the volume actually sold. Comparing against the full plan
+    # margin would mix a volume shortfall into a pricing question.
+    target_cm = revenue * plan_pct if plan_pct else cm
+    gap = cm - target_cm
+
+    g = live.groupby("product", observed=True).agg(
+        units=("units", "sum"), revenue=("revenue", "sum"),
+        cogs=("cogs", "sum")).reset_index()
+    g["price"] = (g["revenue"] / g["units"]).where(g["units"].ne(0))
+    g["cost"] = (g["cogs"] / g["units"]).where(g["units"].ne(0))
+    g["cm"] = g["revenue"] - g["cogs"]
+    g["cm_pct"] = (g["cm"] / g["revenue"]).where(g["revenue"].ne(0))
+    g["cm_per_box"] = (g["cm"] / g["units"]).where(g["units"].ne(0))
+    g["share"] = g["revenue"] / revenue if revenue else np.nan
+
+    pp = (p_scope.groupby("product", observed=True)
+          .apply(lambda x: (x["plan_revenue_lc"].sum() / x["plan_units"].sum())
+                 if x["plan_units"].sum() else np.nan,
+                 include_groups=False).rename("plan_price").reset_index())
+    g = g.merge(pp, on="product", how="left")
+    g["price_index"] = (g["price"] / g["plan_price"]).where(
+        g["plan_price"].notna() & g["plan_price"].ne(0))
+
+    # What this product alone would need. A price move changes margin by the
+    # move times that product's revenue, so the required move is simply the
+    # gap over its revenue.
+    g["alone_pct"] = (-gap / g["revenue"]).where(g["revenue"].ne(0))
+    g["feasible"] = g["alone_pct"].abs() <= 0.10
+
+    return {
+        "revenue": revenue, "cm": cm, "cm_pct": pct,
+        "plan_cm_pct": plan_pct, "target_cm": target_cm, "gap": gap,
+        "direction": "recover" if gap < 0 else "spend",
+        "points": (pct - plan_pct) * 100 if pct and plan_pct else None,
+        "cost_basis": ("dated" if (d["cost_basis"] == "dated").any()
+                       else "plan"),
+        "products": g.sort_values("revenue", ascending=False).reset_index(drop=True),
+    }
+
+
+def apply_moves(pf: dict, moves: dict) -> dict:
+    """What a set of price moves does to the mix.
+
+    Volume is held flat on purpose. The point is not to predict what happens
+    to demand — it is to state the break-even, so the person who knows the
+    market can judge whether the trade is worth taking.
+    """
+    if not pf:
+        return {}
+    g = pf["products"].copy()
+    g["move"] = g["product"].map(moves).fillna(0.0) / 100.0
+    g["new_price"] = g["price"] * (1 + g["move"])
+    g["new_revenue"] = g["units"] * g["new_price"]
+    g["new_cm"] = g["new_revenue"] - g["cogs"]
+    g["new_cm_pct"] = (g["new_cm"] / g["new_revenue"]).where(
+        g["new_revenue"].ne(0))
+    g["cm_change"] = g["new_cm"] - g["cm"]
+
+    new_rev = float(g["new_revenue"].sum())
+    new_cm = float(g["new_cm"].sum())
+    recovered = new_cm - pf["cm"]
+
+    # How much volume the move can cost before it is worse than doing
+    # nothing. Margin per box rises, so fewer boxes can carry the same total.
+    breakeven = None
+    if new_cm > 0 and pf["cm"] > 0:
+        breakeven = pf["cm"] / new_cm - 1
+
+    below = g[g["new_cm"] < 0]
+    return {
+        "table": g, "new_revenue": new_rev, "new_cm": new_cm,
+        "new_cm_pct": new_cm / new_rev if new_rev else None,
+        "recovered": recovered,
+        "gap_after": new_cm - pf["target_cm"],
+        "closed_share": (recovered / -pf["gap"]
+                         if pf["gap"] and pf["gap"] < 0 else None),
+        "breakeven_volume": breakeven,
+        "below_cost": below["product"].tolist(),
+        "moved": int((g["move"].abs() > 0).sum()),
+    }

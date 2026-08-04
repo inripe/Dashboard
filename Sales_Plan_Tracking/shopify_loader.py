@@ -153,6 +153,13 @@ query Orders($q: String!, $first: Int!, $after: String) {
       test
       displayFinancialStatus
       displayFulfillmentStatus
+      # When the goods actually went out, so money outstanding can be aged
+      # from delivery rather than from the order date.
+      fulfillments(first: 1) { createdAt }
+      # When the money was recorded, so the lag from delivery to payment can
+      # be measured rather than assumed.
+      processedAt
+      transactions(first: 1) { processedAt kind status }
       currencyCode
       # Order-level totals, captured only so the audit can check the sum of
       # line items against a number Shopify calculated independently.
@@ -354,6 +361,11 @@ def fetch_store(store: Store, year: int) -> pd.DataFrame:
                     "cancelled": o.get("cancelledAt") is not None,
                     "financial_status": o.get("displayFinancialStatus"),
                     "fulfillment_status": o.get("displayFulfillmentStatus"),
+                    "fulfilled_at": ((o.get("fulfillments") or [{}])[0]
+                                     .get("createdAt")),
+                    "paid_at": next(
+                        (t.get("processedAt") for t in (o.get("transactions") or [])
+                         if t.get("status") == "SUCCESS"), None),
                     "currency": o.get("currencyCode"),
                     "order_subtotal": float(
                         ((o.get("currentSubtotalPriceSet") or {})
