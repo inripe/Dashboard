@@ -550,8 +550,13 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
     basket_now = (float(recent["units"].sum()) / recent_orders
                   if recent_orders else units_so_far / max(1, orders_so_far))
     basket_all = units_so_far / max(1, orders_so_far)
-    plan_basket = (plan_units / (plan_units / basket_all)
-                   if basket_all else None)
+
+    # The plan carries no order count, so the only basket available for the
+    # at-plan basis is the one actually achieved over the whole period. The
+    # earlier form divided plan_units by a figure that was itself
+    # plan_units / basket_all, which reduces to basket_all and blows up when
+    # plan_units is zero — a month with no plan rows loaded yet, for one.
+    plan_basket = basket_all if basket_all else None
 
     price_now = (float(recent["revenue"].sum()) / float(recent["units"].sum())
                  if len(recent) and recent["units"].sum()
@@ -623,6 +628,236 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
         "daily": (live.groupby("date", observed=True)["revenue"]
                   .sum().cumsum().reset_index()),
     }
+
+
+def momentum(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+             field: str = "revenue", window: int = 7,
+             cost_log: pd.DataFrame | None = None) -> dict:
+    """Daily activity against its own recent average.
+
+    A cumulative line always rises, so it cannot say whether a number is
+    accelerating. This can: bars above the average mean momentum is
+    building, below means it is fading.
+
+    The calendar is filled, so a silent day pulls the average down rather
+    than being skipped.
+    """
+    d = prepare(lines, scope)
+    if d.empty:
+        return {}
+    if field == "cm":
+        d = attach_cost(d, cost_log, plan)
+    live = d[d["state"].ne("lost")]
+    if live.empty:
+        return {}
+
+    if field == "orders":
+        daily = live.groupby("date", observed=True)["order"].nunique()
+    else:
+        col = {"units": "units", "revenue": "revenue", "cm": "cm"}.get(field)
+        if col is None or col not in live.columns:
+            return {}
+        daily = live.groupby("date", observed=True)[col].sum()
+
+    last = min(pd.Timestamp(date.today()), pd.Timestamp(scope.end))
+    cal = pd.date_range(pd.Timestamp(scope.start),
+                        max(last, daily.index.max()), freq="D")
+    daily = daily.reindex(cal, fill_value=0)
+    tail = daily.tail(window * 2)
+    if len(tail) < 3:
+        return {}
+
+    avg = float(tail.mean())
+    recent = float(tail.tail(min(3, len(tail))).mean())
+    peak_i = int(daily.to_numpy().argmax())
+
+    return {
+        "values": [float(v) for v in tail],
+        "average": avg,
+        "change": (recent / avg - 1) if avg else None,
+        "peak_value": float(daily.iloc[peak_i]),
+        "peak_date": cal[peak_i].date(),
+        "days": len(tail),
+    }
+
+
+def basis_accuracy(lines: pd.DataFrame, plan: pd.DataFrame,
+                   scope: Scope, cost_log: pd.DataFrame | None = None,
+                   at_day: int = 12) -> pd.DataFrame:
+    """Which forecast basis was closest, tested on completed months.
+
+    Each finished month is replayed: all three bases are computed as they
+    would have been on day `at_day`, then compared to what the month
+    actually did. Without this the choice of basis is a preference; with it
+    it is evidence.
+    """
+    rows = []
+    today = date.today()
+    for month in MONTHS:
+        n = MONTHS.index(month) + 1
+        last = calendar.monthrange(scope.year, n)[1]
+        m_end = date(scope.year, n, last)
+        if m_end >= today:
+            continue
+
+        s_full = Scope(scope.year, scope.market, month,
+                       categories=scope.categories, products=scope.products)
+
+        # A month with no plan cannot score a forecast against anything, so
+        # it is skipped rather than divided by. March is genuinely unplanned
+        # and still carries occasional sales, which is what reached the
+        # division before this guard existed.
+        if not float(plan_scope(plan, s_full)["plan_units"].sum()):
+            continue
+
+        actual = cards(lines, plan, s_full, cost_log)
+        if actual.get("empty") or not actual["revenue"]["total"]:
+            continue
+
+        cut = date(scope.year, n, min(at_day, last))
+        fc = forecast(lines, plan, s_full, cost_log, today=cut)
+        if not fc:
+            continue
+
+        truth = actual["revenue"]["total"]
+        for name, b in fc["bases"].items():
+            rows.append({"month": month, "basis": name,
+                         "projected": b["revenue"], "actual": truth,
+                         "error": (b["revenue"] - truth) / truth
+                         if truth else None})
+
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    g = df.groupby("basis", observed=True).agg(
+        months=("month", "nunique"),
+        avg_error=("error", lambda s: s.abs().mean()),
+        bias=("error", "mean")).reset_index()
+    label = {"run_rate": "Run rate", "attainment": "Attainment",
+             "at_plan": "Plan"}
+    g["basis"] = g["basis"].map(label).fillna(g["basis"])
+    g["at_day"] = at_day
+    return g.sort_values("avg_error").reset_index(drop=True)
+
+
+def progress(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+             field: str = "revenue",
+             cost_log: pd.DataFrame | None = None) -> dict:
+    """Cumulative progress against the plan line, plus the peak day.
+
+    Daily bars show activity; they do not show whether the gap is opening or
+    closing. Four days into a month, four bars say almost nothing — a line
+    climbing from zero against a straight plan line says everything.
+
+    The calendar is filled so a silent day flattens the line rather than
+    being skipped, which would flatter the shape.
+    """
+    d = prepare(lines, scope)
+    if d.empty:
+        return {}
+    if field == "cm":
+        d = attach_cost(d, cost_log, plan)
+    live = d[d["state"].ne("lost")]
+    if live.empty:
+        return {}
+
+    if field == "orders":
+        daily = live.groupby("date", observed=True)["order"].nunique()
+    else:
+        col = {"units": "units", "revenue": "revenue", "cm": "cm"}.get(field)
+        if col is None or col not in live.columns:
+            return {}
+        daily = live.groupby("date", observed=True)[col].sum()
+
+    start = pd.Timestamp(scope.start)
+    last = min(pd.Timestamp(date.today()), pd.Timestamp(scope.end))
+    cal = pd.date_range(start, max(last, daily.index.max()), freq="D")
+    daily = daily.reindex(cal, fill_value=0)
+
+    p_scope = plan_scope(plan, scope)
+    if field == "orders":
+        units = float(live["units"].sum())
+        orders = int(live["order"].nunique())
+        basket = units / orders if orders else None
+        target = (float(p_scope["plan_units"].sum()) / basket
+                  if basket else 0.0)
+    elif field == "units":
+        target = float(p_scope["plan_units"].sum())
+    elif field == "cm":
+        target = float((p_scope["plan_revenue_lc"]
+                        - p_scope["plan_cogs_lc"]).sum())
+    else:
+        target = float(p_scope["plan_revenue_lc"].sum())
+
+    n = len(cal)
+    per_day = target / scope.days if scope.days else 0.0
+    peak_i = int(daily.to_numpy().argmax()) if n else 0
+
+    return {
+        "actual": [float(v) for v in daily.cumsum()],
+        "plan": [per_day * (i + 1) for i in range(n)],
+        "dates": [d_.date() for d_ in cal],
+        "peak_value": float(daily.iloc[peak_i]) if n else 0.0,
+        "peak_date": cal[peak_i].date() if n else None,
+        "days": n,
+    }
+
+
+def sparkline(lines: pd.DataFrame, scope: Scope, field: str = "revenue",
+              plan: pd.DataFrame | None = None,
+              cost_log: pd.DataFrame | None = None) -> list[float]:
+    """A short daily series, kept for callers that want raw activity."""
+    d = prepare(lines, scope)
+    if d.empty:
+        return []
+    if field == "cm":
+        d = attach_cost(d, cost_log, plan)
+    live = d[d["state"].ne("lost")]
+    if live.empty:
+        return []
+    if field == "orders":
+        g = live.groupby("date", observed=True)["order"].nunique()
+    else:
+        col = {"units": "units", "revenue": "revenue", "cm": "cm"}.get(field)
+        if col is None or col not in live.columns:
+            return []
+        g = live.groupby("date", observed=True)[col].sum()
+    full = pd.date_range(g.index.min(), g.index.max(), freq="D")
+    return [float(v) for v in g.reindex(full, fill_value=0).tail(21)]
+
+
+def week_move(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+              cost_log: pd.DataFrame | None = None,
+              today: date | None = None) -> dict:
+    """Last seven days against the seven before, on the rate measures.
+
+    Rates do not accumulate, so a sparkline says little about them. What
+    matters is whether the rate moved, and by how much.
+    """
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    if d.empty:
+        return {}
+    ref = pd.Timestamp(min(today or date.today(), scope.end))
+    a, b = ref - pd.Timedelta(days=7), ref - pd.Timedelta(days=14)
+    now, prev = d[d["ts"] > a], d[(d["ts"] > b) & (d["ts"] <= a)]
+    if now.empty or prev.empty:
+        return {}
+
+    def rates(x):
+        live = x[x["state"].ne("lost")]
+        rev = float(live["revenue"].sum())
+        cm = rev - float(live["cogs"].sum())
+        placed = int(x["order"].nunique())
+        lost = int(x[x["state"] == "lost"]["order"].nunique())
+        return {"cm_pct": cm / rev if rev else None,
+                "lost_rate": lost / placed if placed else None}
+
+    n_, p_ = rates(now), rates(prev)
+    out = {}
+    for k in ("cm_pct", "lost_rate"):
+        if n_[k] is not None and p_[k] is not None:
+            out[k] = (n_[k] - p_[k]) * 100
+    return out
 
 
 def check_chain(c: dict, tolerance: float = 0.01) -> list[str]:

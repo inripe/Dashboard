@@ -22,6 +22,7 @@ import streamlit as st
 import metrics_engine as me
 import plan_engine as pe
 import variance_engine as ve
+import data_quality_tab
 from data_loader import load_plan, load_actuals_any
 
 YEAR = 2026
@@ -134,8 +135,70 @@ def tone(v, good=1.0, warn=0.9, invert=False):
     return GOOD if v >= good else WARN if v >= warn else BAD
 
 
+def momentum_svg(mo, height=30):
+    """Daily bars against the recent average, as inline SVG.
+
+    Bars above the average are green, below are grey — so acceleration reads
+    without a legend. Drawn rather than charted because a chart per card
+    costs a round trip and this only has to show a shape.
+    """
+    if not mo or not mo.get("values") or len(mo["values"]) < 3:
+        return ""
+    vals, avg = mo["values"], mo["average"]
+    hi = max(max(vals), avg) or 1
+    n = len(vals)
+    w = 100 / n
+    bars = "".join(
+        f"<rect x='{i*w:.2f}' y='{100 - v/hi*100:.2f}' "
+        f"width='{w*0.84:.2f}' height='{max(1.5, v/hi*100):.2f}' "
+        f"fill='{'#5DCAA5' if v >= avg else '#D3D1C7'}'/>"
+        for i, v in enumerate(vals))
+    y = 100 - avg / hi * 100
+    return (
+        f"<svg viewBox='0 0 100 100' preserveAspectRatio='none' "
+        f"style='width:100%;height:{height}px;display:block;margin:7px 0 3px'>"
+        f"{bars}<line x1='0' y1='{y:.2f}' x2='100' y2='{y:.2f}' "
+        f"stroke='#888780' stroke-width='1.2' stroke-dasharray='3,2' "
+        f"vector-effect='non-scaling-stroke'/></svg>")
+
+
+def progress_svg(pr, height=34):
+    """Cumulative progress against the plan line, as inline SVG.
+
+    A daily bar chart shows activity. This shows whether the gap against
+    plan is opening or closing, which is the question a card is actually
+    asked. Drawn rather than charted because a chart object per card costs
+    a round trip and this only has to show a shape.
+    """
+    if not pr or not pr.get("actual") or len(pr["actual"]) < 2:
+        return ""
+    act, pl = pr["actual"], pr["plan"]
+    hi = max(max(act), max(pl)) or 1
+    n = len(act)
+
+    def path(vals, upto=None):
+        vs = vals[:upto] if upto else vals
+        return " ".join(
+            f"{'M' if i == 0 else 'L'}{i / (n - 1) * 100:.2f},"
+            f"{100 - v / hi * 100:.2f}"
+            for i, v in enumerate(vs))
+
+    # The plan line runs the full period; actual stops at today, so the gap
+    # between the two ends is the shortfall to date rather than to the end.
+    area = (path(act) + f" L{(len(act) - 1) / (n - 1) * 100:.2f},100 L0,100 Z")
+    return (
+        f"<svg viewBox='0 0 100 100' preserveAspectRatio='none' "
+        f"style='width:100%;height:{height}px;display:block;margin:8px 0 4px'>"
+        f"<path d='{area}' fill='#DCEAF9'/>"
+        f"<path d='{path(pl)}' stroke='#B4B2A9' stroke-width='1.6' "
+        f"fill='none' stroke-dasharray='3,2' vector-effect='non-scaling-stroke'/>"
+        f"<path d='{path(act)}' stroke='#2A78D6' stroke-width='2' fill='none' "
+        f"vector-effect='non-scaling-stroke'/></svg>")
+
+
 def card(col, label, value, delta=None, delta_good=None, pace=None,
-         pace_label=None, segs=None, footer=None, note=None, accent=None):
+         pace_label=None, segs=None, footer=None, note=None, accent=None,
+         spark=None, trend=None, trend_good_down=None, momentum=None):
     """One metric card. Value, movement, pace bar, split, footer.
 
     Every card is built from this so two cards cannot drift apart in shape.
@@ -147,6 +210,27 @@ def card(col, label, value, delta=None, delta_good=None, pace=None,
                      else delta.strip().startswith("+")) else BAD
         h.append(f"<div class='dl' style='color:{c}'>{delta}</div>")
     h.append("</div>")
+
+    if momentum is not None and not pd.isna(momentum):
+        up = momentum >= 0
+        h.append(
+            f"<div style='font-size:11.5px;font-weight:500;margin-top:4px;"
+            f"color:{GOOD if up else BAD}'>{'↗' if up else '↘'} "
+            f"{abs(momentum):.0f}% {'above' if up else 'below'} the 7-day "
+            f"average</div>")
+
+    if trend is not None and not pd.isna(trend):
+        # Direction alone is not good or bad, so the caller says which way is
+        # healthy and the colour carries it.
+        up = trend > 0
+        bad = up if trend_good_down else not up
+        h.append(
+            f"<div style='font-size:11.5px;font-weight:500;margin-top:3px;"
+            f"color:{BAD if bad else GOOD}'>"
+            f"{'↗' if up else '↘'} {abs(trend):.1f} pts on last week</div>")
+
+    if spark:
+        h.append(momentum_svg(spark))
 
     if pace is not None:
         pct = max(0.0, min(1.0, pace))
@@ -212,8 +296,11 @@ def table(df, height=None, empty="Nothing in this scope.", into=None, **kw):
         if d[c].dtype.kind not in "if":
             continue
         mx = float(d[c].abs().max() or 0)
+        # error and bias are ratios like attainment, so they belong in the
+        # percentage branch. Without them a 92.8% miss rounds to 1 and the
+        # table quietly disagrees with the banner above it.
         if any(k in nm for k in ("%", "pct", "share", "rate", "index",
-                                 "attainment")):
+                                 "attainment", "error", "bias")):
             if mx <= 1.5:
                 d[c] = d[c] * 100
             cfg[c] = st.column_config.NumberColumn(format="%.1f%%")
@@ -239,8 +326,11 @@ def footer_definitions():
 # -------------------------------------------------------------- selectors
 
 c = st.columns([1, 1.1, 1.4, 1.5, 1.6])
-market = c[0].selectbox("Market", [ALL_MK] + MARKETS, index=3)
-month = c[1].selectbox("Period", [YTD] + MONTHS, index=MONTHS.index("July") + 1)
+market = c[0].selectbox("Market", [ALL_MK] + MARKETS, index=0)
+_now = date.today()
+_default_month = (MONTHS[_now.month - 1] if _now.year == YEAR else MONTHS[-1])
+month = c[1].selectbox("Period", [YTD] + MONTHS,
+                       index=MONTHS.index(_default_month) + 1)
 cats = sorted(plan["category"].dropna().unique())
 sel_cats = c[2].multiselect("Category", cats, default=[])
 pool = plan[plan.category.isin(sel_cats)] if sel_cats else plan
@@ -310,7 +400,8 @@ if C.get("empty"):
 
 view = st.radio("View", ["Management", "Forecast", "Portfolio pricing",
                          "Orders", "Units", "Revenue", "Margin",
-                         "Payment and exceptions"],
+                         "Payment and exceptions", "Data quality",
+                         "How to read this"],
                 horizontal=True, label_visibility="collapsed")
 
 O, U, R, M = C["orders"], C["units"], C["revenue"], C["margin"]
@@ -322,13 +413,32 @@ if view == "Management":
     st.markdown("<div class='sec'>The chain</div>", unsafe_allow_html=True)
     k = st.columns(3)
 
+    sp_o = me.momentum(lines, plan, scope, "orders")
+    sp_u = me.momentum(lines, plan, scope, "units")
+    sp_r = me.momentum(lines, plan, scope, "revenue")
+    wm = me.week_move(lines, plan, scope, cost_log)
+
+    def peak(pr, fmt="{:,.0f}"):
+        if not pr or not pr.get("peak_date"):
+            return ""
+        return (f" · peak {fmt.format(pr['peak_value'])} on "
+                f"{pr['peak_date']:%d %b}")
+
+    def mom_line(mo):
+        """Above or below the recent average, in words."""
+        if not mo or mo.get("change") is None:
+            return None
+        return mo["change"] * 100
+
     o_pace = O["total"] / O["paced"] if O["paced"] else None
     card(k[0], "Orders", n(O["total"]),
          n(O["total"] - O["paced"], "{:+,.0f}"), delta_good=None,
          pace=o_pace, pace_label=f"pace {n(O['paced'])}",
          segs=[(f"{O['delivered']} delivered", O["delivered"], "#0F6E56"),
                (f"{O['open']} open", O["open"], "#185FA5")],
-         footer=f"plan {n(O['plan_full'])} · AOV {n(O['aov'])} {CUR}")
+         footer=f"plan {n(O['plan_full'])} · AOV {n(O['aov'])} {CUR}"
+                + peak(sp_o),
+         spark=sp_o, momentum=mom_line(sp_o))
 
     u_pace = U["total"] / U["paced"] if U["paced"] else None
     card(k[1], "Units", n(U["total"]),
@@ -337,7 +447,9 @@ if view == "Management":
          segs=[(f"{n(U['delivered'])} delivered", U["delivered"], "#0F6E56"),
                (f"{n(U['open'])} open", U["open"], "#185FA5")],
          footer=f"plan {n(U['plan_full'])} · "
-                f"{n(U['per_order'], '{:.1f}')} boxes per order")
+                f"{n(U['per_order'], '{:.1f}')} boxes per order"
+                + peak(sp_u),
+         spark=sp_u, momentum=mom_line(sp_u))
 
     r_pace = R["total"] / R["paced"] if R["paced"] else None
     card(k[2], f"Revenue {CUR}", n(R["total"]),
@@ -347,7 +459,9 @@ if view == "Management":
                (f"{n(R['owed'])} owed", R["owed"], "#854F0B"),
                (f"{n(R['at_risk'] + R['prepaid'])} at risk",
                 R["at_risk"] + R["prepaid"], "#185FA5")],
-         footer=f"plan {n(R['plan_full'])} · discount {n(R['discount'])}")
+         footer=f"plan {n(R['plan_full'])} · discount {n(R['discount'])}"
+                + peak(sp_r),
+         spark=sp_r, momentum=mom_line(sp_r))
 
     st.markdown("<div class='sec'>The outcome</div>", unsafe_allow_html=True)
     k2 = st.columns([1.25, 1, 1])
@@ -383,6 +497,7 @@ if view == "Management":
          pace=(M["cm_pct"] / M["plan_pct"]
                if M["cm_pct"] and M["plan_pct"] else None),
          pace_label=f"plan {p(M['plan_pct'])}",
+         trend=wm.get("cm_pct"), trend_good_down=False,
          footer=f"price {p(M['price_index'])} of plan · "
                 f"cost {p(M['cost_index'])} of plan<br>"
                 f"weighted by actual mix")
@@ -397,6 +512,7 @@ if view == "Management":
          segs=[(f"{n(U['lost'])} boxes", U["lost"], "#993C1D"),
                (f"{n(R['lost'])} {CUR}", R["lost"] / 100
                 if R["lost"] else 0, "#F0997B")],
+         trend=wm.get("lost_rate"), trend_good_down=True,
          footer=f"{n(O['placed'])} orders placed · "
                 f"{n(M['lost_cm'])} {CUR} of margin never earned",
          accent=BAD)
@@ -430,8 +546,29 @@ elif view == "Forecast":
         st.caption(f"{market} · {scope.label} · day {fc['elapsed']} of "
                    f"{fc['days']} · {fc['remaining']} days remaining")
 
+        acc = me.basis_accuracy(lines, plan, scope, cost_log)
+        if len(acc):
+            best = acc.iloc[0]
+            st.markdown(
+                f"<div style='background:#E1F5EE;border-radius:8px;"
+                f"padding:10px 13px;font-size:12.5px;color:#04342C;"
+                f"line-height:1.65;max-width:900px;margin-bottom:12px'>"
+                f"<b style='font-weight:500'>{best['basis']} has been closest, "
+                f"missing by {best['avg_error']:.1%} on average.</b> "
+                f"Tested on {int(best['months'])} completed month"
+                f"{'s' if best['months'] != 1 else ''} by computing all three "
+                f"on day {int(best['at_day'])} and comparing to what the month "
+                f"actually did.</div>", unsafe_allow_html=True)
+            show = acc[["basis", "avg_error", "bias", "months"]].copy()
+            show.columns = ["basis", "avg error", "bias", "months tested"]
+            with st.expander("How each basis scored"):
+                table(show)
+
         basis = st.radio(
             "Basis", ["Run rate", "Attainment", "Plan"], horizontal=True,
+            index=(["Run rate", "Attainment", "Plan"].index(acc.iloc[0]["basis"])
+                   if len(acc) and acc.iloc[0]["basis"]
+                   in ["Run rate", "Attainment", "Plan"] else 0),
             help="Run rate assumes the last 7 days repeat. Attainment assumes "
                  "the rate achieved so far continues. Plan assumes the "
                  "remaining days run exactly to plan.")
@@ -711,6 +848,91 @@ elif view == "Portfolio pricing":
             f"elasticity estimated from this data would be seasonal demand "
             f"wearing a price label, because price and season moved together "
             f"all year.</div>", unsafe_allow_html=True)
+
+
+
+elif view == "Data quality":
+    data_quality_tab.render(lines, plan, scope, cost_log, currency=CUR)
+
+
+elif view == "How to read this":
+    st.markdown("<div class='sec'>What each number means</div>",
+                unsafe_allow_html=True)
+    rows = [
+        ("Orders", "Orders that can still become revenue — delivered plus "
+                   "open. Cancelled orders are counted separately, not here."),
+        ("Units", "Boxes on those orders. Cancelled boxes are excluded."),
+        ("Revenue", "Net of discount, on delivered and open orders. "
+                    "Cancelled revenue was never earned, so it is excluded."),
+        ("CM", "Revenue less cost of the boxes sold. Freight, marketing and "
+               "overhead are not in it."),
+        ("CM %", "CM divided by revenue, weighted by what actually sold — "
+                 "never an average of product percentages."),
+        ("Lost", "Cancelled, refunded or voided. Shown as a rate against "
+                 "orders placed."),
+    ]
+    for k, v in rows:
+        st.markdown(
+            f"<div style='display:flex;gap:14px;padding:7px 0;"
+            f"border-bottom:0.5px solid #e4e7ec'>"
+            f"<div style='min-width:110px;font-weight:500;font-size:13px'>{k}</div>"
+            f"<div style='font-size:13px;color:#55585e;line-height:1.6'>{v}</div>"
+            f"</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec'>How the cards work</div>",
+                unsafe_allow_html=True)
+    rows2 = [
+        ("Pace", "Plan × days elapsed ÷ days in the period. 45% of pace means "
+                 "you have 45% of what the plan expected by today, not 45% of "
+                 "the month."),
+        ("The bar", "Fills to the percentage of pace. The tick is 100%."),
+        ("Split bar", "Under the chain cards it is order state. Under revenue "
+                      "it is cash certainty — collected, owed, at risk."),
+        ("The bars", "Daily activity with the recent average as a dashed "
+                     "line. Green above it means momentum is building, grey "
+                     "below means it is fading."),
+        ("Arrow", "Last seven days against the seven before, in points. "
+                  "Colour says whether that direction is good."),
+    ]
+    for k, v in rows2:
+        st.markdown(
+            f"<div style='display:flex;gap:14px;padding:7px 0;"
+            f"border-bottom:0.5px solid #e4e7ec'>"
+            f"<div style='min-width:110px;font-weight:500;font-size:13px'>{k}</div>"
+            f"<div style='font-size:13px;color:#55585e;line-height:1.6'>{v}</div>"
+            f"</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec'>Rules that apply everywhere</div>",
+                unsafe_allow_html=True)
+    rows3 = [
+        ("Cost", "Matched to the order date, so cost and revenue are "
+                 "recognised at the same moment. Where the cost log does not "
+                 "reach, plan cost is used and the card says so."),
+        ("Date range", "Filters orders and plan together. A partial range "
+                       "takes a pro-rated share of the month's plan, so "
+                       "attainment stays comparable."),
+        ("Currency", "One market shows its own. All markets converts to AED "
+                     "using the rates on the FX sheet."),
+        ("Missing", "Blank is not zero. A month with no plan is absent, not "
+                    "a failure."),
+        ("Forecast", "Three assumptions, not a prediction. The spread between "
+                     "them is the uncertainty."),
+    ]
+    for k, v in rows3:
+        st.markdown(
+            f"<div style='display:flex;gap:14px;padding:7px 0;"
+            f"border-bottom:0.5px solid #e4e7ec'>"
+            f"<div style='min-width:110px;font-weight:500;font-size:13px'>{k}</div>"
+            f"<div style='font-size:13px;color:#55585e;line-height:1.6'>{v}</div>"
+            f"</div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"<div style='margin-top:1.5rem;font-size:12px;color:#8a8d93;"
+        f"line-height:1.7'>Every figure is checked before release: the chain "
+        f"must multiply, each gap must decompose to zero, and cash buckets "
+        f"must sum to revenue. If they ever do not, a red banner appears at "
+        f"the top of the page instead of the numbers.</div>",
+        unsafe_allow_html=True)
 
 
 elif view in ("Orders", "Units", "Revenue", "Margin"):
