@@ -51,6 +51,15 @@ MONTHS = [
 ]
 MARKETS = ["UAE", "QA", "KSA", "EG"]
 
+# A sale belongs to the day it happened in the market that made it. Reading
+# every timestamp in UTC filed the small hours of a Dubai morning under the
+# previous day, which understated every daily figure and moved nothing on
+# the monthly ones — the kind of error that hides until someone counts by
+# hand. Offsets rather than named zones because none of these four observe
+# daylight saving, and a fixed number cannot drift with a tzdata update.
+MARKET_UTC_OFFSET = {"UAE": 4, "QA": 3, "KSA": 3, "EG": 3}
+DEFAULT_UTC_OFFSET = 4
+
 DELIVERED = {"FULFILLED"}
 LOST_FINANCIAL = {"REFUNDED", "VOIDED", "EXPIRED"}
 PAID = {"PAID"}
@@ -163,8 +172,16 @@ def prepare(lines: pd.DataFrame, scope: Scope) -> pd.DataFrame:
     derivations drift.
     """
     d = lines.copy()
-    d["ts"] = pd.to_datetime(d["processed_at"], utc=True,
-                             format="mixed").dt.tz_localize(None)
+    utc = pd.to_datetime(d["processed_at"], utc=True,
+                         format="mixed").dt.tz_localize(None)
+
+    # Shift each line onto its own market's clock. An order placed at 01:00
+    # in Dubai is 21:00 the day before in UTC; filed that way it lands in
+    # yesterday's numbers and today reads short.
+    hours = (d["market"].map(MARKET_UTC_OFFSET).fillna(DEFAULT_UTC_OFFSET)
+             if "market" in d.columns
+             else pd.Series(DEFAULT_UTC_OFFSET, index=d.index))
+    d["ts"] = utc + pd.to_timedelta(hours.astype(float), unit="h")
     d["date"] = d["ts"].dt.normalize()
     # One filter, applied to actuals and plan alike.
     d = d[(d["date"].dt.date >= scope.start) & (d["date"].dt.date <= scope.end)]
