@@ -13,6 +13,7 @@ structural view. A manager learns the shape once.
 from __future__ import annotations
 
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -29,6 +30,11 @@ YEAR = 2026
 MARKETS = me.MARKETS
 MONTHS = me.MONTHS
 ALL_MK, YTD = "All markets", "Full year"
+
+# The read stamp is only useful if it is in a clock the reader keeps. The
+# server runs in UTC, so datetime.now() reported a time four hours behind
+# the office and made the data look fresher than it was.
+HOME_TZ = ZoneInfo("Africa/Cairo")
 
 BLUE, ORANGE, TEAL, AMBER, GREY = "#378ADD", "#D85A30", "#1D9E75", "#EF9F27", "#B4B2A9"
 GOOD, WARN, BAD, NEUT = "#1D9E75", "#EF9F27", "#D85A30", "#C2C0B8"
@@ -102,7 +108,7 @@ def get_data(year: int):
     raw, fx, pmeta, aliases, cost_log = load_plan()
     plan = pe.attach_fx(pe.derive(raw), fx)
     actuals, ameta, lines = load_actuals_any(year, cost_log, plan)
-    return plan, lines, pmeta, ameta, aliases, cost_log, datetime.now()
+    return plan, lines, pmeta, ameta, aliases, cost_log, datetime.now(HOME_TZ)
 
 
 with st.spinner("Reading the plan from SharePoint and every order from the "
@@ -384,7 +390,7 @@ st.markdown(
        < (scope.end.replace(day=28) - scope.start).days + 5 and
        scope.label != month else "")
     + f" · {CUR}</div></div>"
-    f"<div class='mt'>Actuals · <b>Shopify</b> · read {pulled:%d %b %H:%M}<br>"
+    f"<div class='mt'>Actuals · <b>Shopify</b> · read {pulled:%d %b %H:%M} Cairo<br>"
     f"Plan · <b>{pmeta.get('name','')}</b>"
     + (f" · cost log {C['dated_share']:.0%} dated" if not C.get("empty") else "")
     + "</div></div>", unsafe_allow_html=True)
