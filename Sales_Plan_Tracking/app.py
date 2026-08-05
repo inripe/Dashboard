@@ -549,29 +549,52 @@ elif view == "Forecast":
         acc = me.basis_accuracy(lines, plan, scope, cost_log)
         if len(acc):
             best = acc.iloc[0]
+            # A miss of more than about a fifth means the method is not
+            # usable yet, so the banner says so rather than presenting the
+            # least bad option as if it were good.
+            usable = best["avg_error"] <= 0.20
             st.markdown(
-                f"<div style='background:#E1F5EE;border-radius:8px;"
-                f"padding:10px 13px;font-size:12.5px;color:#04342C;"
+                f"<div style='background:{'#E1F5EE' if usable else '#FAEEDA'};"
+                f"border-radius:8px;padding:11px 14px;font-size:13px;"
+                f"color:{'#04342C' if usable else '#633806'};"
                 f"line-height:1.65;max-width:900px;margin-bottom:12px'>"
-                f"<b style='font-weight:500'>{best['basis']} has been closest, "
-                f"missing by {best['avg_error']:.1%} on average.</b> "
-                f"Tested on {int(best['months'])} completed month"
-                f"{'s' if best['months'] != 1 else ''} by computing all three "
-                f"on day {int(best['at_day'])} and comparing to what the month "
-                f"actually did.</div>", unsafe_allow_html=True)
+                + (f"<b style='font-weight:500'>Use the {best['basis'].lower()} "
+                   f"method.</b> Over the last {int(best['months'])} finished "
+                   f"months it was typically {best['avg_error']:.0%} away from "
+                   f"the real answer."
+                   if usable else
+                   f"<b style='font-weight:500'>None of these is reliable "
+                   f"yet.</b> The best of the three was typically "
+                   f"{best['avg_error']:.0%} away from the real answer over "
+                   f"the last {int(best['months'])} finished months. Treat "
+                   f"the figures below as a range, not a number.")
+                + "</div>", unsafe_allow_html=True)
+
             show = acc[["basis", "avg_error", "bias", "months"]].copy()
-            show.columns = ["basis", "avg error", "bias", "months tested"]
-            with st.expander("How each basis scored"):
+            show["avg_error"] = show["avg_error"] * 100
+            show["direction"] = show["bias"].map(
+                lambda v: "runs high" if v > 0.02
+                else "runs low" if v < -0.02 else "balanced")
+            show = show[["basis", "avg_error", "direction", "months"]]
+            show.columns = ["method", "typical miss", "tends to",
+                            "months tested"]
+            with st.expander("How each method has performed"):
+                st.caption(
+                    "Each finished month was replayed: all three methods were "
+                    "worked out on day 12, then compared to what the month "
+                    "actually did. Typical miss is how far off they were. "
+                    "Smaller is better.")
                 table(show)
 
         basis = st.radio(
-            "Basis", ["Run rate", "Attainment", "Plan"], horizontal=True,
+            "Which assumption to show", ["Run rate", "Attainment", "Plan"],
+            horizontal=True,
             index=(["Run rate", "Attainment", "Plan"].index(acc.iloc[0]["basis"])
                    if len(acc) and acc.iloc[0]["basis"]
                    in ["Run rate", "Attainment", "Plan"] else 0),
             help="Run rate assumes the last 7 days repeat. Attainment assumes "
-                 "the rate achieved so far continues. Plan assumes the "
-                 "remaining days run exactly to plan.")
+                 "the pace achieved so far continues. Plan assumes the "
+                 "remaining days go exactly as planned.")
         key = {"Run rate": "run_rate", "Attainment": "attainment",
                "Plan": "at_plan"}[basis]
         b = fc["bases"][key]
@@ -694,16 +717,26 @@ elif view == "Forecast":
 
         lo = min(v["revenue"] for v in fc["bases"].values())
         hi = max(v["revenue"] for v in fc["bases"].values())
+        # The gap between the three is the real message. A reader who takes
+        # one number away has taken the wrong thing.
+        width = (hi - lo) / hi if hi else 0.0
+        verdict = ("The three methods agree closely, so the month looks "
+                   "predictable." if width < 0.10 else
+                   "The three methods are some way apart, so treat this as a "
+                   "range rather than a figure." if width < 0.30 else
+                   "The three methods disagree sharply. It is too early to "
+                   "commit to a number for this month.")
         st.markdown(
-            f"<div style='font-size:12px;color:#6d7076;line-height:1.7;"
-            f"background:#f4f6f9;border-radius:8px;padding:10px 13px;"
-            f"max-width:900px'><b style='font-weight:500;color:#17181a'>"
-            f"None of these is a prediction.</b> Each is arithmetic from a "
-            f"stated assumption. Run rate follows the last {fc['window']} days "
-            f"and turns fastest. Attainment assumes the shape so far holds. "
-            f"Plan is the ceiling — what a perfect rest of period would give. "
-            f"The {n(hi - lo)} {CUR} spread between them is the honest measure "
-            f"of how uncertain the period is.</div>",
+            f"<div style='font-size:13px;color:#17181a;line-height:1.75;"
+            f"background:#f4f6f9;border-radius:8px;padding:12px 15px;"
+            f"max-width:900px'>"
+            f"<b style='font-weight:500'>The month lands somewhere between "
+            f"{n(lo)} and {n(hi)} {CUR}.</b><br>{verdict}<br>"
+            f"<span style='color:#6d7076'>None of the three is a prediction. "
+            f"Each one takes a single assumption and does the arithmetic. "
+            f"Run rate assumes the last {fc['window']} days repeat. "
+            f"Attainment assumes the pace so far continues. Plan assumes the "
+            f"rest of the month goes exactly as planned.</span></div>",
             unsafe_allow_html=True)
 
 
