@@ -553,8 +553,9 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
     basket_now = (float(recent["units"].sum()) / recent_orders
                   if recent_orders else units_so_far / max(1, orders_so_far))
     basket_all = units_so_far / max(1, orders_so_far)
-    plan_basket = (plan_units / (plan_units / basket_all)
-                   if basket_all else None)
+    # plan_units / (plan_units / basket_all) is just basket_all, and it
+    # divides by zero the moment a month has no sales yet. Stated directly.
+    plan_basket = basket_all if basket_all else None
 
     price_now = (float(recent["revenue"].sum()) / float(recent["units"].sum())
                  if len(recent) and recent["units"].sum()
@@ -573,6 +574,7 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
         "at_plan": ((plan_units / basket_all) / scope.days
                     if basket_all and scope.days else 0.0),
     }
+    plan_orders = plan_units / basket_all if basket_all else None
 
     bases = {}
     for name, rate in per_day.items():
@@ -589,8 +591,8 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
             "cost_per_box": cost, "cogs": cogs,
             "cm": revenue - cogs,
             "cm_pct": (revenue - cogs) / revenue if revenue else None,
-            "orders_pct": (orders / (plan_units / basket_all)
-                           if basket_all and plan_units else None),
+            "orders_pct": (orders / plan_orders
+                           if plan_orders else None),
             "units_pct": units / plan_units if plan_units else None,
             "revenue_pct": revenue / plan_rev if plan_rev else None,
             "cm_pct_of_plan": ((revenue - cogs) / (plan_rev - plan_cogs)
@@ -615,8 +617,7 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
                    "cm": rev_so_far - cogs_so_far},
         "plan": {"units": plan_units, "revenue": plan_rev, "cogs": plan_cogs,
                  "cm": plan_cm, "price": plan_price, "cost": plan_cost,
-                 "basket": basket_all,
-                 "orders": plan_units / basket_all if basket_all else None},
+                 "basket": basket_all, "orders": plan_orders},
         "basket_now": basket_now, "price_now": price_now,
         "cost_now": cost_now, "window": window,
         "margin_split": {"volume": vol_effect, "cost": cost_effect,
@@ -754,6 +755,156 @@ def basis_accuracy(lines: pd.DataFrame, plan: pd.DataFrame,
     g["basis"] = g["basis"].map(label).fillna(g["basis"])
     g["at_day"] = at_day
     return g.sort_values("avg_error").reset_index(drop=True)
+
+
+def confidence(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+               cost_log: pd.DataFrame | None = None,
+               today: date | None = None, metric: str = "revenue") -> dict:
+    """How much to trust the projection, measured rather than asserted.
+
+    The interval comes from how far the same method missed on completed
+    months, not from a distribution assumed in advance. Fresh produce demand
+    is spiky and skewed, so a normal interval would be too narrow exactly
+    when it matters.
+
+    Confidence rises with two things and both are checkable: days elapsed,
+    because a projection on day 25 has less left to guess, and months of
+    history, because the interval itself is better calibrated. The to-do
+    list states what each would buy.
+    """
+    today = today or date.today()
+    fc = forecast(lines, plan, scope, cost_log, today=today)
+    if not fc:
+        return {}
+
+    elapsed, days = fc["elapsed"], fc["days"]
+    share_done = elapsed / days if days else 0.0
+
+    # Each metric is calibrated on its own history. Orders are steadier than
+    # margin, so borrowing revenue's interval would understate the one and
+    # overstate the other.
+    key = {"revenue": "revenue", "orders": "orders",
+           "units": "units", "margin": "cm"}.get(metric, "revenue")
+
+    def truth_of(c):
+        if key == "orders":
+            return c["orders"]["total"]
+        if key == "units":
+            return c["units"]["total"]
+        if key == "cm":
+            return c["margin"]["cm"]
+        return c["revenue"]["total"]
+
+    # How far each basis missed on completed months, at a comparable point.
+    errors, by_day = [], {}
+    for month in MONTHS:
+        n = MONTHS.index(month) + 1
+        last = calendar.monthrange(scope.year, n)[1]
+        if date(scope.year, n, last) >= today:
+            continue
+        s_full = Scope(scope.year, scope.market, month,
+                       categories=scope.categories, products=scope.products)
+        actual = cards(lines, plan, s_full, cost_log)
+        if actual.get("empty") or not truth_of(actual):
+            continue
+        truth = truth_of(actual)
+        for at in (5, 10, 15, 20, 25):
+            if at > last:
+                continue
+            past = forecast(lines, plan, s_full, cost_log,
+                            today=date(scope.year, n, at))
+            if not past:
+                continue
+            e = (past["bases"]["run_rate"][key] - truth) / truth
+            by_day.setdefault(at, []).append(e)
+            if abs(at - elapsed) <= 3:
+                errors.append(e)
+
+    months = len({m for m in MONTHS
+                  if date(scope.year, MONTHS.index(m) + 1,
+                          calendar.monthrange(scope.year,
+                                              MONTHS.index(m) + 1)[1]) < today})
+
+    if errors:
+        arr = np.array(errors)
+        spread = float(np.quantile(np.abs(arr), 0.8))
+        basis = "measured"
+        tested = len(errors)
+    elif by_day:
+        arr = np.concatenate([np.array(v) for v in by_day.values()])
+        spread = float(np.quantile(np.abs(arr), 0.8))
+        basis = "measured at other points in the month"
+        tested = len(arr)
+    else:
+        # Nothing to measure against. A deliberately wide default, so an
+        # uncalibrated projection is not mistaken for a confident one.
+        spread = 0.45
+        basis = "no completed months to test against"
+        tested = 0
+
+    # Confidence is the share of the period already banked, tightened by how
+    # consistent past months were. Both are facts, not judgements.
+    level = share_done * 0.55 + max(0.0, 1 - min(spread, 1.0)) * 0.45
+    level = float(np.clip(level, 0.15, 0.95))
+
+    point = fc["bases"]["run_rate"][key]
+    remaining_share = 1 - share_done
+    band = spread * remaining_share
+
+    todo = []
+    if elapsed < days:
+        for at in (10, 15, 20, 25):
+            if at <= elapsed or at > days:
+                continue
+            got = by_day.get(at)
+            if got:
+                s_at = float(np.quantile(np.abs(np.array(got)), 0.8))
+                lvl = float(np.clip((at / days) * 0.55
+                                    + max(0.0, 1 - min(s_at, 1.0)) * 0.45,
+                                    0.15, 0.95))
+            else:
+                lvl = float(np.clip((at / days) * 0.55
+                                    + max(0.0, 1 - min(spread, 1.0)) * 0.45,
+                                    0.15, 0.95))
+            todo.append({
+                "done": False,
+                "what": f"Wait until day {at}",
+                "gives": f"confidence about {lvl:.0%}",
+                "in_days": at - elapsed})
+            break
+
+    todo.append({
+        "done": months >= 6,
+        "what": f"Six completed months to calibrate against",
+        "gives": f"a measured interval instead of a default"
+                 + (f" · have {months}" if months < 6 else ""),
+        "in_days": None})
+    todo.append({
+        "done": bool(cost_log is not None and len(cost_log)),
+        "what": "Cost log covering the period",
+        "gives": "margin projected at real cost, not plan cost",
+        "in_days": None})
+    todo.append({
+        "done": False,
+        "what": "Two full seasons of history",
+        "gives": "a seasonal model, so a season launch can be projected "
+                 "before it has happened",
+        "in_days": None})
+
+    plan_target = {"revenue": fc["plan"]["revenue"],
+                   "units": fc["plan"]["units"],
+                   "cm": fc["plan"]["cm"],
+                   "orders": fc["plan"].get("orders")}.get(key)
+
+    return {
+        "metric": metric, "plan": plan_target,
+        "level": level, "spread": spread, "basis": basis, "tested": tested,
+        "months": months, "elapsed": elapsed, "days": days,
+        "point": point, "low": point * (1 - band), "high": point * (1 + band),
+        "band_pct": band,
+        "todo": [t for t in todo if not t["done"]],
+        "done": [t for t in todo if t["done"]],
+    }
 
 
 def progress(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,

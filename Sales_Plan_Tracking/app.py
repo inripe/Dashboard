@@ -558,6 +558,74 @@ elif view == "Forecast":
         st.caption(f"{market} · {scope.label} · day {fc['elapsed']} of "
                    f"{fc['days']} · {fc['remaining']} days remaining")
 
+        cmetric = st.radio(
+            "Confidence for", ["Revenue", "Orders", "Units", "Margin"],
+            horizontal=True, key="conf_metric",
+            help="Each metric is calibrated on its own history. Orders are "
+                 "steadier than margin, so they do not share an interval.")
+        conf = me.confidence(lines, plan, scope, cost_log,
+                             metric=cmetric.lower())
+        if conf:
+            lvl = conf["level"]
+            colr = GOOD if lvl >= 0.7 else AMBER if lvl >= 0.45 else ORANGE
+            st.markdown(
+                f"<div style='background:#fff;border:0.5px solid #e4e7ec;"
+                f"border-left:3px solid {colr};padding:13px 16px;"
+                f"max-width:900px;margin-bottom:14px'>"
+                f"<div style='display:flex;justify-content:space-between;"
+                f"align-items:baseline;flex-wrap:wrap;gap:10px'>"
+                f"<span style='font-size:13px;color:#6d7076'>"
+                f"{cmetric} will land near</span>"
+                f"<span style='font-size:12px;color:{colr};font-weight:500'>"
+                f"{lvl:.0%} confidence</span></div>"
+                f"<div style='font-size:27px;font-weight:500;line-height:1.3;"
+                f"margin:2px 0'>{n(conf['point'])}"
+                + (f" <span style='font-size:14px;color:#6d7076'>{CUR}</span>"
+                   if cmetric in ("Revenue", "Margin") else "")
+                + "</div>"
+                f"<div style='font-size:12.5px;color:#55585e'>"
+                f"between {n(conf['low'])} and {n(conf['high'])}"
+                + (f" · plan {n(conf['plan'])}" if conf.get("plan") else "")
+                + "</div>"
+                f"<div style='font-size:11.5px;color:#8a8d93;margin-top:7px;"
+                f"padding-top:7px;border-top:0.5px solid #e4e7ec'>"
+                f"day {conf['elapsed']} of {conf['days']} · "
+                f"interval {conf['basis']}"
+                + (f" on {conf['tested']} past projections"
+                   if conf["tested"] else "")
+                + f" · {conf['months']} completed months"
+                f"</div></div>", unsafe_allow_html=True)
+
+            if conf["todo"]:
+                st.markdown(
+                    "<div style='font-size:11px;font-weight:500;"
+                    "letter-spacing:.06em;text-transform:uppercase;"
+                    "color:#85888f;margin:0 0 7px'>What would raise it</div>",
+                    unsafe_allow_html=True)
+                for t in conf["todo"]:
+                    when = (f" · in {t['in_days']} days"
+                            if t.get("in_days") else "")
+                    st.markdown(
+                        f"<div style='display:flex;gap:11px;padding:5px 0;"
+                        f"font-size:12.5px'>"
+                        f"<span style='color:#B4B2A9'>○</span>"
+                        f"<span style='color:#17181a;min-width:230px'>"
+                        f"{t['what']}{when}</span>"
+                        f"<span style='color:#6d7076'>{t['gives']}</span>"
+                        f"</div>", unsafe_allow_html=True)
+                if conf["done"]:
+                    with st.expander(f"{len(conf['done'])} already in place"):
+                        for t in conf["done"]:
+                            st.markdown(
+                                f"<div style='display:flex;gap:11px;"
+                                f"padding:4px 0;font-size:12.5px'>"
+                                f"<span style='color:#1D9E75'>✓</span>"
+                                f"<span style='color:#6d7076'>{t['what']} — "
+                                f"{t['gives']}</span></div>",
+                                unsafe_allow_html=True)
+                st.markdown("<div style='height:10px'></div>",
+                            unsafe_allow_html=True)
+
         acc = me.basis_accuracy(lines, plan, scope, cost_log)
         if len(acc):
             best = acc.iloc[0]
@@ -937,6 +1005,12 @@ elif view == "How to read this":
                              "closest. The scores are in the expander."),
             ("The spread", "The gap between the three is the honest measure "
                            "of how uncertain the period is."),
+            ("Confidence", "Measured, not asserted. The interval comes from "
+                           "how far the same method missed on completed "
+                           "months. With nothing to test against it falls "
+                           "back to a deliberately wide default and says so."),
+            ("What would raise it", "Each item states what it buys. They "
+                                    "disappear as they are met."),
         ])
 
     elif guide == "Portfolio pricing":
