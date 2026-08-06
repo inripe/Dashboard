@@ -518,6 +518,24 @@ for k in ("roas", "cpa", "aov"):
     ck_true(f"{k} is measured against plan", _by[k].basis == "plan")
 for k in ("orders", "revenue", "spend"):
     ck_true(f"{k} carries a paced figure", _by[k].paced is not None)
+# The figure a card is measured against must sit beside the value, not below.
+for k in ("orders", "revenue", "spend"):
+    ck_true(f"{k} names what it is measured against",
+            _by[k].against and _by[k].against.startswith("of "),
+            str(_by[k].against))
+for k in ("roas", "cpa", "aov"):
+    ck_true(f"{k} names its plan beside the value",
+            _by[k].against is None or _by[k].against.startswith("vs "),
+            str(_by[k].against))
+# Currency belongs in the label, or the value wraps and the card grows taller
+# than its neighbours.
+for c_ in _cards:
+    ck_true(f"{c_.key} carries no currency prefix on the value",
+            not c_.prefix, repr(c_.prefix))
+ck_true("money cards name their currency in the label",
+        all("AED" in _by[k].label for k in ("revenue", "spend", "cpa", "aov")),
+        str([_by[k].label for k in ("revenue", "spend")]))
+
 ck_true("spend carries no verdict colour",
         _by["spend"].colour == E.GREY, _by["spend"].colour)
 ck_true("every card has a sparkline or an empty period",
@@ -571,6 +589,103 @@ for mk_ in M.market_list():
     except Exception as ex:
         ck_true(f"lines build for {mk_}", False, f"{type(ex).__name__}: {ex}")
 print("  [PASS] insight lines build for every market")
+
+print("\n=== 10j. ENTRY DISCREPANCIES ===")
+_f = E.discrepancies(M, YEAR, MONTH)
+ck_true("scanner returns findings or an honest empty list", isinstance(_f, list))
+for _fd in _f:
+    ck_true(f"{_fd.title} names its rows", len(_fd.rows) > 0)
+    ck_true(f"{_fd.title} rows carry a date", "Day" in _fd.rows.columns)
+    ck_true(f"{_fd.title} has a severity",
+            _fd.severity in ("risk", "warn"), _fd.severity)
+    ck_true(f"{_fd.title} explains why it matters", len(_fd.why) > 20)
+
+# Each rule must be provably true of every row it flags — a scanner that
+# over-reports is worse than none, because it gets ignored.
+_p = E._pivot_cells(M, YEAR, MONTH)
+_by = {f.kind: f for f in _f}
+if "units_lt_orders" in _by:
+    r_ = _by["units_lt_orders"].rows
+    ck_true("every flagged row really has units below orders",
+            (r_[E.M_UNITS] < r_[E.M_ORDERS]).all(), f"{len(r_)} rows")
+    want = len(_p[(_p[E.M_ORDERS] > 0) & (_p[E.M_UNITS] < _p[E.M_ORDERS])])
+    ck("units-below-orders count", len(r_), want, 0)
+if "orders_no_revenue" in _by:
+    r_ = _by["orders_no_revenue"].rows
+    ck_true("every flagged row really has orders and no revenue",
+            ((r_[E.M_ORDERS] > 0) & (r_[E.M_REVENUE] <= 0)).all())
+    want = len(_p[(_p[E.M_ORDERS] > 0) & (_p[E.M_REVENUE] <= 0)])
+    ck("orders-no-revenue count", len(r_), want, 0)
+if "orders_no_messages" in _by:
+    r_ = _by["orders_no_messages"].rows
+    ck_true("orders-without-messages is API only",
+            set(r_["Channel"]) <= {"API"}, str(set(r_["Channel"])))
+    ck_true("every flagged row really has zero messages",
+            (r_["Messages"] <= 0).all())
+
+# a clean scan must produce nothing, or the panel cries wolf
+_clean = E.discrepancies(M, YEAR, MONTH, markets=["__nonexistent__"])
+ck_true("a selection with no data produces no findings", not _clean,
+        f"{len(_clean)} findings")
+
+_note = E.discrepancy_note(_f)
+if _note:
+    _u, _r = _by.get("units_lt_orders"), _by.get("orders_no_revenue")
+    _both = (set(zip(_u.rows["Day"], _u.rows["Market"], _u.rows["Channel"]))
+             & set(zip(_r.rows["Day"], _r.rows["Market"], _r.rows["Channel"])))
+    ck_true("the note only claims overlap when cells really overlap",
+            len(_both) >= 2, f"{len(_both)} shared cells")
+    ck_true("the note names the market it accuses",
+            any(mk in _note for mk in M.market_list()), _note[:60])
+
+for mk_ in M.market_list():
+    try:
+        E.discrepancies(M, YEAR, MONTH, [mk_])
+    except Exception as ex:
+        ck_true(f"scan builds for {mk_}", False, f"{type(ex).__name__}: {ex}")
+print("  [PASS] scan builds for every market")
+
+print("\n=== 10k. TRAJECTORY ===")
+_tr = E.trajectory(M, None, None, YEAR, MONTH, COV)
+if _tr is not None:
+    ck("trajectory actual matches the period",
+       _tr.actual, E.actual(M, E.M_ORDERS, year=YEAR, month=MONTH) or 0, 1)
+    ck_true("landing is never below what has already happened",
+            _tr.landing is None or _tr.landing >= _tr.actual - 1,
+            f"{_tr.landing} vs {_tr.actual}")
+    if _tr.plan and _tr.days_left:
+        # the rate needed must actually close the gap
+        ck("rate needed closes the gap",
+           _tr.actual + _tr.rate_needed * _tr.days_left, _tr.plan, 1)
+    if COV.days_remaining == 0:
+        ck("a closed period lands where it landed", _tr.landing, _tr.actual, 1)
+        ck_true("a closed period needs no rate", _tr.days_left == 0)
+    ck_true("trajectory states its figures", any(c.isdigit() for c in _tr.text))
+for _mo in M.months_in(YEAR):
+    _cv = E.coverage(M, YEAR, _mo)
+    _t2 = E.trajectory(M, None, None, YEAR, _mo, _cv)
+    ck_true(f"{_mo} trajectory builds or is honestly absent",
+            _t2 is None or _t2.actual >= 0)
+
+print("\n=== 10l. NOTHING SAID TWICE ===")
+# A figure stated in more than two places is a figure someone will find two
+# answers for. This is how four separate blocks came to carry the same
+# week-on-week window.
+_cards2 = E.management_cards(M, None, None, YEAR, MONTH, COV)
+_seen = {}
+for c_ in _cards2:
+    for part in (c_.against or "", c_.foot or ""):
+        for tok in part.replace("\n", " ").split():
+            if tok.replace(",", "").replace(".", "").isdigit() and len(tok) > 3:
+                _seen[tok] = _seen.get(tok, 0) + 1
+ck_true("no figure repeats inside one card set",
+        all(v <= 2 for v in _seen.values()),
+        str({k: v for k, v in _seen.items() if v > 2}))
+ck_true("each card names which base its percent uses",
+        all(c_.basis_label for c_ in _cards2),
+        str([c_.basis_label for c_ in _cards2]))
+ck_true("volume cards pace, ratio cards do not",
+        all((c_.paced is not None) != c_.ratio for c_ in _cards2))
 
 print("\n=== 11. EVERY SELECTION BUILDS ===")
 _n = 0

@@ -1698,6 +1698,8 @@ class MetricCard:
     suffix: str = ""
     dec: int = 0
     ratio: bool = False          # a ratio never paces
+    against: Optional[str] = None   # shown beside the value, not beneath it
+    basis_label: str = ""           # names WHICH base the percent is against
 
 
 def _spark(series: pd.Series, n=31) -> list:
@@ -1754,45 +1756,62 @@ def management_cards(m: Model, markets, channels, year, month,
 
     closed = cov.days_remaining == 0
     basis = "plan" if closed else "paced"
+    # Spend measures against a ceiling, not a target.
 
-    def vol(key, label, val, target, series, pfx="", dec=0, direction="up",
-            foot_extra=""):
+
+    def vol(key, label, val, target, series, ccy="", dec=0, direction="up",
+            foot=""):
+        """Volume metric. The figure it is measured against sits BESIDE the
+        value — 3,535 of 4,844 reads in one glance, where a percentage with the
+        target three lines below does not."""
         pc = paced(target, cov)
         r = pct(val, pc)
         eom_v = None if closed else eom(val, cov)
-        foot = (f"{'plan' if closed else 'paced'} {fmt(pc, pfx, dec=dec)}"
-                + (f" · plan {fmt(target, pfx, dec=dec)}" if not closed else ""))
-        if eom_v is not None and target:
-            foot += f"\nlands at {fmt(eom_v, pfx, dec=dec)} — {pct(eom_v, target):.0f}%"
-        if foot_extra:
-            foot += f"\n{foot_extra}"
-        return MetricCard(key, label, val, pc, target, eom_v, r, basis,
-                          _card_colour(r, direction), _spark(series), foot,
-                          pfx, "", dec)
+        against = f"of {fmt(pc, '', dec=dec)}" if pc else None
+        # Two different bases can produce the same percentage by coincidence —
+        # percent of pace and percent of month plan. Each is labelled, because
+        # the case where they agree is exactly the case nobody checks.
+        tail = []
+        if not closed and target:
+            tail.append(f"month plan {fmt(target, '', dec=dec)}")
+            if eom_v is not None:
+                tail.append(f"lands at {fmt(eom_v, '', dec=dec)} — "
+                            f"{pct(eom_v, target):.0f}% of month plan")
+        if foot:
+            tail.append(foot)
+        foot = "\n".join(tail)
+        # Currency belongs in the label, not glued to the number: "AED 226.5K"
+        # wraps onto two lines and makes its card taller than its neighbours.
+        return MetricCard(key, label + (f" · {ccy}" if ccy else ""), val, pc,
+                          target, eom_v, r, basis, _card_colour(r, direction),
+                          _spark(series), foot, "", "", dec, against=against,
+                          basis_label=("of plan" if closed else "of pace"))
 
-    def ratio(key, label, val, plan_v, series, pfx="", sfx="", dec=1,
+    def ratio(key, label, val, plan_v, series, ccy="", sfx="", dec=1,
               direction="up", foot=""):
         r = pct(val, plan_v)
-        return MetricCard(key, label, val, None, plan_v, None, r, "plan",
-                          _card_colour(r, direction), _spark(series), foot,
-                          pfx, sfx, dec, ratio=True)
+        return MetricCard(key, label + (f" · {ccy}" if ccy else ""), val, None,
+                          plan_v, None, r, "plan", _card_colour(r, direction),
+                          _spark(series), foot, "", sfx, dec, ratio=True,
+                          against=(f"vs {fmt(plan_v, '', sfx, dec)}"
+                                   if plan_v else None),
+                          basis_label="of plan")
 
     ceil_day = div(ceil, cov.days_in_month)
     sp_day = div(sp, cov.days_elapsed)
 
     return [
         vol("orders", "Orders", o, t_o, d_o),
-        vol("revenue", "Revenue", rev, t_rev, d_rev, "AED "),
-        vol("spend", "Spend", sp, ceil, d_sp, "AED ", direction="neutral",
-            foot_extra=(f"{fmt(ceil_day,'AED ')}/day allowed · "
-                        f"{fmt(sp_day,'AED ')}/day actual"
-                        if ceil_day and sp_day else "")),
+        vol("revenue", "Revenue", rev, t_rev, d_rev, "AED"),
+        vol("spend", "Spend", sp, ceil, d_sp, "AED", direction="neutral",
+            foot=(f"{fmt(sp_day)} of {fmt(ceil_day)} a day"
+                  if ceil_day and sp_day else "")),
         ratio("roas", "ROAS", div(rev, sp), div(t_rev, ceil), d_roas,
-              sfx="x", foot="revenue ÷ spend, always"),
-        ratio("cpa", "CPA", div(sp, o), div(ceil, p_o), d_cpa, "AED ", dec=2,
-              direction="down", foot="budget control only — see Why"),
-        ratio("aov", "AOV", div(rev, o), div(t_rev, t_o), d_aov, "AED ", dec=0,
-              foot="observed, never used to derive"),
+              sfx="x", foot="revenue ÷ spend"),
+        ratio("cpa", "CPA", div(sp, o), div(ceil, p_o), d_cpa, "AED", dec=2,
+              direction="down", foot="budget control — see Efficiency"),
+        ratio("aov", "AOV", div(rev, o), div(t_rev, t_o), d_aov, "AED", dec=0,
+              foot="observed, never derived"),
     ]
 
 
@@ -1897,7 +1916,8 @@ def split_line(m: Model, markets, year, month, parent=None) -> Optional[str]:
             + f". A consolidated {parent} figure hides both.")
 
 
-def compare_line(m: Model, ar, br, markets, channels) -> Optional[str]:
+def compare_line(m: Model, ar, br, markets, channels,
+                 terse: bool = False) -> Optional[str]:
     A, B = cmp_block(m, *ar, markets, channels), cmp_block(m, *br, markets, channels)
     o, r, s = (cmp_change(A, B, "orders"), cmp_change(A, B, "revenue"),
                cmp_change(A, B, "spend"))
@@ -1906,11 +1926,20 @@ def compare_line(m: Model, ar, br, markets, channels) -> Optional[str]:
     parts = []
     sp_txt = (f"on {abs(s['pct']):.0f}% {'more' if s['pct'] > 0 else 'less'} spend"
               if s["pct"] is not None and abs(s["pct"]) >= 1 else "on flat spend")
-    parts.append(f"Orders {'rose' if o['pct'] > 0 else 'fell'} "
-                 f"<b>{abs(o['pct']):.0f}%</b> {sp_txt}, so CPA "
-                 f"{'rose' if A['cpa'] > B['cpa'] else 'fell'} from "
-                 f"{fmt(B['cpa'],'AED ',dec=2)} to <b>{fmt(A['cpa'],'AED ',dec=2)}</b> "
-                 f"and ROAS moved {B['roas']:.1f}x to {A['roas']:.1f}x.")
+    if terse:
+        # The cards beside this already state every figure. Repeating them here
+        # was the third place the same comparison appeared, so this says only
+        # what the cards cannot: the relationship between them.
+        parts.append(f"Orders {'rose' if o['pct'] > 0 else 'fell'} "
+                     f"<b>{abs(o['pct']):.0f}%</b> {sp_txt}, so an order "
+                     f"{'cost more' if A['cpa'] > B['cpa'] else 'cost less'}.")
+    else:
+        parts.append(f"Orders {'rose' if o['pct'] > 0 else 'fell'} "
+                     f"<b>{abs(o['pct']):.0f}%</b> {sp_txt}, so CPA "
+                     f"{'rose' if A['cpa'] > B['cpa'] else 'fell'} from "
+                     f"{fmt(B['cpa'],'AED ',dec=2)} to "
+                     f"<b>{fmt(A['cpa'],'AED ',dec=2)}</b> "
+                     f"and ROAS moved {B['roas']:.1f}x to {A['roas']:.1f}x.")
     # Revenue moving in step with orders means basket size held — a volume
     # problem rather than a mix problem, and neither card says so alone.
     if r["pct"] is not None and abs(r["pct"] - o["pct"]) < 3:
@@ -1920,3 +1949,234 @@ def compare_line(m: Model, ar, br, markets, channels) -> Optional[str]:
         parts.append(f"Revenue moved {r['pct']:+.0f}% against orders at "
                      f"{o['pct']:+.0f}% — basket size shifted.")
     return " ".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ENTRY DISCREPANCIES
+#
+# Values the sheet accepted that cannot be right. Data validation stops a wrong
+# CATEGORY going in; nothing stops a wrong NUMBER. A day with orders but no
+# revenue passes every validation rule and quietly understates that channel's
+# ROAS for as long as nobody notices.
+#
+# Every finding names its date, cell, figures and row in A1, so it can be found
+# and fixed rather than merely counted.
+# ─────────────────────────────────────────────────────────────────────
+@dataclass
+class Finding:
+    kind: str
+    severity: str          # risk / warn
+    title: str
+    why: str
+    rows: pd.DataFrame
+
+
+def _pivot_cells(m: Model, year=None, month=None) -> pd.DataFrame:
+    d = scope(m.actuals, year=year, month=month)
+    if d.empty:
+        return pd.DataFrame()
+    p = d.pivot_table(index=["Day", "Market", "Channel"], columns="Metric",
+                      values="Value", aggfunc="sum")
+    for c in (M_ORDERS, M_UNITS, M_REVENUE, M_SPEND,
+              M_MSG_CUST, M_MSG_LEAD, M_MSG_RECV):
+        if c not in p.columns:
+            p[c] = 0.0
+    return p.fillna(0.0).reset_index()
+
+
+def discrepancies(m: Model, year=None, month=None, markets=None) -> list:
+    p = _pivot_cells(m, year, month)
+    if p.empty:
+        return []
+    if markets:
+        p = p[p["Market"].isin(markets)]
+    d = scope(m.actuals, markets, None, year, month)
+    out = []
+
+    def pack(kind, sev, title, why, sub, cols):
+        if not len(sub):
+            return
+        r = sub[["Day", "Market", "Channel"] + cols].copy()
+        r = r.sort_values(["Day", "Market", "Channel"])
+        out.append(Finding(kind, sev, title, why, r))
+
+    # A basket cannot hold less than one unit. Units below orders means the
+    # units column was not filled, not that customers bought fractions.
+    pack("units_lt_orders", "risk",
+         "Units below orders",
+         "A basket cannot hold less than one unit, so units were not entered.",
+         p[(p[M_ORDERS] > 0) & (p[M_UNITS] < p[M_ORDERS])],
+         [M_ORDERS, M_UNITS])
+
+    # Orders with no revenue understates that cell's ROAS for those days: the
+    # spend counts, the return does not.
+    pack("orders_no_revenue", "risk",
+         "Orders with no revenue",
+         "Spend counts against these orders but the revenue does not, so ROAS "
+         "and AOV are understated for these days.",
+         p[(p[M_ORDERS] > 0) & (p[M_REVENUE] <= 0)],
+         [M_ORDERS, M_SPEND, M_REVENUE])
+
+    pack("revenue_no_orders", "risk",
+         "Revenue with no orders",
+         "Revenue was recorded against a day with no order count.",
+         p[(p[M_REVENUE] > 0) & (p[M_ORDERS] <= 0)],
+         [M_ORDERS, M_REVENUE])
+
+    # Conversion above 100% on a message-based channel
+    api = p[p["Channel"] == "API"].copy()
+    if len(api):
+        api["Messages"] = api[M_MSG_CUST] + api[M_MSG_LEAD]
+        pack("orders_no_messages", "warn",
+             "Orders with no messages sent",
+             "Conversion reads above 100%. Either the send was not recorded or "
+             "the orders belong to another channel.",
+             api[(api[M_ORDERS] > 0) & (api["Messages"] <= 0)],
+             [M_ORDERS, "Messages"])
+
+    neg = d[d["Value"] < 0]
+    if len(neg):
+        out.append(Finding(
+            "negative", "risk", "Negative values",
+            "No metric here can be negative.",
+            neg[["Day", "Market", "Channel", "Metric", "Value"]]
+            .sort_values(["Day", "Market"])))
+
+    dup = (d.groupby(["Day", "Market", "Channel", "Metric"]).size()
+           .reset_index(name="Entries"))
+    dup = dup[dup["Entries"] > 1]
+    if len(dup):
+        out.append(Finding(
+            "duplicate", "risk", "The same cell entered more than once",
+            "Both entries are summed, so the figure is inflated.",
+            dup.sort_values(["Day", "Market"])))
+
+    # A missing day inside a reporting range is a gap, not a zero — the market
+    # was reporting either side of it.
+    gaps = []
+    for mk, g in d.groupby("Market"):
+        days = pd.to_datetime(sorted(g["Day"].unique()))
+        if len(days) < 2:
+            continue
+        full = pd.date_range(days.min(), days.max(), freq="D")
+        miss = sorted(set(full) - set(days))
+        for x in miss:
+            gaps.append({"Day": x.date(), "Market": mk, "Channel": "—",
+                         "Note": "no entry between reported days"})
+    if gaps:
+        out.append(Finding(
+            "missing_day", "warn", "Missing days inside a reporting range",
+            "The market reported either side of these days, so they are gaps "
+            "rather than days with nothing to report.",
+            pd.DataFrame(gaps)))
+
+    # An order of magnitude above the cell's own median is usually a typo —
+    # measured per market x channel x metric, so a big market is not flagged
+    # for being big.
+    spikes = []
+    for (mk, ch, me), g in d.groupby(["Market", "Channel", "Metric"]):
+        v = g[g["Value"] > 0]
+        if len(v) < 5:
+            continue
+        med = v["Value"].median()
+        for _, r in v[v["Value"] > med * 10].iterrows():
+            spikes.append({"Day": r["Day"], "Market": mk, "Channel": ch,
+                           "Metric": me, "Value": r["Value"],
+                           "Typical": round(med, 2)})
+    if spikes:
+        out.append(Finding(
+            "spike", "warn", "Values far above their own typical level",
+            "More than ten times the median for that same cell and metric.",
+            pd.DataFrame(spikes)))
+
+    reg_m = {str(x).strip() for x in m.markets["Market"].dropna()}
+    reg_c = {str(x).strip() for x in m.channels["Channel"].dropna()}
+    stray = d[(~d["Market"].isin(reg_m)) | (~d["Channel"].isin(reg_c))]
+    if len(stray):
+        out.append(Finding(
+            "unregistered", "risk", "Market or channel not in the register",
+            "These rows are excluded from every total until R1. Setup lists them.",
+            stray[["Day", "Market", "Channel", "Metric", "Value"]]))
+
+    return out
+
+
+def discrepancy_note(findings: list) -> Optional[str]:
+    """The pattern across findings — usually more useful than any one row.
+
+    Two separate counts against the same days are one missed entry session, not
+    two problems, and saying so is the difference between a list and a lead.
+    """
+    by = {f.kind: f for f in findings}
+    u, r = by.get("units_lt_orders"), by.get("orders_no_revenue")
+    if u is not None and r is not None:
+        ku = set(zip(u.rows["Day"], u.rows["Market"], u.rows["Channel"]))
+        kr = set(zip(r.rows["Day"], r.rows["Market"], r.rows["Channel"]))
+        both = ku & kr
+        if len(both) >= 2:
+            days = sorted({d for d, _, _ in both})
+            mkts = sorted({m for _, m, _ in both})
+            span = (f"{pd.Timestamp(days[0]).strftime('%-d')}–"
+                    f"{pd.Timestamp(days[-1]).strftime('%-d %b')}"
+                    if len(days) > 1 else pd.Timestamp(days[0]).strftime('%-d %b'))
+            return (f"The first two groups are <b>the same {len(both)} cells</b>, "
+                    f"{span}, {', '.join(mkts)} — orders were entered but units "
+                    f"and revenue were not. That reads as one missed entry "
+                    f"session rather than separate mistakes. It also means "
+                    f"<b>{', '.join(mkts)} CPA and ROAS are understated</b> for "
+                    f"those days.")
+    return None
+
+
+
+@dataclass
+class Trajectory:
+    actual: float
+    paced: Optional[float]
+    landing: Optional[float]
+    plan: Optional[float]
+    rate_now: Optional[float]
+    rate_needed: Optional[float]
+    days_left: int
+    shortfall: Optional[float]
+    text: str
+
+
+def trajectory(m: Model, markets, channels, year, month,
+               cov: Coverage) -> Optional[Trajectory]:
+    """Where the period lands if today's rate holds.
+
+    Replaces a full run-rate chart. Early in a month that chart is mostly
+    projection — a short stub of actual and two straight lines extrapolated to
+    month end, which is a great deal of ink for two numbers. This carries the
+    same four points and adds the one the chart never showed: the daily rate
+    needed to reach plan.
+    """
+    o = actual(m, M_ORDERS, markets=markets, channels=channels,
+               year=year, month=month) or 0.0
+    t = target_orders(m, markets, year, month)
+    if not cov.days_elapsed:
+        return None
+    pc = paced(t, cov)
+    land = eom(o, cov)
+    rate = o / cov.days_elapsed
+    left = cov.days_remaining
+    need = ((t - o) / left) if (t and left) else None
+    short = (t - land) if (t and land is not None) else None
+
+    if left == 0:
+        txt = (f"Closed at <b>{o:,.0f}</b>"
+               + (f" against a plan of {t:,.0f} — "
+                  f"<b>{pct(o, t):.0f}%</b>." if t else "."))
+    elif t:
+        txt = (f"Holding <b>{rate:,.0f} orders/day</b> for the {left} days left "
+               f"lands at <b>{land:,.0f}</b> — {pct(land, t):.0f}% of a "
+               f"{t:,.0f} plan")
+        txt += (f", <b>{short:,.0f} short</b>." if short and short > 0
+                else f", <b>{abs(short):,.0f} clear</b>." if short else ".")
+        if need and need > 0:
+            txt += f" Reaching plan needs <b>{need:,.0f}/day</b>."
+    else:
+        txt = (f"Running at {rate:,.0f} orders/day. No plan set for this "
+               f"period, so there is nothing to land against.")
+    return Trajectory(o, pc, land, t, rate, need, left, short, txt)

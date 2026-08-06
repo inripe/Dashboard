@@ -132,17 +132,28 @@ def pace_bar(pctv, colour, cap=100):
 
 
 def metric_card(c):
-    v = E.fmt(c.value, c.prefix, c.suffix, c.dec)
+    """Equal-height card. The figure being measured against sits beside the
+    value; the footnote is pinned to the bottom so a longer note cannot make its
+    card taller than its neighbours."""
+    v = E.fmt(c.value, "", c.suffix, c.dec)
+    against = (f"<span style='font-size:12.5px;color:#6B7280;"
+               f"white-space:nowrap'>{c.against}</span>" if c.against else "")
     pc = ("" if c.pct_of is None else
-          f"<div style='font-size:12px;color:{c.colour};font-weight:600'>"
-          f"{c.pct_of:.0f}% of {c.basis}</div>")
-    foot = "<br>".join(c.foot.split("\n")) if c.foot else ""
-    return (f"<div class='card'>"
+          f"<span style='font-size:13px;color:{c.colour};font-weight:600;"
+          f"white-space:nowrap'>{c.pct_of:.0f}%</span>")
+    base = (f"<div style='font-size:11px;color:#9AA0A6'>{c.basis_label}</div>"
+            if c.basis_label else "")
+    foot = (f"<div style='font-size:10.5px;color:#9AA0A6;margin-top:auto;"
+            f"padding-top:7px'>{c.foot}</div>" if c.foot else "")
+    return (f"<div class='card' style='display:flex;flex-direction:column;"
+            f"min-height:152px'>"
             f"<div class='lab'>{c.label}</div>"
-            f"<div class='val'>{v}</div>{pc}"
+            f"<div style='display:flex;align-items:baseline;gap:6px;"
+            f"margin:5px 0 1px;flex-wrap:wrap'>"
+            f"<span style='font-size:24px;font-weight:600;white-space:nowrap'>"
+            f"{v}</span>{against}{pc}</div>{base}"
             f"{pace_bar(c.pct_of, c.colour)}"
-            f"{sparkline(c.spark, c.colour)}"
-            f"<div class='sub'>{foot}</div></div>")
+            f"{sparkline(c.spark, c.colour, h=20)}{foot}</div>")
 
 
 ARROW = {"up": "▲", "down": "▼", "flat": "—"}
@@ -181,6 +192,19 @@ def section(title, sub=None, band=False, reset=None):
     if band:
         st.markdown(f"<div style='background:{bg};margin:0 -18px;padding:2px 18px 16px;"
                     f"border-radius:0 0 12px 12px'>", unsafe_allow_html=True)
+
+
+def how_to_read(*points):
+    """Method explanations belong one click away, not on the page.
+
+    They are worth reading once and are noise on the fiftieth visit — but
+    removing them entirely would leave the reader to guess what 'paced' means.
+    """
+    with st.expander("How to read this"):
+        st.markdown("".join(
+            f"<div style='font-size:12.5px;line-height:1.8;color:#3A3A3A;"
+            f"margin-bottom:7px'>{p}</div>" for p in points),
+            unsafe_allow_html=True)
 
 
 def end_band():
@@ -331,12 +355,8 @@ if not periods:
 
 stamp = (META["modified"].replace("T", " ")[:16] + " UTC") if META.get("modified") else "local file"
 who = META.get("modified_by")
-st.markdown(f"""<div class='hero'>
-<div><h1>📊 Dashboard | Digital Marketing Performance</h1>
-<p>Plan, actuals and allocation across markets and channels</p></div>
-<div class='meta'>Workbook updated <b style='color:white'>{stamp}</b>{f'<br>by {who}' if who else ''}</div>
-</div>""", unsafe_allow_html=True)
-
+# Filters sit above the title bar, so the title reads as a caption on the
+# current selection rather than a banner to scroll past.
 years = M.years()
 c0, c1, c2, c3 = st.columns([0.8, 1.3, 1.8, 1.8])
 YEAR = c0.selectbox("Year", years, index=len(years) - 1)
@@ -381,6 +401,28 @@ if YTD:
 # ═════════════════════════════════════════════════════════════════════
 # OVERVIEW
 # ═════════════════════════════════════════════════════════════════════
+
+src_bits = []
+if META.get("name"):
+    src_bits.append(f"Workbook &middot; <b>{META['name']}</b>")
+if META.get("modified"):
+    who = f" by {META['by']}" if META.get("by") else ""
+    src_bits.append(f"saved {stamp}{who}")
+fr0 = E.freshness(M)
+src_bits.append(f"Actuals to <b>{pd.Timestamp(fr0.last_day).strftime('%-d %b %Y')}"
+                f"</b> &middot; {M.actuals['Market'].nunique()} markets &middot; "
+                f"{len(M.actuals):,} rows")
+
+st.markdown(
+    f"<div class='hero'><div>"
+    f"<h1>📊 Dashboard | Digital Marketing Performance</h1>"
+    f"<p>{sel_p} &middot; "
+    f"{'all markets' if len(sel_m) == len(all_m) else ', '.join(sel_m)} &middot; AED"
+    f"</p></div>"
+    f"<div style='text-align:right;font-size:11.5px;line-height:1.75;"
+    f"color:#C9DDF2'>{'<br>'.join(src_bits)}</div></div>",
+    unsafe_allow_html=True)
+
 # ── management section ───────────────────────────────────────────────
 # Cards carry everything a visual can. One sentence beneath says only what a
 # card cannot: a relationship between two of them.
@@ -417,131 +459,131 @@ cols = st.columns(len(CARDS))
 for col, c in zip(cols, CARDS):
     col.markdown(metric_card(c), unsafe_allow_html=True)
 
+# Week on week: dropped in the rebuild and put back. On a three-day review
+# cadence it is the first line anyone reads, and it owes nothing to the plan.
+days_all = sorted(M.actuals["Day"].unique())
+if len(days_all) >= 14:
+    ar_, br_ = (days_all[-7], days_all[-1]), (days_all[-14], days_all[-8])
+    A_w = E.cmp_block(M, *ar_, sel_m, sel_c)
+    B_w = E.cmp_block(M, *br_, sel_m, sel_c)
+    bits_w = []
+    for k_, lab_, dec_ in [("orders", "Orders", 0), ("spend", "Spend", 0),
+                           ("cpa", "CPA", 2), ("roas", "ROAS", 1)]:
+        ch_ = E.cmp_change(A_w, B_w, k_)
+        col_ = (GREEN if ch_["read"] == "better" else
+                RED if ch_["read"] == "worse" else "#6B7280")
+        pc_ = "" if ch_["pct"] is None else f"{ch_['pct']:+.0f}%"
+        bits_w.append(f"<span style='font-size:13px'>{lab_} "
+                      f"<b>{E.fmt(A_w[k_], '', 'x' if k_ == 'roas' else '', dec_)}"
+                      f"</b> <span style='color:{col_};font-weight:600'>{pc_}"
+                      f"</span></span>")
+    rng = (f"{pd.Timestamp(ar_[0]).strftime('%-d')}–"
+           f"{pd.Timestamp(ar_[1]).strftime('%-d %b')} vs "
+           f"{pd.Timestamp(br_[0]).strftime('%-d')}–"
+           f"{pd.Timestamp(br_[1]).strftime('%-d %b')}")
+    st.markdown(
+        f"<div style='background:white;border-radius:10px;padding:10px 15px;"
+        f"margin:12px 0 0;display:flex;gap:22px;flex-wrap:wrap;"
+        f"align-items:center;box-shadow:0 1px 3px rgba(0,0,0,0.06)'>"
+        f"<span style='font-size:10.5px;color:#6B7280;text-transform:uppercase;"
+        f"letter-spacing:0.06em'>{rng}</span>{''.join(bits_w)}</div>",
+        unsafe_allow_html=True)
+
 ML = E.management_line(M, sel_m, sel_disp, YEAR, MONTH, COV)
 if ML:
     st.markdown(f"<div style='background:#FAFBFC;border-left:3px solid #EF9F27;"
                 f"padding:11px 16px;font-size:13px;line-height:1.75;"
                 f"margin:14px 0 4px'>{ML}</div>", unsafe_allow_html=True)
-st.markdown("<div class='note'>Paced is the month plan pro-rated to today — what "
-            "you should have by now to finish on target. Ratios are shown against "
-            "plan only, because a ratio does not accumulate. Spend carries no "
-            "verdict; ROAS and CPA judge what it bought.</div>",
-            unsafe_allow_html=True)
+how_to_read(
+    "<b>Paced</b> is the month plan pro-rated to today — what you should have "
+    "by now to finish on target. The tick on each bar marks 100% of pace.",
+    "<b>Ratios are shown against plan only.</b> A ratio does not accumulate, so "
+    "pacing one would be meaningless.",
+    "<b>Spend carries no verdict.</b> Spending is neither good nor bad — ROAS "
+    "and CPA judge what it bought.",
+    "<b>AOV is observed</b>, revenue divided by orders. It is never used to "
+    "derive anything else; ROAS is always revenue divided by spend.")
 
 # ── will we land it ──────────────────────────────────────────────────
-section("How each month landed" if YTD else "Will we land the month?",
-        "actual against the plan pace", band=True)
-ser = E.daily_series(M, E.M_ORDERS, sel_m, sel_c, YEAR, MONTH)
-t_ord = E.target_orders(M, sel_m, YEAR, MONTH)
-if YTD:
-    # Across closed months a cumulative run rate is meaningless — every month
-    # has already landed. Plan against actual per month says it honestly.
-    st.markdown("<div class='sect-sub'>Each closed month, plan against "
-                "actual.</div>", unsafe_allow_html=True)
+# A closed month has no trajectory to project: the cards already state where it
+# landed, so a bar repeating those two numbers is the third place they appear.
+TR = E.trajectory(M, sel_m, sel_c, YEAR, MONTH, COV)
+SHOW_TR = TR is not None and (YTD or COV.days_remaining > 0)
+if SHOW_TR:
+    section("How each month landed" if YTD else "Will we land the month?",
+            "actual against the plan pace", band=True)
+if not SHOW_TR:
+    pass
+elif YTD:
     fm = go.Figure()
     tg_v = [E.target_orders(M, sel_m, YEAR, mo) or 0 for mo in MONTH]
     ac_v = [E.actual(M, E.M_ORDERS, markets=sel_m, channels=sel_c,
                      year=YEAR, month=mo) or 0 for mo in MONTH]
-    fm.add_trace(go.Bar(x=list(MONTH), y=tg_v, name="Target",
-                        marker_color="#C9D6E5"))
+    fm.add_trace(go.Bar(x=list(MONTH), y=tg_v, name="Target", marker_color="#C9D6E5"))
     fm.add_trace(go.Bar(x=list(MONTH), y=ac_v, name="Actual", marker_color=GREEN))
-    chart(fm, 280)
+    chart(fm, 240)
     fm.update_layout(barmode="group", yaxis_title="Orders")
     st.plotly_chart(fm, use_container_width=True)
-elif len(ser) and t_ord:
-    cum = list(ser.cumsum().values)
-    plan_line = [t_ord / COV.days_in_month * d for d in range(1, COV.days_in_month + 1)]
-    rate = cum[-1] / COV.days_elapsed
-    proj = [cum[-1] + rate * d for d in range(0, COV.days_remaining + 1)]
-    xs = list(range(COV.days_elapsed, COV.days_in_month + 1))
-    land = E.eom(cum[-1], COV)
-    st.markdown(f"<div class='sect-sub'>Holding {rate:,.0f} orders/day for the "
-                f"{COV.days_remaining} days left lands at {land:,.0f}, "
-                f"{E.fmt_pct(land, t_ord)} of plan.</div>", unsafe_allow_html=True)
-    fig = go.Figure()
-    if len(xs) > 1:
-        upper = plan_line[COV.days_elapsed - 1:][:len(xs)]
-        fill = "rgba(163,45,45,0.07)" if land < t_ord else "rgba(15,110,86,0.07)"
-        fig.add_trace(go.Scatter(x=xs + xs[::-1], y=upper + proj[:len(xs)][::-1],
-                                 fill="toself", fillcolor=fill,
-                                 line=dict(color="rgba(0,0,0,0)"),
-                                 name="Gap to plan", hoverinfo="skip"))
-    fig.add_trace(go.Scatter(x=list(range(1, COV.days_in_month + 1)), y=plan_line,
-                             name="Plan pace", mode="lines",
-                             line=dict(color=BLUE, dash="dash", width=2)))
-    fig.add_trace(go.Scatter(x=list(range(1, COV.days_elapsed + 1)), y=cum,
-                             name="Actual", mode="lines+markers",
-                             line=dict(color=GREEN, width=2.5),
-                             marker=dict(size=4.5, color=GREEN,
-                                         line=dict(color="white", width=1.4))))
-    if len(xs) > 1:
-        c = GREEN if land >= t_ord * 0.9 else AMBER if land >= t_ord * 0.7 else RED
-        fig.add_trace(go.Scatter(x=xs, y=proj[:len(xs)], mode="lines",
-                                 name=f"Run rate → {land:,.0f}",
-                                 line=dict(color=c, dash="dot", width=2)))
-    fig.add_hline(y=t_ord, line_color=BLUE, line_width=1, opacity=0.35,
-                  annotation_text=f"Plan {t_ord:,.0f}", annotation_position="bottom right")
-    chart(fig, 290)
-    fig.update_layout(xaxis_title=f"Day of {MONTH} {YEAR}", yaxis_title="Orders",
-                      legend=dict(orientation="h", y=-0.22))
-    st.plotly_chart(fig, use_container_width=True)
-    st.markdown("<div class='note'>A straight run rate, not a forecast: it assumes no "
-                "change in trajectory.</div>", unsafe_allow_html=True)
 else:
-    st.caption("No plan or no actuals for this selection.")
+    # Four markers on one bar carry everything a run-rate chart showed. Early in
+    # a month that chart was a short stub of actual and two straight lines
+    # extrapolated to month end — a lot of ink for two numbers.
+    st.markdown(f"<div style='font-size:13px;line-height:1.75;margin:2px 0 13px'>"
+                f"{TR.text}</div>", unsafe_allow_html=True)
+    if TR.plan:
+        w = lambda v: max(min((v or 0) / TR.plan * 100, 100), 0)
+        marks = [("today", TR.actual, GREEN, w(TR.actual)),
+                 ("should be", TR.paced, BLUE, w(TR.paced)),
+                 ("lands at", TR.landing, AMBER, w(TR.landing)),
+                 ("plan", TR.plan, "#3A3A3A", 100.0)]
+        bar = (f"<div style='position:relative;height:26px;background:#F1F2F4;"
+               f"border-radius:5px;overflow:hidden'>"
+               f"<div style='position:absolute;left:0;top:0;bottom:0;"
+               f"width:{w(TR.landing):.1f}%;background:#F0997B;opacity:0.4'></div>"
+               f"<div style='position:absolute;left:0;top:0;bottom:0;"
+               f"width:{w(TR.actual):.1f}%;background:{GREEN}'></div>"
+               f"<div style='position:absolute;left:{w(TR.paced):.1f}%;top:-3px;"
+               f"bottom:-3px;width:2px;background:{BLUE}'></div></div>")
+        labs = []
+        for i_, (lab, val, col, pos) in enumerate(marks):
+            if val is None:
+                continue
+            if i_ == 0:
+                style = "left:0"
+            elif i_ == len(marks) - 1:
+                style = "right:0"
+            else:
+                style = f"left:{pos:.1f}%;transform:translateX(-50%)"
+            labs.append(f"<div style='position:absolute;{style};top:5px;"
+                        f"white-space:nowrap'><span style='color:{col};"
+                        f"font-weight:600'>{val:,.0f}</span> {lab}</div>")
+        st.markdown(f"{bar}<div style='position:relative;height:32px;"
+                    f"font-size:10.5px;color:#6B7280'>{''.join(labs)}</div>",
+                    unsafe_allow_html=True)
+    st.markdown("<div class='note'>A straight run rate, not a forecast: it "
+                "assumes no change in trajectory.</div>", unsafe_allow_html=True)
+if SHOW_TR:
+    end_band()
 
-# ── spend trajectory ─────────────────────────────────────────────────
-end_band()
-section("Where spend lands", "daily rate, direction, and the ceiling")
+# The spend chart is gone. Its entire payload was "lands at AED X — Y% of the
+# ceiling", which now sits on the Spend card, and with a short period Plotly
+# fell back to hourly ticks and printed 12:00 / 00:00 instead of dates.
 SP_ = E.spend_path(M, sel_m, sel_c, YEAR, MONTH, COV)
-if not len(SP_.daily):
-    st.caption("No spend recorded for this selection.")
-else:
-    dirn = {"rising": ("▲", RED), "falling": ("▼", GREEN),
-            "steady": ("—", "#6B7280"), "flat": ("—", "#6B7280")}[SP_.direction]
-    land = (f"{SP_.landing_pct:.0f}% of the ceiling"
-            if SP_.landing_pct is not None else "no ceiling set")
-    over = SP_.landing_pct is not None and SP_.landing_pct > 100
-    st.markdown(f"<div class='sect-sub'>Spend is <b style='color:{dirn[1]}'>"
-                f"{SP_.direction} {dirn[0]}</b>. {SP_.note}. "
-                f"At that rate the month lands at "
-                f"<b>{E.fmt(SP_.eom, 'AED ')}</b> — {land}.</div>",
-                unsafe_allow_html=True)
-    figs = go.Figure()
-    figs.add_trace(go.Bar(x=list(SP_.daily.index), y=list(SP_.daily.values),
-                          name="Daily spend", marker_color=BLUE, opacity=0.7))
-    roll = SP_.daily.rolling(7, min_periods=1).mean()
-    figs.add_trace(go.Scatter(x=list(roll.index), y=list(roll.values),
-                              name="7-day average", mode="lines",
-                              line=dict(color=PURPLE, width=2.2)))
-    if SP_.ceiling and COV.days_in_month:
-        figs.add_hline(y=SP_.ceiling / COV.days_in_month, line_dash="dash",
-                       line_color=GREEN, line_width=1.5,
-                       annotation_text=f"Ceiling rate "
-                                       f"{SP_.ceiling/COV.days_in_month:,.0f}/day",
-                       annotation_position="top left")
-    chart(figs, 260)
-    figs.update_layout(yaxis_title="AED")
-    st.plotly_chart(figs, use_container_width=True)
-    if over:
-        say("risk", f"<b>On the current rate the month closes at "
-                    f"{E.fmt(SP_.eom, 'AED ')} against a ceiling of "
-                    f"{E.fmt(SP_.ceiling, 'AED ')}</b> — over by "
-                    f"{E.fmt(SP_.eom - SP_.ceiling, 'AED ')}. "
-                    f"A projection, not a commitment: buyers move bids daily.")
-    st.markdown("<div class='note'>Projected from the last 7 days rather than the "
-                "month average, because a channel that has just scaled up would "
-                "otherwise look cheaper than it now is.</div>",
-                unsafe_allow_html=True)
+if len(SP_.daily) and SP_.landing_pct is not None and SP_.landing_pct > 100:
+    say("risk", f"<b>On the current rate the month closes at "
+                f"{E.fmt(SP_.eom, 'AED ')} against a ceiling of "
+                f"{E.fmt(SP_.ceiling, 'AED ')}</b> — over by "
+                f"{E.fmt(SP_.eom - SP_.ceiling, 'AED ')}. Spend is "
+                f"{SP_.direction}: {SP_.note}. A projection, not a commitment.")
 
 # ═════════════════════════════════════════════════════════════════════
 # TABS
 # ═════════════════════════════════════════════════════════════════════
 st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
-T_PERF, T_WHY, T_CMP, T_DATA = st.tabs(
-    ["Where", "Why", "Compare", "Data"])
+T_PERF, T_EFF, T_CMP, T_DATA = st.tabs(
+    ["Performance", "Efficiency", "Compare", "Data"])
 
-# ── WHERE ────────────────────────────────────────────────────────────
+# ── PERFORMANCE ──────────────────────────────────────────────────────
 with T_PERF:
     section("By market", "each market against its own pace", reset=0)
     mk_cards = []
@@ -578,6 +620,8 @@ with T_PERF:
         c_.markdown(h_, unsafe_allow_html=True)
 
     section("Market &times; channel", "ranked by contribution to the gap", band=True)
+    st.markdown("<div class='note' style='margin:-4px 0 8px'>Volume only. What it "
+                "cost is on Efficiency.</div>", unsafe_allow_html=True)
     G = E.gap_table(M, sel_m, sel_disp, YEAR, MONTH, COV, False)
     A = E.allocation_table(M, sel_m, sel_disp, YEAR, MONTH, COV, False)
     if G.empty:
@@ -591,14 +635,9 @@ with T_PERF:
             "<div style='width:64px;text-align:right'>Orders</div>"
             "<div style='width:60px;text-align:right'>Paced</div>"
             "<div style='width:110px;padding-left:14px'>vs paced</div>"
-            "<div style='width:96px'>Shape</div>"
-            "<div style='width:70px;text-align:right'>CPA</div>"
-            "<div style='width:58px;text-align:right'>ROAS</div>"
+            "<div style='width:104px'>Shape</div>"
             "<div style='flex:1;text-align:right'>Share of gap</div></div>"]
         for _, r in G.iterrows():
-            a = A[(A.Market == r["Market"]) & (A.Channel == r["Channel"])]
-            cpa = a["CPA"].iloc[0] if len(a) else None
-            roas = a["ROAS"].iloc[0] if len(a) else None
             pcv = r["vs paced"]
             col = (GREY if pd.isna(pcv) else
                    GREEN if pcv >= 90 else AMBER if pcv >= 70 else RED)
@@ -632,11 +671,7 @@ with T_PERF:
                 f"<div style='width:60px;text-align:right;color:#6B7280'>"
                 f"{paced_txt}</div>"
                 f"<div style='width:110px;padding-right:14px'>{bar}</div>"
-                f"<div style='width:96px'>{sparkline(spark, col, w=88, h=16)}</div>"
-                f"<div style='width:70px;text-align:right'>"
-                f"{E.fmt(cpa, 'AED ', dec=2) if cpa else 'n/a'}</div>"
-                f"<div style='width:58px;text-align:right'>"
-                f"{E.fmt(roas, '', 'x', 1) if roas else 'n/a'}</div>"
+                f"<div style='width:104px'>{sparkline(spark, col, w=92, h=16)}</div>"
                 f"<div style='flex:1;display:flex;align-items:center;gap:8px;"
                 f"justify-content:flex-end'>{sbar}"
                 f"<span style='width:32px;text-align:right;font-weight:600'>"
@@ -657,31 +692,6 @@ with T_PERF:
                     "performing badly, and needs a different response. Cells "
                     "ahead of pace show a dash rather than a share.</div>",
                     unsafe_allow_html=True)
-
-    end_band()
-    section("Where the next dirham should go", "cheapest orders first")
-    if A.empty:
-        st.caption("Nothing to allocate against.")
-    else:
-        d = pd.DataFrame({
-            "Market": A["Market"], "Channel": A["Channel"],
-            "Orders": A["Orders"].map(lambda v: f"{v:,.0f}"),
-            "CPA (AED)": A["CPA"].map(
-                lambda v: "n/a" if pd.isna(v) or v == 0 else f"{v:.2f}"),
-            "Cost vs plan": A["Cost vs plan"].map(
-                lambda v: "n/a" if pd.isna(v) else f"{v:.2f}x"),
-            "Budget used": A["Budget used"].map(
-                lambda v: "n/a" if pd.isna(v) else f"{v:.0f}%"),
-            "Unspent (AED)": A["Unspent"].map(
-                lambda v: "n/a" if pd.isna(v) else ("over" if v < 0 else f"{v:,.0f}")),
-            "ROAS": A["ROAS"].map(
-                lambda v: "n/a" if pd.isna(v) or v == 0 else f"{v:.1f}x"),
-            "Read": A["Read"],
-        })
-        table(d, "Sorted by what an order actually costs, cheapest first, so the "
-                 "table reads in the order money should flow. Budget used is spend "
-                 "against the paced ceiling: it separates a channel that has "
-                 "stopped working from one that simply has not spent.")
 
     section("Daily trend", "shape of the period", band=True)
     m1, m2 = st.columns([1.4, 1.4])
@@ -729,12 +739,8 @@ with T_PERF:
         chart(figt, 300)
         figt.update_layout(yaxis_title=tmetric)
         st.plotly_chart(figt, use_container_width=True)
-        mo2 = E.momentum(E.daily_series(M, metric, sel_m, sel_c, YEAR, MONTH))
-        if mo2.recent is not None:
-            st.markdown(f"<div class='note'>Momentum {mo2.label}: last "
-                        f"{mo2.window} days average {mo2.recent:,.0f}/day against "
-                        f"{mo2.prior:,.0f}/day in the {mo2.window} before.</div>",
-                        unsafe_allow_html=True)
+        # No momentum line here: it restated the week-on-week strip on Status,
+        # which was the fourth place the same window appeared.
     else:
         st.caption("No data for this selection.")
     end_band()
@@ -769,7 +775,7 @@ with T_CMP:
             st.error("Each period's start date must fall on or before its end date.")
         else:
             AR, BR = (a_s, a_e), (b_s, b_e)
-            CL = E.compare_line(M, AR, BR, sel_m, sel_c)
+            CL = E.compare_line(M, AR, BR, sel_m, sel_c, terse=True)
             if CL:
                 o_ = E.cmp_change(E.cmp_block(M, *AR, sel_m, sel_c),
                                   E.cmp_block(M, *BR, sel_m, sel_c), "orders")
@@ -839,11 +845,14 @@ with T_CMP:
                 "Share of change": H["Share of change"].map(
                     lambda v: "" if pd.isna(v) else f"{v:.0f}%"),
             })
-            table(disp,
-                  "Group first, then each market, then the channels inside it. Markets are "
-                  "ordered by how much they moved, so whatever drove the change sits at the "
-                  "top. 'new' means period B had nothing to compare against. CPA and ROAS "
-                  "read oldest first, so the arrow runs the way time does.")
+            table(disp)
+            how_to_read(
+                "<b>Group, then market, then the channels inside it.</b> Markets "
+                "are ordered by how much they moved, so whatever drove the change "
+                "sits at the top.",
+                "<b>'new'</b> means period B had nothing to compare against.",
+                "<b>CPA and ROAS read oldest first</b>, so the arrow runs the way "
+                "time does.")
 
             end_band()
             section("Day by day, aligned",
@@ -860,16 +869,104 @@ with T_CMP:
             chart(figc, 270)
             figc.update_layout(barmode="group", yaxis_title="Orders", hovermode="x unified")
             st.plotly_chart(figc, use_container_width=True)
-            st.markdown("<div class='note'>Days align by position in each range, not by "
-                        "calendar date, so day 1 of A sits against day 1 of B and two "
-                        "windows of different length stay readable together. Hover for "
-                        "the real dates.</div>", unsafe_allow_html=True)
+            how_to_read(
+                "<b>Days align by position</b>, not by calendar date — day 1 of "
+                "A sits against day 1 of B, so two windows of different length "
+                "stay readable together. Hover for the real dates.")
 
 
-# ── WHY ──────────────────────────────────────────────────────────────
-with T_WHY:
+# ── EFFICIENCY ───────────────────────────────────────────────────────
+with T_EFF:
+    # One table instead of two. Cost-in-context and allocation showed the same
+    # market x channel cells with overlapping columns — CPA appeared in five
+    # places across the dashboard, which invites two answers to one question.
+    section("What an order costs", "and where the next dirham should go", reset=0)
+    st.markdown("<div class='note' style='margin:-4px 0 8px'>Cheapest first, so it "
+                "reads in the order money should flow. Plan CPA is a number you "
+                "set — it controls budget, it does not judge the channel.</div>",
+                unsafe_allow_html=True)
+
+    CTX = E.cpa_context(M, sel_m, sel_disp, YEAR, MONTH, PREV)
+    ALLOC = E.allocation_table(M, sel_m, sel_disp, YEAR, MONTH, COV, False)
+    if CTX.empty:
+        st.caption("No spend recorded for this selection.")
+    else:
+        worst = CTX["vs cheapest"].max() or 1
+        rows_h = ["<div style='display:flex;padding:8px 16px;background:#F4F5F7;"
+                  "font-size:10px;color:#6B7280;text-transform:uppercase;"
+                  "letter-spacing:0.05em'>"
+                  "<div style='width:126px'>Cell</div>"
+                  "<div style='width:62px;text-align:right'>CPA</div>"
+                  "<div style='width:146px;padding-left:14px'>vs cheapest here</div>"
+                  "<div style='width:56px;text-align:right'>ROAS</div>"
+                  "<div style='width:100px;padding-left:12px'>Budget used</div>"
+                  "<div style='width:80px;text-align:right'>Unspent</div>"
+                  "<div style='flex:1;padding-left:14px'>Read</div></div>"]
+        for _, r in CTX.iterrows():
+            a = ALLOC[(ALLOC.Market == r["Market"]) & (ALLOC.Channel == r["Channel"])]
+            used = a["Budget used"].iloc[0] if len(a) else None
+            unspent = a["Unspent"].iloc[0] if len(a) else None
+            read = a["Read"].iloc[0] if len(a) else r["Read"]
+            ratio = r["vs cheapest"]
+            col = GREEN if ratio <= 1.05 else AMBER if ratio < 2 else RED
+            w = min(ratio / max(worst, 1.01) * 100, 100)
+            tag = ("" if ratio <= 1.001 else
+                   f"<span style='font-size:11px;color:{col};font-weight:600'>"
+                   f"{ratio:.1f}x</span>")
+            ucol = (GREY if used is None or pd.isna(used) else
+                    GREEN if used <= 100 else AMBER if used <= 115 else RED)
+            ubar = ("<div style='font-size:10.5px;color:#8A8A8A'>n/a</div>"
+                    if used is None or pd.isna(used) else
+                    pace_bar(used, ucol)
+                    + f"<div style='font-size:10.5px;color:{ucol}'>{used:.0f}%</div>")
+            uns = ("n/a" if unspent is None or pd.isna(unspent)
+                   else "over" if unspent < 0 else f"{unspent:,.0f}")
+            ucl = (GREY if unspent is None or pd.isna(unspent)
+                   else AMBER if unspent < 0 else "#1A1A1A")
+            tint = "background:#FDF6F6;" if ratio >= 3 else ""
+            rows_h.append(
+                f"<div style='display:flex;align-items:center;padding:8px 16px;"
+                f"border-top:0.5px solid #EDEFF2;font-size:12.5px;{tint}'>"
+                f"<div style='width:126px'><b>{r['Market']}</b> "
+                f"<span style='color:#6B7280'>{r['Channel']}</span></div>"
+                f"<div style='width:62px;text-align:right;color:{col};"
+                f"font-weight:600'>{r['CPA']:.2f}</div>"
+                f"<div style='width:146px;padding-left:14px;display:flex;"
+                f"align-items:center;gap:8px'><div style='flex:1'>"
+                f"<div style='height:6px;background:{col};width:{max(w,4):.0f}%;"
+                f"border-radius:3px'></div></div>{tag}</div>"
+                f"<div style='width:56px;text-align:right'>"
+                f"{E.fmt(r['ROAS'], '', 'x', 1)}</div>"
+                f"<div style='width:100px;padding-left:12px'>{ubar}</div>"
+                f"<div style='width:80px;text-align:right;color:{ucl}'>{uns}</div>"
+                f"<div style='flex:1;padding-left:14px;font-size:11.5px;"
+                f"color:#6B7280'>{read}</div></div>")
+        st.markdown(f"<div style='background:white;border:0.5px solid #E6E8EB;"
+                    f"border-radius:12px;overflow:hidden'>{''.join(rows_h)}</div>",
+                    unsafe_allow_html=True)
+
+        idle = ALLOC[ALLOC["Unspent"].fillna(0) > 0]
+        if len(idle) and idle["Unspent"].sum() > 500:
+            best = CTX["CPA"].min()
+            tot = float(idle["Unspent"].sum())
+            top = idle.loc[idle["Unspent"].idxmax()]
+            st.markdown(
+                f"<div style='background:#FAFBFC;border-left:3px solid #EF9F27;"
+                f"padding:11px 16px;font-size:13px;line-height:1.75;"
+                f"margin:12px 0 4px'><b>{E.fmt(tot,'AED ')} of budget never went "
+                f"out</b>, most of it {top['Market']} {top['Channel']}. The same "
+                f"money at the cheapest CPA in this selection "
+                f"({E.fmt(best,'AED ',dec=2)}) would buy roughly "
+                f"{tot/best:,.0f} orders.</div>", unsafe_allow_html=True)
+        st.markdown("<div class='note'>The bar is an opportunity cost inside the "
+                    "same market: 3.2x means three of that market's cheapest "
+                    "orders for the price of one. Budget used is spend against the "
+                    "paced ceiling — it separates a channel that stopped working "
+                    "from one that simply has not spent.</div>",
+                    unsafe_allow_html=True)
+
     section("Does the capacity model hold?",
-            "every paid budget is sized from the gap this model leaves", reset=0)
+            "every paid budget is sized from the gap this model leaves", band=True)
     CAPC = E.capacity_check(M, sel_m, YEAR, MONTH if not YTD else MONTH[-1])
     if CAPC.empty:
         st.caption("No capacity modelled for this period, or no market reported.")
@@ -887,7 +984,7 @@ with T_WHY:
                     f"<b>Not a single message went out.</b> The model is untested "
                     f"here, not wrong.</div>" if untested else
                     f"<div style='font-size:11.5px;line-height:1.6;color:#1A1A1A'>"
-                    f"{r['Read'].split('. ')[0].split(': ', 1)[-1]}.</div>")
+                    f"{r['Read'].split(': ', 1)[-1].split('. ')[0]}.</div>")
             cards_h.append(
                 f"<div style='background:white;border-radius:11px;padding:13px 15px;"
                 f"box-shadow:0 1px 3px rgba(0,0,0,0.06);"
@@ -908,76 +1005,17 @@ with T_WHY:
         cols_c = st.columns(max(len(cards_h), 1))
         for c_, h_ in zip(cols_c, cards_h):
             c_.markdown(h_, unsafe_allow_html=True)
-        st.markdown("<div class='note'>Capacity is messages &times; CR% &times; "
-                    "uptime, and delivery carries no uptime haircut — so the two "
-                    "bars are measured against reachable capacity, or a market on "
-                    "plan for both factors would read as over-delivering. Both "
-                    "figures are shown.</div>", unsafe_allow_html=True)
+        how_to_read(
+            "<b>Capacity is messages x CR% x uptime.</b> Delivery carries no "
+            "uptime haircut, so the bars measure against <i>reachable</i> "
+            "capacity — otherwise a market on plan for both factors would read "
+            "as over-delivering. Both figures are shown.",
+            "<b>The two bars separate the causes.</b> A market can miss because "
+            "fewer messages went out, or because the list converted worse than "
+            "assumed. Those need opposite responses.")
+    end_band()
 
-    section("What an order costs, in context",
-            "against the cheapest channel in the same market", band=True)
-    CTX = E.cpa_context(M, sel_m, sel_disp, YEAR, MONTH, PREV)
-    if CTX.empty:
-        st.caption("No spend recorded for this selection.")
-    else:
-        worst = CTX["vs cheapest"].max() or 1
-        rows_h = ["<div style='display:flex;padding:8px 16px;background:#F4F5F7;"
-                  "font-size:10px;color:#6B7280;text-transform:uppercase;"
-                  "letter-spacing:0.05em'>"
-                  "<div style='width:140px'>Cell</div>"
-                  "<div style='width:70px;text-align:right'>CPA</div>"
-                  "<div style='width:168px;padding-left:16px'>vs cheapest in market"
-                  "</div><div style='width:76px;text-align:right'>Last month</div>"
-                  "<div style='width:70px;text-align:right'>Plan CPA</div>"
-                  "<div style='flex:1;padding-left:14px'>What it means</div></div>"]
-        for _, r in CTX.iterrows():
-            ratio = r["vs cheapest"]
-            col = (GREEN if ratio <= 1.05 else AMBER if ratio < 2 else RED)
-            w = min(ratio / max(worst, 1.01) * 100, 100)
-            bar = (f"<div style='height:6px;background:{col};width:{max(w,4):.0f}%;"
-                   f"border-radius:3px'></div>")
-            tag = ("" if ratio <= 1.001 else
-                   f"<span style='font-size:11px;color:{col};font-weight:600'>"
-                   f"{ratio:.1f}x</span>")
-            vsl = ("n/a" if pd.isna(r["vs last month"])
-                   else f"{r['vs last month']:+.0f}%")
-            tint = "background:#FDF6F6;" if ratio >= 3 else ""
-            plan_cpa_txt = ("n/a" if pd.isna(r["Plan CPA"])
-                            else f"{r['Plan CPA']:.2f}")
-            rows_h.append(
-                f"<div style='display:flex;align-items:center;padding:8px 16px;"
-                f"border-top:0.5px solid #EDEFF2;font-size:12.5px;{tint}'>"
-                f"<div style='width:140px'><b>{r['Market']}</b> "
-                f"<span style='color:#6B7280'>{r['Channel']}</span></div>"
-                f"<div style='width:70px;text-align:right;color:{col};"
-                f"font-weight:600'>{r['CPA']:.2f}</div>"
-                f"<div style='width:168px;padding-left:16px;display:flex;"
-                f"align-items:center;gap:8px'>"
-                f"<div style='flex:1'>{bar}</div>{tag}</div>"
-                f"<div style='width:76px;text-align:right;color:#6B7280'>{vsl}</div>"
-                f"<div style='width:70px;text-align:right;color:#6B7280'>"
-                f"{plan_cpa_txt}</div>"
-                f"<div style='flex:1;padding-left:14px;font-size:11.5px;"
-                f"color:#6B7280'>{r['Read']}</div></div>")
-        st.markdown(f"<div style='background:white;border:0.5px solid #E6E8EB;"
-                    f"border-radius:12px;overflow:hidden'>{''.join(rows_h)}</div>",
-                    unsafe_allow_html=True)
-        st.markdown("<div class='note'>The bar is an opportunity cost inside the "
-                    "same market: 3.2x means three of that market's cheapest orders "
-                    "for the price of one. Plan CPA is shown for budget control but "
-                    "is not the verdict — it is a number you set, so a lenient "
-                    "assumption would turn an expensive channel green.</div>",
-                    unsafe_allow_html=True)
-        if PREV is None and not YTD:
-            st.markdown("<div class='note'>No prior month in the data yet, so "
-                        "'last month' reads n/a. It fills in from the second month "
-                        "onward.</div>", unsafe_allow_html=True)
 
-    # Meta breakdown: a diagnostic, not a scorecard. No plan columns, because
-    # the plan is written for Meta as a whole and cannot be attributed to a
-    # platform without inventing a split.
-    # The parent is read from the register, never named: a second channel
-    # planned as one and reported as several needs no code change.
     _par = M.parent_of()
     parent = (max(set(_par.values()), key=lambda p: sum(1 for v in _par.values()
                                                         if v == p)) if _par else None)
@@ -1150,17 +1188,80 @@ with T_DATA:
                  f"<div style='color:#6B7280'>{detail}</div></div>")
     st.markdown(f"<div class='card'>{html}</div>", unsafe_allow_html=True)
 
-    section("Reporting coverage", "who submitted, and on how many days", band=True)
+    # Data validation stops a wrong CATEGORY going in; nothing stops a wrong
+    # NUMBER. A day with orders but no revenue passes every validation rule and
+    # quietly understates that channel's ROAS until somebody notices.
+    section("Entry discrepancies",
+            "values the sheet accepted that cannot be right", band=True)
+    FIND = E.discrepancies(M, YEAR, MONTH, sel_m)
+    if not FIND:
+        st.markdown("<div style='background:#F1F8F4;border:0.5px solid #B6DEC9;"
+                    "border-radius:10px;padding:12px 16px;font-size:13px;"
+                    "color:#0B4A39'>&#10003; Nothing to review. Every entry is "
+                    "internally consistent: no impossible values, no duplicates, "
+                    "no gaps inside a reporting range, nothing far above its own "
+                    "typical level.</div>", unsafe_allow_html=True)
+    else:
+        total = sum(len(f.rows) for f in FIND)
+        chips = [f"<div style='flex:1;min-width:108px;background:white;"
+                 f"border-radius:10px;padding:11px 13px;border-left:3px solid "
+                 f"{RED};box-shadow:0 1px 3px rgba(0,0,0,0.06)'>"
+                 f"<div style='font-size:21px;font-weight:600;color:#791F1F'>"
+                 f"{total}</div><div style='font-size:11px;color:#6B7280;"
+                 f"margin-top:2px'>rows to review</div></div>"]
+        for f in FIND[:3]:
+            chips.append(
+                f"<div style='flex:1;min-width:108px;background:white;"
+                f"border-radius:10px;padding:11px 13px;"
+                f"box-shadow:0 1px 3px rgba(0,0,0,0.06)'>"
+                f"<div style='font-size:21px;font-weight:600'>{len(f.rows)}</div>"
+                f"<div style='font-size:11px;color:#6B7280;margin-top:2px'>"
+                f"{f.title.lower()}</div></div>")
+        st.markdown(f"<div style='display:flex;gap:9px;flex-wrap:wrap;"
+                    f"margin-bottom:12px'>{''.join(chips)}</div>",
+                    unsafe_allow_html=True)
+
+        for f in FIND:
+            hdr_bg, hdr_fg = (("#FCEBEB", "#791F1F") if f.severity == "risk"
+                              else ("#FAEEDA", "#5C3F0B"))
+            st.markdown(
+                f"<div style='background:{hdr_bg};color:{hdr_fg};padding:9px 16px;"
+                f"border-radius:10px 10px 0 0;font-size:12px;font-weight:600;"
+                f"margin-top:10px'>{f.title} &nbsp;"
+                f"<span style='font-weight:400'>{len(f.rows)} rows</span><br>"
+                f"<span style='font-weight:400;font-size:11.5px'>{f.why}</span>"
+                f"</div>", unsafe_allow_html=True)
+            d = f.rows.copy()
+            if "Day" in d.columns:
+                d["Day"] = pd.to_datetime(d["Day"]).dt.strftime("%d %b")
+            for c in d.columns:
+                if pd.api.types.is_numeric_dtype(d[c]):
+                    d[c] = d[c].map(lambda v: f"{v:,.0f}" if pd.notna(v) else "n/a")
+            table(d.rename(columns={"Day": "Date"}))
+
+        note_ = E.discrepancy_note(FIND)
+        if note_:
+            st.markdown(f"<div style='background:white;border-left:3px solid "
+                        f"{AMBER};padding:11px 16px;font-size:13px;"
+                        f"line-height:1.75;margin-top:12px'>{note_}</div>",
+                        unsafe_allow_html=True)
+        st.markdown("<div class='note'>Each row names its date and cell so it can "
+                    "be found in A1. Actuals and corrected. Nothing here is "
+                    "changed automatically — the sheet stays the source of "
+                    "truth.</div>", unsafe_allow_html=True)
+    end_band()
+
+    section("Reporting coverage", "who submitted, and on how many days")
     cov_rows = [{"Market": k, "Days reported": f"{v[0]}/{COV.days_elapsed}",
                  "Days with orders": f"{v[1]}/{COV.days_elapsed}",
                  "Coverage": f"{v[0]/COV.days_elapsed*100:.0f}%" if COV.days_elapsed else "n/a",
                  "Scored": "yes" if not COV.gate(k)[0] else "no — too thin"}
                 for k, v in sorted(COV.per_market.items()) if k in sel_m]
-    table(pd.DataFrame(cov_rows),
-          "'Days reported' counts days the market submitted any figure. 'Days with "
-          "orders' counts days it recorded a non-zero order. A gap between them is a "
-          "real zero-order day, not a missing feed.")
-    end_band()
+    table(pd.DataFrame(cov_rows))
+    how_to_read(
+        "<b>Days reported</b> counts days the market submitted any figure.",
+        "<b>Days with orders</b> counts days it recorded a non-zero order. A gap "
+        "between the two is a real zero-order day, not a missing feed.")
 
 src = (f"SharePoint · {META.get('name')}" if not META.get("local")
        else f"local file · {META.get('name')}")
