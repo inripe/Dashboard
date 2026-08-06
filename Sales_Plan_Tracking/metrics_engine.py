@@ -51,15 +51,6 @@ MONTHS = [
 ]
 MARKETS = ["UAE", "QA", "KSA", "EG"]
 
-# A sale belongs to the day it happened in the market that made it. Reading
-# every timestamp in UTC filed the small hours of a Dubai morning under the
-# previous day, which understated every daily figure and moved nothing on
-# the monthly ones — the kind of error that hides until someone counts by
-# hand. Offsets rather than named zones because none of these four observe
-# daylight saving, and a fixed number cannot drift with a tzdata update.
-MARKET_UTC_OFFSET = {"UAE": 4, "QA": 3, "KSA": 3, "EG": 3}
-DEFAULT_UTC_OFFSET = 4
-
 DELIVERED = {"FULFILLED"}
 LOST_FINANCIAL = {"REFUNDED", "VOIDED", "EXPIRED"}
 PAID = {"PAID"}
@@ -172,16 +163,11 @@ def prepare(lines: pd.DataFrame, scope: Scope) -> pd.DataFrame:
     derivations drift.
     """
     d = lines.copy()
-    utc = pd.to_datetime(d["processed_at"], utc=True,
-                         format="mixed").dt.tz_localize(None)
-
-    # Shift each line onto its own market's clock. An order placed at 01:00
-    # in Dubai is 21:00 the day before in UTC; filed that way it lands in
-    # yesterday's numbers and today reads short.
-    hours = (d["market"].map(MARKET_UTC_OFFSET).fillna(DEFAULT_UTC_OFFSET)
-             if "market" in d.columns
-             else pd.Series(DEFAULT_UTC_OFFSET, index=d.index))
-    d["ts"] = utc + pd.to_timedelta(hours.astype(float), unit="h")
+    # Pinned to nanoseconds. Pandas can return microsecond precision here
+    # depending on the input, and a merge against the cost log then fails on
+    # a dtype mismatch that has nothing to do with the data.
+    d["ts"] = (pd.to_datetime(d["processed_at"], utc=True, format="mixed")
+               .dt.tz_localize(None).astype("datetime64[ns]"))
     d["date"] = d["ts"].dt.normalize()
     # One filter, applied to actuals and plan alike.
     d = d[(d["date"].dt.date >= scope.start) & (d["date"].dt.date <= scope.end)]
@@ -567,13 +553,8 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
     basket_now = (float(recent["units"].sum()) / recent_orders
                   if recent_orders else units_so_far / max(1, orders_so_far))
     basket_all = units_so_far / max(1, orders_so_far)
-
-    # The plan carries no order count, so the only basket available for the
-    # at-plan basis is the one actually achieved over the whole period. The
-    # earlier form divided plan_units by a figure that was itself
-    # plan_units / basket_all, which reduces to basket_all and blows up when
-    # plan_units is zero — a month with no plan rows loaded yet, for one.
-    plan_basket = basket_all if basket_all else None
+    plan_basket = (plan_units / (plan_units / basket_all)
+                   if basket_all else None)
 
     price_now = (float(recent["revenue"].sum()) / float(recent["units"].sum())
                  if len(recent) and recent["units"].sum()
@@ -644,6 +625,32 @@ def forecast(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
                        else "plan"),
         "daily": (live.groupby("date", observed=True)["revenue"]
                   .sum().cumsum().reset_index()),
+    }
+
+
+def cost_log_status(cost_log: pd.DataFrame | None) -> dict:
+    """When costs were last updated, and how many products they cover.
+
+    A cost log that stopped being maintained looks identical to one that is
+    current, unless the header says otherwise — so it says otherwise.
+    """
+    import variance_engine as ve
+
+    if cost_log is None or not len(cost_log):
+        return {}
+    try:
+        cl = ve.normalise_cost_log(cost_log)
+    except Exception:
+        return {}
+    if cl.empty:
+        return {}
+    latest = cl["valid_from"].max()
+    return {
+        "entries": int(len(cl)),
+        "products": int(cl.groupby(["product", "market"]).ngroups),
+        "latest": latest.date() if pd.notna(latest) else None,
+        "days_old": ((date.today() - latest.date()).days
+                     if pd.notna(latest) else None),
     }
 
 
@@ -719,14 +726,6 @@ def basis_accuracy(lines: pd.DataFrame, plan: pd.DataFrame,
 
         s_full = Scope(scope.year, scope.market, month,
                        categories=scope.categories, products=scope.products)
-
-        # A month with no plan cannot score a forecast against anything, so
-        # it is skipped rather than divided by. March is genuinely unplanned
-        # and still carries occasional sales, which is what reached the
-        # division before this guard existed.
-        if not float(plan_scope(plan, s_full)["plan_units"].sum()):
-            continue
-
         actual = cards(lines, plan, s_full, cost_log)
         if actual.get("empty") or not actual["revenue"]["total"]:
             continue

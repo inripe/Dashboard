@@ -13,7 +13,6 @@ structural view. A manager learns the shape once.
 from __future__ import annotations
 
 from datetime import date, datetime
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -23,18 +22,12 @@ import streamlit as st
 import metrics_engine as me
 import plan_engine as pe
 import variance_engine as ve
-import data_quality_tab
 from data_loader import load_plan, load_actuals_any
 
 YEAR = 2026
 MARKETS = me.MARKETS
 MONTHS = me.MONTHS
 ALL_MK, YTD = "All markets", "Full year"
-
-# The read stamp is only useful if it is in a clock the reader keeps. The
-# server runs in UTC, so datetime.now() reported a time four hours behind
-# the office and made the data look fresher than it was.
-HOME_TZ = ZoneInfo("Africa/Cairo")
 
 BLUE, ORANGE, TEAL, AMBER, GREY = "#378ADD", "#D85A30", "#1D9E75", "#EF9F27", "#B4B2A9"
 GOOD, WARN, BAD, NEUT = "#1D9E75", "#EF9F27", "#D85A30", "#C2C0B8"
@@ -108,7 +101,7 @@ def get_data(year: int):
     raw, fx, pmeta, aliases, cost_log = load_plan()
     plan = pe.attach_fx(pe.derive(raw), fx)
     actuals, ameta, lines = load_actuals_any(year, cost_log, plan)
-    return plan, lines, pmeta, ameta, aliases, cost_log, datetime.now(HOME_TZ)
+    return plan, lines, pmeta, ameta, aliases, cost_log, datetime.now()
 
 
 with st.spinner("Reading the plan from SharePoint and every order from the "
@@ -302,11 +295,8 @@ def table(df, height=None, empty="Nothing in this scope.", into=None, **kw):
         if d[c].dtype.kind not in "if":
             continue
         mx = float(d[c].abs().max() or 0)
-        # error and bias are ratios like attainment, so they belong in the
-        # percentage branch. Without them a 92.8% miss rounds to 1 and the
-        # table quietly disagrees with the banner above it.
         if any(k in nm for k in ("%", "pct", "share", "rate", "index",
-                                 "attainment", "error", "bias")):
+                                 "attainment")):
             if mx <= 1.5:
                 d[c] = d[c] * 100
             cfg[c] = st.column_config.NumberColumn(format="%.1f%%")
@@ -380,20 +370,37 @@ except Exception as exc:
 
 problems = me.check_chain(C)
 
+# Every source states when it was last touched and by whom. A stale plan or
+# an abandoned cost log otherwise looks identical to a current one.
+_edited = (pmeta.get("modified") or "")[:16].replace("T", " ")
+_by = pmeta.get("modified_by") or "unknown"
+_cls = me.cost_log_status(cost_log)
+_cost_line = ""
+if _cls:
+    _age = _cls.get("days_old")
+    _cost_line = (
+        f"Cost log · <b>{_cls['latest']:%d %b %Y}</b>"
+        + (f" · {_age} days ago" if _age is not None else "")
+        + f" · {_cls['products']} products"
+        + (f" · {C['dated_share']:.0%} of lines dated"
+           if not C.get("empty") else ""))
+else:
+    _cost_line = "Cost log · <b>none</b> · margin at plan cost"
+
 st.markdown(
     f"<div class='band'><div><div class='ttl'>Inripe — Sales performance</div>"
     f"<div class='sc'>{market} · {scope.label} {YEAR}"
     + (f" · day {C['days_elapsed']} of {C['days_total']}"
        if not C.get("empty") and C["pace_fraction"] < 1 else "")
-    + (" · plan pro-rated to the range"
-       if not scope.full_year and scope.days
-       < (scope.end.replace(day=28) - scope.start).days + 5 and
-       scope.label != month else "")
     + f" · {CUR}</div></div>"
-    f"<div class='mt'>Actuals · <b>Shopify</b> · read {pulled:%d %b %H:%M} Cairo<br>"
-    f"Plan · <b>{pmeta.get('name','')}</b>"
-    + (f" · cost log {C['dated_share']:.0%} dated" if not C.get("empty") else "")
-    + "</div></div>", unsafe_allow_html=True)
+    f"<div class='mt'>Actuals · <b>Shopify</b> · read {pulled:%d %b %H:%M}<br>"
+    f"Plan · <b>{pmeta.get('name','')}</b> · saved {_edited} by {_by}<br>"
+    f"{_cost_line}</div></div>", unsafe_allow_html=True)
+
+if _cls and (_cls.get("days_old") or 0) > 30:
+    st.warning(f"The cost log has not been updated in "
+               f"{_cls['days_old']} days. Margin uses the last entered cost, "
+               f"which may no longer be what you pay.")
 
 if problems:
     st.error("The cards do not reconcile: " + " · ".join(problems)
@@ -406,8 +413,7 @@ if C.get("empty"):
 
 view = st.radio("View", ["Management", "Forecast", "Portfolio pricing",
                          "Orders", "Units", "Revenue", "Margin",
-                         "Payment and exceptions", "Data quality",
-                         "How to read this"],
+                         "Payment and exceptions", "How to read this"],
                 horizontal=True, label_visibility="collapsed")
 
 O, U, R, M = C["orders"], C["units"], C["revenue"], C["margin"]
@@ -555,52 +561,29 @@ elif view == "Forecast":
         acc = me.basis_accuracy(lines, plan, scope, cost_log)
         if len(acc):
             best = acc.iloc[0]
-            # A miss of more than about a fifth means the method is not
-            # usable yet, so the banner says so rather than presenting the
-            # least bad option as if it were good.
-            usable = best["avg_error"] <= 0.20
             st.markdown(
-                f"<div style='background:{'#E1F5EE' if usable else '#FAEEDA'};"
-                f"border-radius:8px;padding:11px 14px;font-size:13px;"
-                f"color:{'#04342C' if usable else '#633806'};"
+                f"<div style='background:#E1F5EE;border-radius:8px;"
+                f"padding:10px 13px;font-size:12.5px;color:#04342C;"
                 f"line-height:1.65;max-width:900px;margin-bottom:12px'>"
-                + (f"<b style='font-weight:500'>Use the {best['basis'].lower()} "
-                   f"method.</b> Over the last {int(best['months'])} finished "
-                   f"months it was typically {best['avg_error']:.0%} away from "
-                   f"the real answer."
-                   if usable else
-                   f"<b style='font-weight:500'>None of these is reliable "
-                   f"yet.</b> The best of the three was typically "
-                   f"{best['avg_error']:.0%} away from the real answer over "
-                   f"the last {int(best['months'])} finished months. Treat "
-                   f"the figures below as a range, not a number.")
-                + "</div>", unsafe_allow_html=True)
-
+                f"<b style='font-weight:500'>{best['basis']} has been closest, "
+                f"missing by {best['avg_error']:.1%} on average.</b> "
+                f"Tested on {int(best['months'])} completed month"
+                f"{'s' if best['months'] != 1 else ''} by computing all three "
+                f"on day {int(best['at_day'])} and comparing to what the month "
+                f"actually did.</div>", unsafe_allow_html=True)
             show = acc[["basis", "avg_error", "bias", "months"]].copy()
-            show["avg_error"] = show["avg_error"] * 100
-            show["direction"] = show["bias"].map(
-                lambda v: "runs high" if v > 0.02
-                else "runs low" if v < -0.02 else "balanced")
-            show = show[["basis", "avg_error", "direction", "months"]]
-            show.columns = ["method", "typical miss", "tends to",
-                            "months tested"]
-            with st.expander("How each method has performed"):
-                st.caption(
-                    "Each finished month was replayed: all three methods were "
-                    "worked out on day 12, then compared to what the month "
-                    "actually did. Typical miss is how far off they were. "
-                    "Smaller is better.")
+            show.columns = ["basis", "avg error", "bias", "months tested"]
+            with st.expander("How each basis scored"):
                 table(show)
 
         basis = st.radio(
-            "Which assumption to show", ["Run rate", "Attainment", "Plan"],
-            horizontal=True,
+            "Basis", ["Run rate", "Attainment", "Plan"], horizontal=True,
             index=(["Run rate", "Attainment", "Plan"].index(acc.iloc[0]["basis"])
                    if len(acc) and acc.iloc[0]["basis"]
                    in ["Run rate", "Attainment", "Plan"] else 0),
             help="Run rate assumes the last 7 days repeat. Attainment assumes "
-                 "the pace achieved so far continues. Plan assumes the "
-                 "remaining days go exactly as planned.")
+                 "the rate achieved so far continues. Plan assumes the "
+                 "remaining days run exactly to plan.")
         key = {"Run rate": "run_rate", "Attainment": "attainment",
                "Plan": "at_plan"}[basis]
         b = fc["bases"][key]
@@ -723,26 +706,16 @@ elif view == "Forecast":
 
         lo = min(v["revenue"] for v in fc["bases"].values())
         hi = max(v["revenue"] for v in fc["bases"].values())
-        # The gap between the three is the real message. A reader who takes
-        # one number away has taken the wrong thing.
-        width = (hi - lo) / hi if hi else 0.0
-        verdict = ("The three methods agree closely, so the month looks "
-                   "predictable." if width < 0.10 else
-                   "The three methods are some way apart, so treat this as a "
-                   "range rather than a figure." if width < 0.30 else
-                   "The three methods disagree sharply. It is too early to "
-                   "commit to a number for this month.")
         st.markdown(
-            f"<div style='font-size:13px;color:#17181a;line-height:1.75;"
-            f"background:#f4f6f9;border-radius:8px;padding:12px 15px;"
-            f"max-width:900px'>"
-            f"<b style='font-weight:500'>The month lands somewhere between "
-            f"{n(lo)} and {n(hi)} {CUR}.</b><br>{verdict}<br>"
-            f"<span style='color:#6d7076'>None of the three is a prediction. "
-            f"Each one takes a single assumption and does the arithmetic. "
-            f"Run rate assumes the last {fc['window']} days repeat. "
-            f"Attainment assumes the pace so far continues. Plan assumes the "
-            f"rest of the month goes exactly as planned.</span></div>",
+            f"<div style='font-size:12px;color:#6d7076;line-height:1.7;"
+            f"background:#f4f6f9;border-radius:8px;padding:10px 13px;"
+            f"max-width:900px'><b style='font-weight:500;color:#17181a'>"
+            f"None of these is a prediction.</b> Each is arithmetic from a "
+            f"stated assumption. Run rate follows the last {fc['window']} days "
+            f"and turns fastest. Attainment assumes the shape so far holds. "
+            f"Plan is the ceiling — what a perfect rest of period would give. "
+            f"The {n(hi - lo)} {CUR} spread between them is the honest measure "
+            f"of how uncertain the period is.</div>",
             unsafe_allow_html=True)
 
 
@@ -890,89 +863,178 @@ elif view == "Portfolio pricing":
 
 
 
-elif view == "Data quality":
-    data_quality_tab.render(lines, plan, scope, cost_log, currency=CUR)
-
-
 elif view == "How to read this":
-    st.markdown("<div class='sec'>What each number means</div>",
-                unsafe_allow_html=True)
-    rows = [
-        ("Orders", "Orders that can still become revenue — delivered plus "
-                   "open. Cancelled orders are counted separately, not here."),
-        ("Units", "Boxes on those orders. Cancelled boxes are excluded."),
-        ("Revenue", "Net of discount, on delivered and open orders. "
-                    "Cancelled revenue was never earned, so it is excluded."),
-        ("CM", "Revenue less cost of the boxes sold. Freight, marketing and "
-               "overhead are not in it."),
-        ("CM %", "CM divided by revenue, weighted by what actually sold — "
-                 "never an average of product percentages."),
-        ("Lost", "Cancelled, refunded or voided. Shown as a rate against "
-                 "orders placed."),
-    ]
-    for k, v in rows:
+
+    def rows(title, items):
+        st.markdown(f"<div class='sec'>{title}</div>", unsafe_allow_html=True)
+        for k, v in items:
+            st.markdown(
+                f"<div style='display:flex;gap:14px;padding:7px 0;"
+                f"border-bottom:0.5px solid #e4e7ec'>"
+                f"<div style='min-width:135px;font-weight:500;font-size:13px'>"
+                f"{k}</div><div style='font-size:13px;color:#55585e;"
+                f"line-height:1.6'>{v}</div></div>", unsafe_allow_html=True)
+
+    guide = st.radio("Section", ["The numbers", "Management", "Forecast",
+                                 "Portfolio pricing", "Drill-downs",
+                                 "Payment", "Rules"],
+                     horizontal=True, label_visibility="collapsed")
+
+    if guide == "The numbers":
+        rows("What each figure means", [
+            ("Orders", "Orders that can still become revenue — delivered plus "
+                       "open. Cancelled orders are counted separately."),
+            ("Units", "Boxes on those orders. Cancelled boxes are excluded."),
+            ("Revenue", "Net of discount, on delivered and open orders. "
+                        "Cancelled revenue was never earned."),
+            ("CM", "Revenue less the cost of the boxes sold. Freight, "
+                   "marketing and overhead are not in it."),
+            ("CM %", "CM divided by revenue, weighted by what actually sold — "
+                     "never an average of product percentages."),
+            ("Lost", "Cancelled, refunded or voided, as a rate against orders "
+                     "placed."),
+            ("AOV", "Revenue divided by orders. Both exclude lost."),
+            ("Basket", "Boxes per order. Both exclude lost."),
+        ])
+
+    elif guide == "Management":
+        rows("The two rows", [
+            ("The chain", "Orders × basket = units. Units × price = revenue. "
+                          "Reading left to right shows which link broke."),
+            ("The outcome", "Margin is the result of the row above, not a "
+                            "fourth step in it."),
+        ])
+        rows("On each card", [
+            ("Pace", "Plan × days elapsed ÷ days in the period. 45% of pace "
+                     "means 45% of what the plan expected by today — not 45% "
+                     "of the month."),
+            ("The bar", "Fills to the percentage of pace. The tick is 100%."),
+            ("The bars above", "Daily activity with the recent average as a "
+                               "dashed line. Green above means momentum is "
+                               "building, grey below means fading."),
+            ("Split bar", "On the chain cards it is order state. On revenue "
+                          "it is cash certainty — collected, owed, at risk."),
+            ("Arrow", "Last 7 days against the 7 before, in points. Colour "
+                      "says whether that direction is good."),
+            ("Cost strip", "Appears only when dated costs exist and cost has "
+                           "moved. Names the products driving it."),
+        ])
+
+    elif guide == "Forecast":
+        rows("Two sections", [
+            ("Demand", "Orders and basket are forecast separately because "
+                       "they fail for different reasons. Boxes follow."),
+            ("Financials", "Derived from the demand above, so the two cannot "
+                           "contradict."),
+        ])
+        rows("The three bases", [
+            ("Run rate", "The last 7 days repeat to the end. Turns fastest."),
+            ("Attainment", "The rate achieved so far continues."),
+            ("Plan", "The remaining days run exactly to plan. A ceiling, not "
+                     "a forecast."),
+            ("Which to use", "The dashboard tests all three against your "
+                             "completed months and defaults to whichever was "
+                             "closest. The scores are in the expander."),
+            ("The spread", "The gap between the three is the honest measure "
+                           "of how uncertain the period is."),
+        ])
+
+    elif guide == "Portfolio pricing":
+        rows("The idea", [
+            ("Why it exists", "Margin is a weighted average across a mix, so "
+                              "a cost rise on one product does not have to be "
+                              "recovered on that product. It has to be "
+                              "recovered somewhere demand can absorb it."),
+            ("The gate", "Mix CM% against plan. Below plan is a recovery. "
+                         "Above plan is a surplus you can spend on offers."),
+            ("The gap", "Measured at the volume actually sold, so a volume "
+                        "shortfall is not mixed into a pricing question."),
+        ])
+        rows("The columns", [
+            ("Alone", "The rise this product alone would need to close the "
+                      "whole gap. A feasibility test — past 10% it is not a "
+                      "candidate."),
+            ("Your move", "You type it. Positive raises price, negative cuts "
+                          "it. Nothing is proposed that you have not set."),
+            ("Volume you can lose", "The break-even. How much demand the move "
+                                    "can cost before you are worse off than "
+                                    "doing nothing."),
+            ("Why no elasticity", "Price and season moved together all year "
+                                  "in this data, so any elasticity derived "
+                                  "from it would be seasonal demand wearing a "
+                                  "price label."),
+        ])
+
+    elif guide == "Drill-downs":
+        rows("Four blocks, always in this order", [
+            ("1 · The gap", "Plan to actual in named steps. Every step "
+                            "reconciles — nothing hides in a residual."),
+            ("2 · The detail", "Orders and revenue show status against "
+                               "payment. Units and margin show product "
+                               "against plan."),
+            ("3 · Dimensions", "Channel, city and customer, with the same "
+                               "measures throughout."),
+            ("4 · Structure", "Orders shows concentration. Units shows basket "
+                              "composition. Revenue shows price realisation. "
+                              "Margin shows cost movement."),
+        ])
+        rows("Reading them", [
+            ("Concentration", "Share of orders containing each product. Sums "
+                              "past 100% because an order holds several. When "
+                              "a product in half the orders ends, those orders "
+                              "disappear — they do not shrink."),
+            ("Price realisation", "Achieved price against plan price. Below "
+                                  "100% is revenue given away on boxes "
+                                  "actually sold."),
+            ("Cost movement", "Against plan on the cards, against the "
+                              "previous cost entry here."),
+        ])
+
+    elif guide == "Payment":
+        rows("What it shows", [
+            ("Days to reconcile", "Median days from delivery to the order "
+                                  "being marked paid. Measured only on orders "
+                                  "already settled — an unpaid order has no "
+                                  "lag yet."),
+            ("Cash outstanding", "Delivered and not yet marked paid. On cash "
+                                 "on delivery this sits with the delivery "
+                                 "company until accounting reconciles it."),
+            ("Stuck past 21 days", "Beyond any reconciliation window. Either "
+                                   "the cash has not been remitted, or the "
+                                   "goods never reached the customer."),
+            ("Ageing", "From the delivery date, not the order date. The clock "
+                       "that matters starts when the customer took the goods."),
+            ("Downloads", "The outstanding orders and delivered quantities, "
+                          "with dates, so any period can be filtered in Excel."),
+        ])
+
+    else:
+        rows("Rules that apply everywhere", [
+            ("Cost", "Matched to the order date, so cost and revenue are "
+                     "recognised at the same moment. Where the cost log does "
+                     "not reach, plan cost is used and the card says so."),
+            ("Cost log", "Append only. To change a cost, add a row with a new "
+                         "date. Each box carries the cost in force on the day "
+                         "it sold, so a mid-month change splits the month "
+                         "correctly."),
+            ("Date range", "Filters orders and plan together. A partial range "
+                           "takes a pro-rated share of the month's plan, so "
+                           "attainment stays comparable."),
+            ("Currency", "One market shows its own. All markets converts to "
+                         "AED using the rates on the FX sheet."),
+            ("Missing", "Blank is not zero. A month with no plan is absent, "
+                        "not a failure."),
+            ("Lost", "Excluded from every headline, never counted as zero. It "
+                     "was never revenue."),
+        ])
         st.markdown(
-            f"<div style='display:flex;gap:14px;padding:7px 0;"
-            f"border-bottom:0.5px solid #e4e7ec'>"
-            f"<div style='min-width:110px;font-weight:500;font-size:13px'>{k}</div>"
-            f"<div style='font-size:13px;color:#55585e;line-height:1.6'>{v}</div>"
-            f"</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='sec'>How the cards work</div>",
-                unsafe_allow_html=True)
-    rows2 = [
-        ("Pace", "Plan × days elapsed ÷ days in the period. 45% of pace means "
-                 "you have 45% of what the plan expected by today, not 45% of "
-                 "the month."),
-        ("The bar", "Fills to the percentage of pace. The tick is 100%."),
-        ("Split bar", "Under the chain cards it is order state. Under revenue "
-                      "it is cash certainty — collected, owed, at risk."),
-        ("The bars", "Daily activity with the recent average as a dashed "
-                     "line. Green above it means momentum is building, grey "
-                     "below means it is fading."),
-        ("Arrow", "Last seven days against the seven before, in points. "
-                  "Colour says whether that direction is good."),
-    ]
-    for k, v in rows2:
-        st.markdown(
-            f"<div style='display:flex;gap:14px;padding:7px 0;"
-            f"border-bottom:0.5px solid #e4e7ec'>"
-            f"<div style='min-width:110px;font-weight:500;font-size:13px'>{k}</div>"
-            f"<div style='font-size:13px;color:#55585e;line-height:1.6'>{v}</div>"
-            f"</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='sec'>Rules that apply everywhere</div>",
-                unsafe_allow_html=True)
-    rows3 = [
-        ("Cost", "Matched to the order date, so cost and revenue are "
-                 "recognised at the same moment. Where the cost log does not "
-                 "reach, plan cost is used and the card says so."),
-        ("Date range", "Filters orders and plan together. A partial range "
-                       "takes a pro-rated share of the month's plan, so "
-                       "attainment stays comparable."),
-        ("Currency", "One market shows its own. All markets converts to AED "
-                     "using the rates on the FX sheet."),
-        ("Missing", "Blank is not zero. A month with no plan is absent, not "
-                    "a failure."),
-        ("Forecast", "Three assumptions, not a prediction. The spread between "
-                     "them is the uncertainty."),
-    ]
-    for k, v in rows3:
-        st.markdown(
-            f"<div style='display:flex;gap:14px;padding:7px 0;"
-            f"border-bottom:0.5px solid #e4e7ec'>"
-            f"<div style='min-width:110px;font-weight:500;font-size:13px'>{k}</div>"
-            f"<div style='font-size:13px;color:#55585e;line-height:1.6'>{v}</div>"
-            f"</div>", unsafe_allow_html=True)
-
-    st.markdown(
-        f"<div style='margin-top:1.5rem;font-size:12px;color:#8a8d93;"
-        f"line-height:1.7'>Every figure is checked before release: the chain "
-        f"must multiply, each gap must decompose to zero, and cash buckets "
-        f"must sum to revenue. If they ever do not, a red banner appears at "
-        f"the top of the page instead of the numbers.</div>",
-        unsafe_allow_html=True)
-
+            "<div style='margin-top:1.5rem;font-size:12px;color:#8a8d93;"
+            "line-height:1.7'>Every figure is checked before release: the "
+            "chain must multiply, each gap must decompose to zero, cash "
+            "buckets must sum to revenue, and the forecast parts must "
+            "reconcile. If any check fails, a red banner appears at the top "
+            "of the page instead of the numbers.</div>",
+            unsafe_allow_html=True)
 
 elif view in ("Orders", "Units", "Revenue", "Margin"):
     metric = view.lower()

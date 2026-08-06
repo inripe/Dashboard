@@ -131,6 +131,39 @@ def _to_utc_naive(ts, tz: str):
         return ts
 
 
+def _stamps(col: pd.Series) -> pd.Series:
+    """Order timestamps, always at nanosecond precision.
+
+    Pandas returns microsecond precision for some inputs. Two timestamp
+    columns of different precision refuse to merge, and the error names a
+    dtype rather than the data, so it is pinned once here and every caller
+    uses it.
+    """
+    return (pd.to_datetime(col, utc=True, format="mixed")
+            .dt.tz_localize(None).astype("datetime64[ns]"))
+
+
+def _parse_dates(col: pd.Series) -> pd.Series:
+    """Read cost log dates without ever guessing the wrong way round.
+
+    The workbook is maintained in a day-first locale, so 03/08/2026 is the
+    third of August. Pandas defaults to month-first and silently moved every
+    cost five months earlier, which made a current log look 152 days stale.
+
+    ISO dates are handled first and separately, because dayfirst would read
+    2026-08-03 as the eighth of March. Everything else is day-first.
+    """
+    raw = col.astype(str).str.strip()
+    iso = raw.str.match(r"^\d{4}-\d{2}-\d{2}")
+    out = pd.Series(pd.NaT, index=col.index, dtype="datetime64[ns]")
+    if iso.any():
+        out[iso] = pd.to_datetime(raw[iso], errors="coerce", format="mixed")
+    if (~iso).any():
+        out[~iso] = pd.to_datetime(raw[~iso], errors="coerce",
+                                   format="mixed", dayfirst=True)
+    return out
+
+
 def normalise_cost_log(cost_log: pd.DataFrame | None) -> pd.DataFrame:
     """The dated cost history. Append-only by design.
 
@@ -158,11 +191,15 @@ def normalise_cost_log(cost_log: pd.DataFrame | None) -> pd.DataFrame:
     out = pd.DataFrame({
         "product": df[name].map(lambda v: str(v).strip()),
         "market": df["market"].map(lambda v: str(v).strip()),
-        # format="mixed" because a log legitimately holds both a bare date
-        # and a date with a time, and pandas otherwise infers one format for
-        # the whole column and discards the rest.
-        "valid_from": pd.to_datetime(df["valid_from"], errors="coerce",
-                                     format="mixed"),
+        # dayfirst because the workbook is maintained in a day-first locale:
+        # 03/08/2026 is the third of August. Pandas defaults to month-first,
+        # which silently moved every cost five months earlier and made a
+        # current log look 152 days stale.
+        #
+        # format="mixed" because a log legitimately holds both a bare date and
+        # a date with a time, and pandas otherwise infers one format for the
+        # whole column and discards the rest.
+        "valid_from": _parse_dates(df["valid_from"]),
         "cogs_unit_lc": pd.to_numeric(df[cost], errors="coerce"),
     })
 
@@ -176,8 +213,19 @@ def normalise_cost_log(cost_log: pd.DataFrame | None) -> pd.DataFrame:
         MARKET_TZ.get(z if z and z.lower() not in ("", "nan") else m, z or "UTC")
         if (z or "").upper() != "UTC" else "UTC"
         for z, m in zip(zones, out["market"])]
-    out["valid_from"] = [
-        _to_utc_naive(ts, tz) for ts, tz in zip(out["valid_from"], out["timezone"])]
+    # A bare date means the start of that day, and a cost that starts on the
+    # third of August starts on the third — not at eight in the evening on the
+    # second, which is what converting local midnight to UTC produces. Only
+    # entries that actually carry a time are converted.
+    has_time = (out["valid_from"].dt.hour.fillna(0).ne(0)
+                | out["valid_from"].dt.minute.fillna(0).ne(0))
+    # Rebuilt as a Series with an explicit dtype: a list comprehension over
+    # Timestamps can come back as microsecond precision, which then refuses
+    # to merge against the nanosecond timestamps everywhere else.
+    out["valid_from"] = pd.Series(
+        [_to_utc_naive(ts, tz) if t else ts
+         for ts, tz, t in zip(out["valid_from"], out["timezone"], has_time)],
+        index=out.index).astype("datetime64[ns]")
     # A row with no product name is not a data row: a spacer, a stray note,
     # or an empty line left behind. Those are dropped. A row that names a
     # product but has no readable date or cost is a genuine mistake and is
@@ -208,8 +256,10 @@ def apply_dated_cost(lines: pd.DataFrame, cost_log: pd.DataFrame,
     silently filled.
     """
     d = lines.copy()
-    d["_ts"] = pd.to_datetime(d["processed_at"], utc=True,
-                              format="mixed").dt.tz_localize(None)
+    # Pinned to nanoseconds so it can merge against the cost log. Pandas
+    # returns microsecond precision for some inputs, and merge_asof refuses
+    # to join two timestamp columns of different precision.
+    d["_ts"] = _stamps(d["processed_at"])
     cl = normalise_cost_log(cost_log)
 
     d["unit_cost_dated"] = pd.NA
@@ -248,7 +298,7 @@ def cost_coverage(lines: pd.DataFrame, cost_log: pd.DataFrame,
                   year: int = 2026) -> pd.DataFrame:
     """How much revenue is costed from the log versus falling back."""
     d = apply_dated_cost(lines, cost_log, plan)
-    d["ts"] = pd.to_datetime(d["processed_at"], utc=True, format="mixed")
+    d["ts"] = _stamps(d["processed_at"])
     d = d[(d["ts"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES)) & (d["qty_current"] > 0)]
     if d.empty:
@@ -277,8 +327,7 @@ def from_line_items(lines: pd.DataFrame, year: int = 2026,
       Potential  not yet delivered, customer can still change their mind
     """
     df = lines.copy()
-    df["processed_at"] = pd.to_datetime(df["processed_at"], utc=True,
-                                       format="mixed")
+    df["processed_at"] = _stamps(df["processed_at"])
     df = df[df["processed_at"].dt.year == year]
     df = df[~df["cancelled"]]
     df = df[~df["financial_status"].isin(DEAD_STATUSES)]
@@ -696,7 +745,7 @@ def order_quality(lines: pd.DataFrame, plan: pd.DataFrame | None = None,
     which is the only cost basis tracked reliably.
     """
     d = lines.copy()
-    d["processed_at"] = pd.to_datetime(d["processed_at"], utc=True, format="mixed")
+    d["processed_at"] = _stamps(d["processed_at"])
     d = d[d["processed_at"].dt.year == year]
     if d.empty:
         return pd.DataFrame(columns=["market", "month"])
@@ -898,8 +947,7 @@ def by_segment(lines: pd.DataFrame, dim: str, plan: pd.DataFrame | None = None,
         raise ActualsError(f"unknown segment {dim!r}")
 
     d = lines.copy()
-    d["processed_at"] = pd.to_datetime(d["processed_at"], utc=True,
-                                      format="mixed")
+    d["processed_at"] = _stamps(d["processed_at"])
     d = d[(d["processed_at"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES))
           & (d["qty_current"] > 0)]
@@ -945,8 +993,7 @@ def order_count(lines: pd.DataFrame, year: int = 2026, market: str | None = None
                 month: str | None = None) -> int:
     """Billable orders. Cancelled and dead-status orders never count."""
     d = lines.copy()
-    d["processed_at"] = pd.to_datetime(d["processed_at"], utc=True,
-                                      format="mixed")
+    d["processed_at"] = _stamps(d["processed_at"])
     d = d[(d["processed_at"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES))
           & (d["qty_current"] > 0)]
@@ -974,8 +1021,7 @@ def traffic_basket(lines: pd.DataFrame, combined: pd.DataFrame,
     buy less? Those have different owners — marketing versus merchandising.
     """
     d = lines.copy()
-    d["processed_at"] = pd.to_datetime(d["processed_at"], utc=True,
-                                      format="mixed")
+    d["processed_at"] = _stamps(d["processed_at"])
     d = d[(d["processed_at"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES)) & (d["qty_current"] > 0)]
     if d.empty:
@@ -1444,8 +1490,7 @@ def daily(lines: pd.DataFrame, plan: pd.DataFrame | None = None,
     almost always more interesting than a low day.
     """
     d = lines.copy()
-    d["date"] = pd.to_datetime(d["processed_at"], utc=True,
-                               format="mixed").dt.tz_localize(None).dt.normalize()
+    d["date"] = _stamps(d["processed_at"]).dt.normalize()
     d = d[(d["date"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES))
           & (d["qty_current"] > 0)
@@ -1572,8 +1617,7 @@ def daily_products(lines: pd.DataFrame, year: int = 2026,
     a stronger signal than one that merely sold less.
     """
     d = lines.copy()
-    d["date"] = pd.to_datetime(d["processed_at"], utc=True,
-                               format="mixed").dt.tz_localize(None).dt.normalize()
+    d["date"] = _stamps(d["processed_at"]).dt.normalize()
     d = d[(d["date"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES))
           & (d["qty_current"] > 0)
@@ -1640,8 +1684,7 @@ def daily_product_mix(lines: pd.DataFrame, year: int = 2026,
                       top: int = 6) -> pd.DataFrame:
     """Daily revenue for the leading products, everything else as one series."""
     d = lines.copy()
-    d["date"] = pd.to_datetime(d["processed_at"], utc=True,
-                               format="mixed").dt.tz_localize(None).dt.normalize()
+    d["date"] = _stamps(d["processed_at"]).dt.normalize()
     d = d[(d["date"].dt.year == year) & (~d["cancelled"])
           & (~d["financial_status"].isin(DEAD_STATUSES))
           & (d["qty_current"] > 0)
@@ -1707,3 +1750,98 @@ def demand_note(daily_df: pd.DataFrame, window: int = 7) -> str:
                  "carrying the day, or discount widening.",
     }[driver]
     return f"{lead} {detail} {owner}"
+
+
+# Delivered, but the cash has not arrived. On cash on delivery this is normal
+# for a few days and a problem after a few weeks, so it is aged rather than
+# reported as one number.
+COLLECTED = {"PAID"}
+UNCOLLECTED = {"PENDING", "AUTHORIZED", "PARTIALLY_PAID"}
+AGE_BANDS = [(0, 3, "0-3 days"), (4, 7, "4-7 days"), (8, 14, "8-14 days"),
+             (15, 30, "15-30 days"), (31, 10_000, "over 30 days")]
+
+
+def receivables(lines: pd.DataFrame, as_of=None, year: int = 2026,
+                market: str | None = None) -> pd.DataFrame:
+    """Orders delivered where the money has not been collected.
+
+    Aged from the fulfilment date, not the order date, because the clock that
+    matters starts when the customer took the goods. Where no fulfilment date
+    was recorded the order date is used and the row says so, rather than being
+    dropped or silently treated as new.
+    """
+    d = lines.copy()
+    d["processed"] = _stamps(d["processed_at"]).dt.tz_localize(None)
+    d = d[(d["processed"].dt.year == year) & (~d["cancelled"])
+          & (d["qty_current"] > 0)]
+    if market:
+        d = d[d["market"] == market]
+    if d.empty:
+        return pd.DataFrame()
+
+    delivered = d["fulfillment_status"].eq("FULFILLED")
+    open_money = d["financial_status"].isin(UNCOLLECTED)
+    d = d[delivered & open_money]
+    if d.empty:
+        return pd.DataFrame()
+
+    ratio = (d["qty_current"] / d["qty_ordered"]).where(
+        d["qty_ordered"].ne(0), 1.0).clip(upper=1.0)
+    d["net"] = d["net_line_lc"] * ratio
+
+    if "fulfilled_at" in d.columns:
+        ff = pd.to_datetime(d["fulfilled_at"], utc=True, errors="coerce",
+                            format="mixed").dt.tz_localize(None)
+    else:
+        ff = pd.Series(pd.NaT, index=d.index)
+    d["date_basis"] = np.where(ff.notna(), "delivery", "order date")
+    d["since"] = ff.fillna(d["processed"])
+
+    ref = pd.Timestamp(as_of) if as_of is not None else d["processed"].max()
+    d["age_days"] = (ref.normalize() - d["since"].dt.normalize()).dt.days.clip(lower=0)
+
+    g = d.groupby(["market", "order"], observed=True).agg(
+        outstanding=("net", "sum"),
+        boxes=("qty_current", "sum"),
+        age_days=("age_days", "max"),
+        status=("financial_status", "first"),
+        channel=("channel", "first"),
+        agent=("agent", "first"),
+        city=("city", "first"),
+        basis=("date_basis", "first"),
+        since=("since", "min")).reset_index()
+
+    def band(n):
+        for lo, hi, lbl in AGE_BANDS:
+            if lo <= n <= hi:
+                return lbl
+        return AGE_BANDS[-1][2]
+
+    g["age_band"] = g["age_days"].map(band)
+    return g.sort_values("age_days", ascending=False).reset_index(drop=True)
+
+
+def receivables_summary(rec: pd.DataFrame, collected_revenue: float | None = None
+                        ) -> dict:
+    """Headline figures for uncollected cash."""
+    if rec is None or rec.empty:
+        return {}
+    order = [lbl for _, _, lbl in AGE_BANDS]
+    by_band = (rec.groupby("age_band", observed=True)
+               .agg(orders=("order", "nunique"),
+                    outstanding=("outstanding", "sum")).reindex(order)
+               .fillna(0).reset_index())
+    over14 = rec[rec["age_days"] > 14]["outstanding"].sum()
+    total = rec["outstanding"].sum()
+    return {
+        "orders": int(rec["order"].nunique()),
+        "outstanding": float(total),
+        "oldest_days": int(rec["age_days"].max()),
+        "avg_age": float(rec["age_days"].mean()),
+        "over_14": float(over14),
+        "over_14_share": float(over14 / total) if total else None,
+        "by_band": by_band,
+        "share_of_revenue": (float(total / collected_revenue)
+                             if collected_revenue else None),
+        "no_delivery_date": int((rec["basis"] == "order date").sum()),
+    }
