@@ -13,6 +13,12 @@ structural view. A manager learns the shape once.
 from __future__ import annotations
 
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+# The read time is stamped in Cairo, not the machine clock. Locally that is
+# Dubai and on Streamlit Cloud it is UTC, so the same line would otherwise
+# read three different times depending on where it happened to run.
+TZ = ZoneInfo("Africa/Cairo")
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -101,13 +107,15 @@ def get_data(year: int):
     raw, fx, pmeta, aliases, cost_log = load_plan()
     plan = pe.attach_fx(pe.derive(raw), fx)
     actuals, ameta, lines = load_actuals_any(year, cost_log, plan)
-    return plan, lines, pmeta, ameta, aliases, cost_log, datetime.now()
+    return (plan, lines, pmeta, ameta, aliases, cost_log, fx,
+            datetime.now(TZ))
 
 
 with st.spinner("Reading the plan from SharePoint and every order from the "
                 "four Shopify stores. The first load takes a minute or two."):
     try:
-        plan, lines, pmeta, ameta, aliases, cost_log, pulled = get_data(YEAR)
+        (plan, lines, pmeta, ameta, aliases, cost_log, fx,
+         pulled) = get_data(YEAR)
     except Exception as exc:
         st.error(f"Could not load: {exc}")
         st.stop()
@@ -313,6 +321,7 @@ def table(df, height=None, empty="Nothing in this scope.", into=None, **kw):
 
 
 def footer_definitions():
+    """The definitions strip. Reads from the engine so it cannot drift."""
     st.markdown(
         "<div class='defs'>"
         + " &nbsp;·&nbsp; ".join(f"<b>{k}</b> {v}" for k, v in me.DEFINITIONS)
@@ -413,7 +422,7 @@ if C.get("empty"):
 
 view = st.radio("View", ["Management", "Forecast", "Portfolio pricing",
                          "Orders", "Units", "Revenue", "Margin",
-                         "Payment and exceptions", "How to read this"],
+                         "Payment", "Data quality", "How to read this"],
                 horizontal=True, label_visibility="collapsed")
 
 O, U, R, M = C["orders"], C["units"], C["revenue"], C["margin"]
@@ -1288,9 +1297,9 @@ elif view in ("Orders", "Units", "Revenue", "Margin"):
             table(show, height=320)
 
 
-# --------------------------------------------------- cash and exceptions
+# ------------------------------------------------------------- payment
 
-else:
+elif view == "Payment":
     st.markdown("<div class='sec'>Payment</div>", unsafe_allow_html=True)
     pay = me.payment(lines, plan, scope, cost_log)
     if not pay or not pay.get("delivered_orders"):
@@ -1399,26 +1408,54 @@ else:
             st.caption(f"{pay['no_delivery_date']} orders had no delivery date "
                        f"and are aged from the order date instead.")
 
-    st.markdown("<div class='sec'>Exceptions</div>", unsafe_allow_html=True)
-    ex = me.exceptions(lines, plan, scope, cost_log)
-    if not ex:
-        st.caption("Nothing flagged in this scope.")
-    else:
-        colour = {"high": ORANGE, "medium": AMBER, "low": GREY}
-        for e in ex:
+
+elif view == "Data quality":
+    dq = me.data_quality(lines, plan, scope, cost_log, fx)
+    k = st.columns(3)
+    k[0].metric("Findings", dq["total"],
+                f"{dq['high']} need attention", delta_color="off")
+    k[1].metric(f"At stake {CUR}", n(dq["at_stake"]),
+                "revenue that cannot be measured", delta_color="off")
+    k[2].metric("Reconciliation",
+                "Failing" if dq["consistency"] else "Passing",
+                "the chain and every decomposition", delta_color="off")
+
+    st.caption("Grouped by where it must be fixed, because that is what "
+               "decides who fixes it. Every finding carries what it is worth "
+               "and what to do.")
+
+    COLOUR = {"high": ORANGE, "medium": AMBER, "low": GREY}
+
+    def block(title, items, empty):
+        st.markdown(f"<div class='sec'>{title}</div>", unsafe_allow_html=True)
+        if not items:
+            st.caption(empty)
+            return
+        for e in items:
             st.markdown(
                 f"<div style='background:#fff;border:0.5px solid #e4e7ec;"
-                f"border-left:3px solid {colour[e['severity']]};padding:11px 14px;"
-                f"margin-bottom:7px'>"
+                f"border-left:3px solid {COLOUR[e['severity']]};"
+                f"padding:11px 14px;margin-bottom:7px'>"
                 f"<div style='display:flex;justify-content:space-between;"
                 f"gap:8px;flex-wrap:wrap'>"
-                f"<span style='font-size:13px;font-weight:500'>{e['title']}</span>"
-                f"<span style='font-size:12px;color:{colour[e['severity']]};"
+                f"<span style='font-size:13px;font-weight:500'>"
+                f"{e['title']}</span>"
+                f"<span style='font-size:12px;color:{COLOUR[e['severity']]};"
                 f"font-weight:500'>"
-                + (f"{e['value']:,.0f} {CUR}" if e["value"] else "")
-                + f"</span></div>"
-                f"<div style='font-size:12px;color:#6d7076;margin-top:3px'>"
-                f"{e['detail']} — {e['why']}</div></div>",
-                unsafe_allow_html=True)
+                + (f"{e['value']:,.0f} {CUR}" if e.get("value") else "")
+                + "</span></div>"
+                f"<div style='font-size:12px;color:#6d7076;margin-top:3px;"
+                f"line-height:1.55'>{e['detail']}<br>"
+                f"<b style='font-weight:500;color:#17181a'>{e['action']}</b>"
+                f"</div></div>", unsafe_allow_html=True)
+            if e.get("table") is not None and len(e["table"]):
+                with st.expander(f"All {len(e['table'])} rows"):
+                    table(e["table"])
+
+    block("Consistency · the dashboard itself", dq["consistency"],
+          "Every check passes. The chain multiplies, each decomposition "
+          "reconciles to zero, and cash buckets sum to revenue.")
+    block("The workbook · fix in Excel", dq["sheet"], "Nothing flagged.")
+    block("Shopify · fix in the stores", dq["shopify"], "Nothing flagged.")
 
 footer_definitions()
