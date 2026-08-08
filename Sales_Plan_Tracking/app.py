@@ -1300,114 +1300,123 @@ elif view in ("Orders", "Units", "Revenue", "Margin"):
 # ------------------------------------------------------------- payment
 
 elif view == "Payment":
-    st.markdown("<div class='sec'>Payment</div>", unsafe_allow_html=True)
-    pay = me.payment(lines, plan, scope, cost_log)
-    if not pay or not pay.get("delivered_orders"):
-        st.caption("Nothing delivered in this scope.")
+    co = me.closeout(lines, plan, scope, cost_log)
+    if not co:
+        st.info("Nothing in this scope.")
     else:
-        def arrow(v, good_down=True, fmt="{:+.0%}"):
-            """A movement against the previous seven days.
+        problems = me.check_closeout(co)
+        if problems:
+            st.error("The close-out does not tie: " + " · ".join(problems)
+                     + ". Do not reconcile against these figures.")
 
-            Direction alone is not meaning: rising cash outstanding is bad,
-            rising collection speed is good. Each caller says which.
-            """
-            if v is None or pd.isna(v):
-                return ""
-            up = v > 0
-            bad = up if good_down else not up
-            icon = "↗" if up else "↘"
-            colr = BAD if bad else GOOD
-            return (f"<span style='color:{colr};font-weight:500;font-size:12px'>"
-                    f"{icon} {fmt.format(abs(v))}</span>")
-
-        k = st.columns(3)
-        lag = pay.get("median_lag")
-        k[0].markdown(
-            f"<div class='k'><div class='lab'>Days to reconcile</div>"
-            f"<div class='row'><div class='val'>{'n/a' if lag is None else f'{lag:.0f}'}</div>"
-            f"{arrow(pay.get('lag_change'), True, '{:.0f}')}</div>"
-            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
-            f"median, delivery to paid"
-            + (f" · was {pay['lag_prev']:.0f}" if pay.get("lag_prev") is not None else "")
-            + "</div></div>", unsafe_allow_html=True)
-        k[1].markdown(
-            f"<div class='k'><div class='lab'>Cash outstanding</div>"
-            f"<div class='row'><div class='val'>{n(pay['outstanding'])}</div>"
-            f"{arrow(pay.get('outstanding_change'), True)}</div>"
-            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
-            f"{pay['orders']} orders delivered, not paid</div></div>",
-            unsafe_allow_html=True)
-        k[2].markdown(
-            f"<div class='k'><div class='lab'>Stuck past "
-            f"{pay['stuck_after']} days</div>"
-            f"<div class='row'><div class='val' style='color:{BAD}'>"
-            f"{n(pay['stuck_value'])}</div></div>"
-            f"<div class='ft' style='border:none;padding:0;margin-top:4px'>"
-            f"{pay['stuck_orders']} orders · oldest {pay['oldest']} days"
-            f"</div></div>", unsafe_allow_html=True)
-
-        c1, c2 = st.columns([1.15, 1])
-        bb = pay["by_band"]
-        f = go.Figure(go.Bar(
-            x=bb.band, y=bb.outstanding,
-            marker_color=[TEAL, "#5DCAA5", AMBER, ORANGE, "#A32D2D"][:len(bb)],
-            text=[f"{v:,.0f}" for v in bb.outstanding], textposition="outside"))
-        f.update_layout(height=250, margin=dict(t=26),
-                        xaxis_title="days since delivery",
-                        yaxis_title=f"Outstanding {CUR}")
-        c1.plotly_chart(f, width="stretch")
-
-        if pay["stuck_orders"]:
-            c2.markdown(
-                f"<div style='background:#FCEBEB;border-radius:8px;"
-                f"padding:12px 14px;font-size:12.5px;color:#791F1F;"
-                f"line-height:1.65;margin-top:14px'>"
-                f"<b style='font-weight:500'>{pay['stuck_orders']} orders past "
-                f"{pay['stuck_after']} days, worth {n(pay['stuck_value'])} "
-                f"{CUR}.</b><br>Beyond any reconciliation window. Either the "
-                f"cash has not been remitted, or the goods never reached the "
-                f"customer.</div>", unsafe_allow_html=True)
-            st_ = pay["stuck_table"]
-            keep = [c for c in ["order", "days_since_delivery", "outstanding",
-                                "boxes", "channel", "delivered_on", "basis"]
-                    if c in st_.columns]
-            c2.download_button(
-                f"Download the {pay['stuck_orders']} stuck orders",
-                st_[keep].to_csv(index=False).encode(),
-                file_name=f"stuck_orders_{market}_{month}_{YEAR}.csv",
-                mime="text/csv", key="dl_stuck")
-        else:
-            c2.caption("Nothing is stuck beyond the window.")
-
-        ot = pay["orders_table"]
-        if len(ot):
-            keep = [c for c in ["order", "days_since_delivery", "outstanding",
-                                "boxes", "channel", "delivered_on", "basis"]
-                    if c in ot.columns]
-            st.download_button(
-                f"Download all {pay['orders']} outstanding orders",
-                ot[keep].to_csv(index=False).encode(),
-                file_name=f"outstanding_{market}_{month}_{YEAR}.csv",
-                mime="text/csv", key="dl_out")
-
-        st.markdown("<div class='sec'>Delivered to customers</div>",
+        st.markdown(f"<div class='sec'>Close-out · {co['period']} {YEAR}</div>",
                     unsafe_allow_html=True)
-        st.caption(f"{n(pay['delivered_boxes'])} boxes · "
-                   f"{pay['delivered_orders']} orders · "
-                   f"{n(pay['delivered_value'])} {CUR}")
-        bp = pay["by_product"].copy()
-        bp.columns = ["product", "boxes", "orders", f"value {CUR}"]
-        table(bp, height=320)
-        st.download_button(
-            "Download delivered by product",
-            bp.to_csv(index=False).encode(),
-            file_name=f"delivered_by_product_{market}_{month}_{YEAR}.csv",
-            mime="text/csv", key="dl_prod")
+        st.caption("Revenue recognised on delivery, cash on the payment stamp. "
+                   "Opening balances carry everything outstanding from all "
+                   "prior periods.")
 
-        if pay.get("no_delivery_date"):
-            st.caption(f"{pay['no_delivery_date']} orders had no delivery date "
-                       f"and are aged from the order date instead.")
+        M, B = co["money"], co["boxes"]
+        k = st.columns(4)
+        k[0].metric("Delivered", n(co["orders_delivered"]),
+                    f"orders · {n(B['delivered'])} boxes", delta_color="off")
+        k[1].metric(f"Revenue {CUR}", n(M["delivered"]),
+                    "net of discount", delta_color="off")
+        k[2].metric(f"Collected {CUR}", n(M["collected"]),
+                    f"paid during {co['period']}", delta_color="off")
+        k[3].metric(f"Closing receivable {CUR}", n(M["closing"]),
+                    "reconciles to the bank", delta_color="off")
 
+        c1, c2 = st.columns(2)
+        c1.markdown("<div class='sec'>Receivable · " + CUR + "</div>",
+                    unsafe_allow_html=True)
+        table(pd.DataFrame([
+            {"movement": f"Opening · {scope.start:%d %b}", "amount": M["opening"]},
+            {"movement": "Delivered", "amount": M["delivered"]},
+            {"movement": "Collected", "amount": -M["collected"]},
+            {"movement": f"Closing · {scope.end:%d %b}", "amount": M["closing"]},
+        ]), into=c1)
+        if M["collected_prior"]:
+            c1.caption(f"Of the {n(M['collected'])} collected, "
+                       f"{n(M['collected_prior'])} was for deliveries made "
+                       f"before {scope.start:%d %b}.")
+
+        c2.markdown("<div class='sec'>Order book · boxes</div>",
+                    unsafe_allow_html=True)
+        table(pd.DataFrame([
+            {"movement": f"Opening · {scope.start:%d %b}", "boxes": B["opening"]},
+            {"movement": "Ordered", "boxes": B["ordered"]},
+            {"movement": "Delivered", "boxes": -B["delivered"]},
+            {"movement": "Cancelled", "boxes": -B["cancelled"]},
+            {"movement": f"Closing · {scope.end:%d %b}", "boxes": B["closing"]},
+        ]), into=c2)
+        c2.caption(f"The {n(B['delivered'])} boxes delivered here is the same "
+                   f"event as the {n(M['delivered'])} {CUR} opposite.")
+
+        st.markdown("<div class='sec'>Order book by SKU</div>",
+                    unsafe_allow_html=True)
+        sku = co["sku"].copy()
+        sku.columns = ["product", "opening", "ordered", "delivered",
+                       "cancelled", "closing", "oldest days"]
+        table(sku, height=340)
+
+        if len(co["ageing"]):
+            st.markdown("<div class='sec'>Closing receivable by age</div>",
+                        unsafe_allow_html=True)
+            a1, a2 = st.columns([1.15, 1])
+            ag = co["ageing"]
+            f = go.Figure(go.Bar(
+                x=ag.band, y=ag.amount,
+                marker_color=[TEAL, "#5DCAA5", AMBER, ORANGE, "#A32D2D"][:len(ag)],
+                text=[f"{v:,.0f}" for v in ag.amount], textposition="outside"))
+            f.update_layout(height=250, margin=dict(t=26),
+                            xaxis_title="days since delivery",
+                            yaxis_title=f"Outstanding {CUR}")
+            a1.plotly_chart(f, width="stretch")
+            bm = co["by_delivery_month"].copy()
+            if len(bm):
+                bm.columns = ["delivered in", f"amount {CUR}"]
+                a2.caption("By the month it was delivered")
+                table(bm, into=a2)
+                a2.caption("Anything from an earlier month is either "
+                           "unremitted by the delivery company or was never "
+                           "delivered.")
+
+        dl = st.columns(2)
+        if len(co["open_receivable"]):
+            dl[0].download_button(
+                f"Download the open receivable · {len(co['open_receivable'])} orders",
+                co["open_receivable"].to_csv(index=False).encode(),
+                file_name=f"open_receivable_{market}_{month}_{YEAR}.csv",
+                mime="text/csv", key="dl_recv")
+        dl[1].download_button(
+            "Download the order book by SKU",
+            sku.to_csv(index=False).encode(),
+            file_name=f"order_book_{market}_{month}_{YEAR}.csv",
+            mime="text/csv", key="dl_book")
+
+        st.markdown(
+            f"<div style='background:#E6F1FB;border-radius:8px;padding:10px 13px;"
+            f"font-size:12.5px;color:#042C53;line-height:1.65;max-width:900px;"
+            f"margin-top:12px'><b style='font-weight:500'>{n(M['closing'])} "
+            f"{CUR} is the figure accounting reconciles to the bank.</b> The "
+            f"download lists every open order with its delivery date, so a "
+            f"difference traces to an order rather than being argued about in "
+            f"total.</div>", unsafe_allow_html=True)
+
+        notes = []
+        if co["no_delivery_stamp"]:
+            notes.append(f"{co['no_delivery_stamp']} delivered lines have no "
+                         f"delivery date and are dated by the order instead")
+        if co["no_payment_stamp"]:
+            notes.append(f"{co['no_payment_stamp']} paid lines have no payment "
+                         f"date and are dated by the delivery instead")
+        if co.get("paid_before_delivery"):
+            notes.append(f"{co['paid_before_delivery']} lines carry a payment "
+                         f"stamp earlier than the delivery and are recognised "
+                         f"on delivery, since a receivable cannot be settled "
+                         f"before it exists")
+        if notes:
+            st.caption(". ".join(n_.capitalize() for n_ in notes) + ".")
 
 elif view == "Data quality":
     dq = me.data_quality(lines, plan, scope, cost_log, fx)

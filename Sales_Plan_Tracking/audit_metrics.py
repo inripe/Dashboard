@@ -354,6 +354,68 @@ def run() -> Report:
                           "a price rise produces a negative break-even — "
                           "volume you can afford to lose")
 
+    print("\n=== J. MONTHLY CLOSE-OUT ===")
+    # A movement schedule that does not add up is not a schedule. Both must
+    # tie, on every completed month, and the same delivery must appear in
+    # each of them.
+    bad_close, tested_close = [], 0
+    for month in me.MONTHS:
+        for mk in [None] + me.MARKETS:
+            s_ = me.Scope(YEAR, mk, month)
+            try:
+                co = me.closeout(lines, plan, s_, cost_log)
+            except Exception as e:
+                bad_close.append((month, mk, f"{type(e).__name__}: {e}"))
+                continue
+            if not co:
+                continue
+            tested_close += 1
+            for prob in me.check_closeout(co):
+                bad_close.append((month, mk or "all", prob))
+    rep.check(not bad_close, "J1",
+              f"both close-out schedules tie on all {tested_close} populated "
+              f"market-months",
+              f"{len(bad_close)} do not: {bad_close[:3]}")
+
+    # Successive months must chain: this month's closing is next month's
+    # opening. If they do not, an order is being counted twice or dropped.
+    chain_breaks = []
+    for i in range(len(me.MONTHS) - 1):
+        a_ = me.closeout(lines, plan, me.Scope(YEAR, "KSA", me.MONTHS[i]), cost_log)
+        b_ = me.closeout(lines, plan, me.Scope(YEAR, "KSA", me.MONTHS[i + 1]),
+                         cost_log)
+        if not a_ or not b_:
+            continue
+        for key, label in (("money", "receivable"), ("boxes", "order book")):
+            close_a = a_[key]["closing"]
+            open_b = b_[key]["opening"]
+            if abs(close_a - open_b) > max(1.0, abs(close_a) * TOL):
+                chain_breaks.append(
+                    (me.MONTHS[i], label, round(close_a - open_b, 2)))
+    rep.check(not chain_breaks, "J2",
+              "each month's closing balance equals the next month's opening",
+              f"{len(chain_breaks)} breaks: {chain_breaks[:3]}")
+
+    co_now = me.closeout(lines, plan, me.Scope(YEAR, None, "July"), cost_log)
+    if co_now:
+        sku = co_now["sku"]
+        rep.check(abs(float(sku["closing"].sum()) - co_now["boxes"]["closing"])
+                  < max(0.5, abs(co_now["boxes"]["closing"]) * TOL), "J3",
+                  "the SKU breakdown sums to the order book schedule")
+        if len(co_now["ageing"]):
+            aged = float(co_now["ageing"]["amount"].sum())
+            rep.check(abs(aged - co_now["money"]["closing"])
+                      < max(1.0, abs(co_now["money"]["closing"]) * 0.02), "J4",
+                      "the ageing sums to the closing receivable",
+                      f"{aged:,.2f} against {co_now['money']['closing']:,.2f}")
+        if len(co_now["open_receivable"]):
+            opened = float(co_now["open_receivable"]["amount"].sum())
+            rep.check(abs(opened - co_now["money"]["closing"])
+                      < max(1.0, abs(co_now["money"]["closing"]) * 0.02), "J5",
+                      "the downloadable open items sum to the closing "
+                      "receivable",
+                      f"{opened:,.2f} against {co_now['money']['closing']:,.2f}")
+
     print("\n=== G. DATA QUALITY (warnings) ===")
     for name, s in [("all markets, full year", base)]:
         ex = me.exceptions(lines, plan, s, cost_log)

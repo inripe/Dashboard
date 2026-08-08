@@ -1751,3 +1751,476 @@ def apply_moves(pf: dict, moves: dict) -> dict:
         "below_cost": below["product"].tolist(),
         "moved": int((g["move"].abs() > 0).sum()),
     }
+
+
+# --------------------------------------------------------- data quality
+
+
+def data_quality(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+                 cost_log: pd.DataFrame | None = None,
+                 fx: pd.DataFrame | None = None,
+                 raw_plan: pd.DataFrame | None = None) -> dict:
+    """Everything wrong with the inputs, grouped by where it must be fixed.
+
+    Grouped by source rather than by severity, because that is what decides
+    who fixes it. A name mismatch is a Shopify job, a missing plan row is a
+    workbook job, and a reconciliation failure is a code job. Ranking them
+    together by money would mix three different queues.
+
+    Every finding carries a count, what it is worth, and what to do — a
+    warning without an action is only an apology.
+    """
+    out = {"sheet": [], "shopify": [], "consistency": []}
+
+    d = attach_cost(prepare(lines, scope), cost_log, plan)
+    p_all = plan[plan["plan_units"] > 0]
+    p = plan_scope(plan, scope)
+
+    # ---- the workbook
+    if len(p_all):
+        below = p_all[p_all["plan_cogs_unit_lc"] >= p_all["plan_price_lc"]]
+        if len(below):
+            out["sheet"].append({
+                "severity": "high",
+                "title": f"{len(below)} plan rows priced at or below cost",
+                "value": float((below["plan_cogs_lc"]
+                                - below["plan_revenue_lc"]).sum()),
+                "detail": ", ".join(below["product"].unique()[:5]),
+                "action": "Correct the price or the cost in the Plan sheet."})
+
+        cm_pct = (p_all["plan_cm_lc"] / p_all["plan_revenue_lc"]).where(
+            p_all["plan_revenue_lc"].ne(0))
+        thin = p_all[(cm_pct > 0) & (cm_pct < 0.10)]
+        if len(thin):
+            out["sheet"].append({
+                "severity": "medium",
+                "title": f"{len(thin)} plan rows below 10% margin",
+                "value": float(thin["plan_revenue_lc"].sum()),
+                "detail": ", ".join(thin["product"].unique()[:5]),
+                "action": "Deliberate, or a pricing error worth checking."})
+
+        dupes = plan.duplicated(["product", "market", "month"]).sum()
+        if dupes:
+            out["sheet"].append({
+                "severity": "high",
+                "title": f"{dupes} duplicate product, market and month rows",
+                "value": 0.0, "detail": "The same cell planned twice.",
+                "action": "Remove the duplicates — totals are being "
+                          "double counted."})
+
+        gaps = []
+        for mk in MARKETS:
+            have = set(p_all[p_all["market"] == mk]["month"])
+            missing = [m for m in MONTHS if m not in have]
+            if missing and len(missing) < 12:
+                gaps.append(f"{mk}: {', '.join(missing[:4])}"
+                            + ("…" if len(missing) > 4 else ""))
+        if gaps:
+            out["sheet"].append({
+                "severity": "low",
+                "title": f"{len(gaps)} markets have months with no plan",
+                "value": 0.0, "detail": " · ".join(gaps),
+                "action": "Blank is treated as absent, not zero. Add rows "
+                          "only if those months were meant to sell."})
+
+    # ---- FX
+    if fx is not None and len(fx):
+        placeholders = {"SAR": 0.98, "QAR": 1.008, "EGP": 0.076}
+        flagged = [c for c, v in placeholders.items()
+                   if c in fx.columns
+                   and bool(np.isclose(fx[c].dropna(), v, atol=1e-6).any())]
+        if flagged:
+            out["sheet"].append({
+                "severity": "high",
+                "title": f"{len(flagged)} FX rates look like placeholders",
+                "value": 0.0, "detail": ", ".join(flagged),
+                "action": "Every consolidated AED figure moves when these "
+                          "are corrected."})
+        if "EGP" in fx.columns:
+            egp = fx["EGP"].dropna()
+            if len(egp) and (egp.max() > 0.5 or egp.min() < 0.001):
+                out["sheet"].append({
+                    "severity": "high",
+                    "title": "The EGP rate is outside a plausible range",
+                    "value": 0.0,
+                    "detail": f"between {egp.min():.4f} and {egp.max():.4f}",
+                    "action": "A factor of ten here silently multiplies or "
+                              "divides Egypt by ten in every AED view."})
+
+    # ---- cost log
+    cls = cost_log_status(cost_log)
+    if not cls:
+        out["sheet"].append({
+            "severity": "high", "title": "No cost log",
+            "value": 0.0,
+            "detail": "Margin is calculated at plan cost everywhere.",
+            "action": "Add a Cost_Log sheet so cost movement becomes visible."})
+    else:
+        if (cls.get("days_old") or 0) > 30:
+            out["sheet"].append({
+                "severity": "medium",
+                "title": f"Cost log last updated {cls['days_old']} days ago",
+                "value": 0.0,
+                "detail": f"latest entry {cls['latest']:%d %b %Y}",
+                "action": "Margin uses the last entered cost, which may no "
+                          "longer be what you pay."})
+        if not d.empty:
+            share = float((d["cost_basis"] == "plan").mean())
+            if share > 0.05:
+                out["sheet"].append({
+                    "severity": "medium",
+                    "title": f"{share:.0%} of lines have no dated cost",
+                    "value": 0.0,
+                    "detail": "Those fall back to plan cost.",
+                    "action": "Cost movement is invisible where the log does "
+                              "not reach."})
+
+    # ---- Shopify
+    if not d.empty:
+        live = d[d["state"].ne("lost")]
+        planned = set(p_all["product"])
+        unmatched = live[~live["product"].isin(planned)]
+        if len(unmatched):
+            g = (unmatched.groupby("product", observed=True)["revenue"]
+                 .sum().sort_values(ascending=False))
+            out["shopify"].append({
+                "severity": "high",
+                "title": f"{len(g)} store product names never reach a plan row",
+                "value": float(g.sum()),
+                "detail": ", ".join(g.head(6).index),
+                "action": "Rename in Shopify to match the plan, or add an "
+                          "Aliases row. Until then this revenue counts but "
+                          "cannot be measured against plan.",
+                "table": g.reset_index().rename(
+                    columns={"revenue": "revenue"})})
+
+        delivered = d[d["state"] == "delivered"]
+        if len(delivered) and "fulfilled_at" in delivered.columns:
+            no_date = delivered["fulfilled_at"].isna().sum()
+            if no_date:
+                out["shopify"].append({
+                    "severity": "medium",
+                    "title": f"{no_date:,} delivered lines have no delivery date",
+                    "value": 0.0,
+                    "detail": "Ageing falls back to the order date.",
+                    "action": "Payment ageing understates how long cash has "
+                              "been out."})
+
+        if "paid_at" in d.columns:
+            paid = d[d["cash"] == "collected"]
+            if len(paid):
+                missing = paid["paid_at"].isna().sum()
+                if missing > len(paid) * 0.1:
+                    out["shopify"].append({
+                        "severity": "medium",
+                        "title": f"{missing:,} paid lines have no payment date",
+                        "value": 0.0,
+                        "detail": f"of {len(paid):,} paid lines",
+                        "action": "Days to reconcile is measured on the rest "
+                                  "only."})
+
+        if "order_subtotal" in d.columns:
+            per_order = live.groupby("order", observed=True).agg(
+                lines_net=("revenue", "sum"),
+                shopify=("order_subtotal", "first"))
+            per_order = per_order[per_order["shopify"] > 0]
+            if len(per_order):
+                gap = (per_order["lines_net"] - per_order["shopify"]).abs()
+                off = (gap / per_order["shopify"] > 0.02).sum()
+                drift = float(gap.sum() / per_order["shopify"].sum())
+                if drift > 0.01:
+                    out["shopify"].append({
+                        "severity": "high",
+                        "title": f"Line items differ from Shopify's own "
+                                 f"subtotals by {drift:.1%}",
+                        "value": float(gap.sum()),
+                        "detail": f"{off:,} of {len(per_order):,} orders "
+                                  f"differ by more than 2%",
+                        "action": "Usually order-level discounts. If it grows, "
+                                  "the revenue read is drifting."})
+
+        dead = p[~p["product"].isin(set(live["product"]))] if len(p) else p
+        if len(dead):
+            g = (dead.groupby("product", observed=True)["plan_revenue_lc"]
+                 .sum().sort_values(ascending=False))
+            out["shopify"].append({
+                "severity": "low",
+                "title": f"{len(g)} planned products sold nothing",
+                "value": float(g.sum()),
+                "detail": ", ".join(g.head(5).index),
+                "action": "Delisted, out of stock, or never launched."})
+
+    # ---- consistency
+    c = cards(lines, plan, scope, cost_log)
+    if not c.get("empty"):
+        problems = check_chain(c)
+        if problems:
+            out["consistency"].append({
+                "severity": "high", "title": "The cards do not reconcile",
+                "value": 0.0, "detail": " · ".join(problems),
+                "action": "Do not act on these figures until it is fixed."})
+        bad = []
+        for m in ("orders", "units", "revenue", "margin"):
+            steps = gap_decomposition(c, m)
+            if not steps:
+                continue
+            tot = steps[0]["value"] + sum(x["value"] for x in steps[1:-1])
+            if abs(tot - steps[-1]["value"]) > max(1.0,
+                                                   abs(steps[-1]["value"]) * .01):
+                bad.append(m)
+        if bad:
+            out["consistency"].append({
+                "severity": "high",
+                "title": f"{len(bad)} gap decompositions do not reconcile",
+                "value": 0.0, "detail": ", ".join(bad),
+                "action": "A bridge that does not add up is worse than none."})
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    for k in out:
+        out[k] = sorted(out[k], key=lambda x: (order[x["severity"]],
+                                               -abs(x.get("value") or 0)))
+    out["total"] = sum(len(v) for v in
+                       (out["sheet"], out["shopify"], out["consistency"]))
+    out["high"] = sum(1 for v in (out["sheet"] + out["shopify"]
+                                  + out["consistency"])
+                      if v["severity"] == "high")
+    out["at_stake"] = sum(abs(x.get("value") or 0)
+                          for x in out["sheet"] + out["shopify"])
+    return out
+
+
+# --------------------------------------------------------- monthly close
+
+
+def closeout(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
+             cost_log: pd.DataFrame | None = None) -> dict:
+    """The month as accounting closes it, in money and in boxes.
+
+    Two movement schedules that must each tie, and must tie to each other:
+    a delivery adds to the receivable and removes from the order book in the
+    same event.
+
+    The dates are the point. Revenue is recognised when the goods are
+    delivered, so an order placed in June and delivered in July is July
+    revenue. Cash is dated by the payment stamp, because reconciling with
+    the delivery company catches up after the fact — of what is collected in
+    July, some will be for June deliveries, and the schedule follows that
+    rather than tidying it away.
+
+    Opening balances carry everything outstanding from all prior periods,
+    not merely the previous month.
+
+    Refunded and cancelled orders never enter revenue at all, so there is no
+    credit note line to reverse them out of.
+    """
+    # The whole year in scope, so opening balances can be built from every
+    # prior period rather than only the month being closed.
+    full = Scope(scope.year, scope.market, None,
+                 categories=scope.categories, products=scope.products)
+    d = attach_cost(prepare(lines, full), cost_log, plan)
+    if d.empty:
+        return {}
+
+    start = pd.Timestamp(scope.start)
+    end = pd.Timestamp(scope.end) + pd.Timedelta(days=1)
+
+    def stamp(col):
+        if col not in d.columns:
+            return pd.Series(pd.NaT, index=d.index)
+        return (pd.to_datetime(d[col], utc=True, errors="coerce",
+                               format="mixed").dt.tz_localize(None)
+                .astype("datetime64[ns]"))
+
+    delivered_at = stamp("fulfilled_at")
+    paid_at = stamp("paid_at")
+
+    # A delivered line with no delivery stamp still has to fall somewhere, so
+    # it uses the order date and the count of those is reported. Dropping it
+    # would silently shrink revenue; guessing a date would silently move it.
+    is_delivered = d["state"].eq("delivered")
+    deliv_date = delivered_at.where(delivered_at.notna(), d["ts"])
+    no_deliv_stamp = int((is_delivered & delivered_at.isna()).sum())
+
+    is_paid = d["cash"].eq("collected")
+    # Payment cannot precede the delivery that created the receivable. Where
+    # a payment stamp is missing it falls back to the delivery date, and
+    # where it exists but predates delivery — a prepaid order, or a stamp
+    # written before fulfilment — it is pulled forward to the delivery.
+    # Without this a payment lands in the schedule before the delivery it
+    # settles, and the closing balance goes negative.
+    pay_date = paid_at.where(paid_at.notna(), deliv_date)
+    pay_date = pay_date.where(pay_date >= deliv_date, deliv_date)
+    no_pay_stamp = int((is_paid & paid_at.isna()).sum())
+    early_pay = int((is_paid & paid_at.notna() & (paid_at < deliv_date)).sum())
+
+    lost = d["state"].eq("lost")
+    live = ~lost
+
+    # ---- money
+    del_before = is_delivered & (deliv_date < start)
+    del_in = is_delivered & (deliv_date >= start) & (deliv_date < end)
+    paid_before = is_paid & (pay_date < start)
+    paid_in = is_paid & (pay_date >= start) & (pay_date < end)
+
+    opening_money = float(d.loc[del_before, "revenue"].sum()
+                          - d.loc[paid_before, "revenue"].sum())
+    delivered_money = float(d.loc[del_in, "revenue"].sum())
+    collected_money = float(d.loc[paid_in, "revenue"].sum())
+    closing_money = opening_money + delivered_money - collected_money
+
+    # Of what was collected this period, how much related to deliveries made
+    # earlier. The two do not sit in the same month and saying so is the
+    # point of dating them separately.
+    collected_prior = float(d.loc[paid_in & del_before, "revenue"].sum())
+
+    # ---- boxes
+    ord_before = live & (d["ts"] < start)
+    ord_in = live & (d["ts"] >= start) & (d["ts"] < end)
+    lost_in = lost & (d["ts"] >= start) & (d["ts"] < end)
+    lost_before = lost & (d["ts"] < start)
+
+    opening_boxes = float(d.loc[ord_before, "units"].sum()
+                          - d.loc[del_before, "units"].sum())
+    ordered_boxes = float(d.loc[ord_in, "units"].sum())
+    delivered_boxes = float(d.loc[del_in, "units"].sum())
+    cancelled_boxes = float(d.loc[lost_in, "lost_units"].sum())
+    closing_boxes = (opening_boxes + ordered_boxes - delivered_boxes)
+
+    # ---- per SKU, the same movement
+    def by_sku(mask, col):
+        return (d.loc[mask].groupby("product", observed=True)[col]
+                .sum().rename(col))
+
+    sku = pd.concat([
+        (d.loc[ord_before, "units"].groupby(d.loc[ord_before, "product"]).sum()
+         - d.loc[del_before, "units"].groupby(
+             d.loc[del_before, "product"]).sum().reindex(
+             d.loc[ord_before, "product"].unique()).fillna(0)
+         ).rename("opening"),
+        by_sku(ord_in, "units").rename("ordered"),
+        by_sku(del_in, "units").rename("delivered"),
+        by_sku(lost_in, "lost_units").rename("cancelled"),
+    ], axis=1).fillna(0.0)
+    sku["closing"] = sku["opening"] + sku["ordered"] - sku["delivered"]
+
+    # Oldest open commitment per product, which is where a book turns into a
+    # loss on something perishable.
+    open_lines = d[live & (d["ts"] < end) & (~del_in) & (~del_before)]
+    if len(open_lines):
+        age = (pd.Timestamp(min(date.today(), scope.end))
+               - open_lines["ts"].dt.normalize()).dt.days.clip(lower=0)
+        oldest = age.groupby(open_lines["product"]).max().rename("oldest_days")
+        sku = sku.join(oldest)
+    sku["oldest_days"] = sku.get("oldest_days", pd.Series(dtype=float))
+    sku = sku.reset_index().rename(columns={"index": "product"})
+    sku = sku.sort_values("closing", ascending=False).reset_index(drop=True)
+
+    # ---- ageing of the closing receivable
+    #
+    # Exactly the population behind the closing balance: delivered on or
+    # before the period end, and not yet collected by then. Computing it any
+    # other way would let the ageing and the schedule disagree, which is the
+    # one thing a reconciliation cannot survive.
+    owed_mask = (is_delivered & (deliv_date < end)
+                 & ~(is_paid & (pay_date < end)))
+    still_owed = d[owed_mask]
+    ageing = pd.DataFrame(columns=["band", "amount"])
+    by_month = pd.DataFrame(columns=["delivered", "amount"])
+    if len(still_owed):
+        ref = pd.Timestamp(min(date.today(), scope.end))
+        sub_age = (ref - deliv_date[still_owed.index].dt.normalize()
+                   ).dt.days.clip(lower=0)
+        bands = [(0, 7, "0–7"), (8, 14, "8–14"), (15, 30, "15–30"),
+                 (31, 60, "31–60"), (61, 10_000, "60+")]
+        band = sub_age.map(
+            lambda x: next(l for lo, hi, l in bands if lo <= x <= hi))
+        ageing = (still_owed.assign(band=band)
+                  .groupby("band", observed=True)["revenue"].sum()
+                  .reindex([l for _, _, l in bands]).fillna(0)
+                  .reset_index(name="amount"))
+        mon = deliv_date[still_owed.index].dt.month.map(
+            lambda m: MONTHS[m - 1])
+        by_month = (still_owed.assign(delivered=mon)
+                    .groupby("delivered", observed=True)["revenue"].sum()
+                    .reset_index(name="amount")
+                    .sort_values("amount", ascending=False))
+
+    # ---- open items, for reconciliation
+    open_receivable = pd.DataFrame()
+    if len(still_owed):
+        ref = pd.Timestamp(min(date.today(), scope.end))
+        open_receivable = (still_owed.assign(
+            delivered_on=deliv_date[still_owed.index].dt.date,
+            days=(ref - deliv_date[still_owed.index].dt.normalize()).dt.days)
+            .groupby("order", observed=True)
+            .agg(market=("market", "first"),
+                 delivered_on=("delivered_on", "min"),
+                 days=("days", "max"), amount=("revenue", "sum"),
+                 boxes=("units", "sum"), channel=("channel", "first"))
+            .reset_index().sort_values("days", ascending=False))
+
+    return {
+        "money": {
+            "opening": opening_money, "delivered": delivered_money,
+            "collected": collected_money, "closing": closing_money,
+            "collected_prior": collected_prior,
+            "collected_current": collected_money - collected_prior,
+        },
+        "boxes": {
+            "opening": opening_boxes, "ordered": ordered_boxes,
+            "delivered": delivered_boxes, "cancelled": cancelled_boxes,
+            "closing": closing_boxes,
+        },
+        "orders_delivered": int(d.loc[del_in, "order"].nunique()),
+        "orders_delivered_prior_month": int(
+            d.loc[del_in & (d["ts"] < start), "order"].nunique()),
+        "sku": sku, "ageing": ageing, "by_delivery_month": by_month,
+        "open_receivable": open_receivable,
+        "no_delivery_stamp": no_deliv_stamp,
+        "no_payment_stamp": no_pay_stamp,
+        "paid_before_delivery": early_pay,
+        "period": scope.label,
+    }
+
+
+def check_closeout(co: dict, tolerance: float = 0.01) -> list[str]:
+    """Both schedules must tie, and the delivery must agree across them.
+
+    A movement schedule that does not add up is not a schedule, and the two
+    only mean anything together if the same delivery appears in both.
+    """
+    if not co:
+        return []
+    problems = []
+    m, b = co["money"], co["boxes"]
+
+    calc = m["opening"] + m["delivered"] - m["collected"]
+    if abs(calc - m["closing"]) > max(1.0, abs(m["closing"]) * tolerance):
+        problems.append(
+            f"receivable does not tie: {calc:,.2f} against {m['closing']:,.2f}")
+
+    calc_b = b["opening"] + b["ordered"] - b["delivered"]
+    if abs(calc_b - b["closing"]) > max(0.5, abs(b["closing"]) * tolerance):
+        problems.append(
+            f"order book does not tie: {calc_b:,.1f} against {b['closing']:,.1f}")
+
+    if abs(m["collected_prior"] + m["collected_current"]
+           - m["collected"]) > max(1.0, m["collected"] * tolerance):
+        problems.append("the split of collected does not sum to collected")
+
+    sku = co.get("sku")
+    if sku is not None and len(sku):
+        for col, total in (("opening", b["opening"]), ("ordered", b["ordered"]),
+                           ("delivered", b["delivered"]),
+                           ("closing", b["closing"])):
+            s = float(sku[col].sum())
+            if abs(s - total) > max(0.5, abs(total) * tolerance):
+                problems.append(
+                    f"SKU {col} sums to {s:,.1f}, schedule says {total:,.1f}")
+
+    if m["closing"] < -1:
+        problems.append(f"closing receivable is negative: {m['closing']:,.2f}")
+    if b["closing"] < -1:
+        problems.append(f"closing order book is negative: {b['closing']:,.1f}")
+
+    return problems
