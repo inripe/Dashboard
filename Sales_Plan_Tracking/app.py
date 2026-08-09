@@ -1311,9 +1311,9 @@ elif view == "Payment":
 
         st.markdown(f"<div class='sec'>Close-out · {co['period']} {YEAR}</div>",
                     unsafe_allow_html=True)
-        st.caption("Revenue recognised on delivery, cash on the payment stamp. "
-                   "Opening balances carry everything outstanding from all "
-                   "prior periods.")
+        st.caption("Revenue and collection are both recognised on the "
+                   "delivery date. Opening balances carry everything "
+                   "outstanding from all prior periods.")
 
         M, B = co["money"], co["boxes"]
         k = st.columns(4)
@@ -1322,7 +1322,8 @@ elif view == "Payment":
         k[1].metric(f"Revenue {CUR}", n(M["delivered"]),
                     "net of discount", delta_color="off")
         k[2].metric(f"Collected {CUR}", n(M["collected"]),
-                    f"paid during {co['period']}", delta_color="off")
+                    f"delivered in {co['period']} and marked paid",
+                    delta_color="off")
         k[3].metric(f"Closing receivable {CUR}", n(M["closing"]),
                     "reconciles to the bank", delta_color="off")
 
@@ -1339,6 +1340,14 @@ elif view == "Payment":
             c1.caption(f"Of the {n(M['collected'])} collected, "
                        f"{n(M['collected_prior'])} was for deliveries made "
                        f"before {scope.start:%d %b}.")
+        share = co.get("payment_stamp_share")
+        if share is not None and share < 0.5:
+            c1.caption(
+                f"Only {share:.0%} of paid orders carry a payment date in "
+                f"Shopify, because cash-on-delivery orders are marked paid by "
+                f"hand. Collection is therefore dated by delivery, so these "
+                f"balances show delivered-but-unpaid status rather than the "
+                f"timing of cash.")
 
         c2.markdown("<div class='sec'>Order book · boxes</div>",
                     unsafe_allow_html=True)

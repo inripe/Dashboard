@@ -2042,15 +2042,23 @@ def closeout(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
     no_deliv_stamp = int((is_delivered & delivered_at.isna()).sum())
 
     is_paid = d["cash"].eq("collected")
-    # Payment cannot precede the delivery that created the receivable. Where
-    # a payment stamp is missing it falls back to the delivery date, and
-    # where it exists but predates delivery — a prepaid order, or a stamp
-    # written before fulfilment — it is pulled forward to the delivery.
-    # Without this a payment lands in the schedule before the delivery it
-    # settles, and the closing balance goes negative.
+
+    # Most cash-on-delivery orders are marked paid by hand and carry no
+    # transaction record, so Shopify does not know when they were paid. The
+    # schedule therefore dates collection by delivery: an order is treated as
+    # collected in the period it was delivered, once it is marked paid.
+    #
+    # The consequence is stated on the page rather than hidden: opening and
+    # closing show delivered-but-unpaid status, not the timing of cash. Using
+    # the sparse payment stamps instead would have covered under a fifth of
+    # the business and left the rest silently mis-dated.
+    #
+    # Where a real payment stamp exists it is still used, but never earlier
+    # than the delivery — a receivable cannot be settled before it exists.
     pay_date = paid_at.where(paid_at.notna(), deliv_date)
     pay_date = pay_date.where(pay_date >= deliv_date, deliv_date)
     no_pay_stamp = int((is_paid & paid_at.isna()).sum())
+    has_pay_stamp = int((is_paid & paid_at.notna()).sum())
     early_pay = int((is_paid & paid_at.notna() & (paid_at < deliv_date)).sum())
 
     lost = d["state"].eq("lost")
@@ -2178,6 +2186,9 @@ def closeout(lines: pd.DataFrame, plan: pd.DataFrame, scope: Scope,
         "open_receivable": open_receivable,
         "no_delivery_stamp": no_deliv_stamp,
         "no_payment_stamp": no_pay_stamp,
+        "has_payment_stamp": has_pay_stamp,
+        "payment_stamp_share": (has_pay_stamp / (has_pay_stamp + no_pay_stamp)
+                                if (has_pay_stamp + no_pay_stamp) else None),
         "paid_before_delivery": early_pay,
         "period": scope.label,
     }
