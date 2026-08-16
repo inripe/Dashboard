@@ -65,7 +65,7 @@ DEFINITIONS = [
     ("Order state", "delivered · open is created, shipped, out for delivery "
                     "or on hold · lost is cancelled, refunded or voided."),
     ("Cash", "collected is delivered and paid · owed is delivered, not paid · "
-             "at risk is neither."),
+             "pending delivery is neither, so it can still be cancelled."),
     ("Cost", "matched to the order date, so cost and revenue are recognised "
              "at the same moment."),
     ("Cost movement", "against plan cost on the cards, against the previous "

@@ -478,7 +478,7 @@ if view == "Management":
          pace=r_pace, pace_label=f"pace {n(R['paced'])}",
          segs=[(f"{n(R['collected'])} collected", R["collected"], "#0F6E56"),
                (f"{n(R['owed'])} owed", R["owed"], "#854F0B"),
-               (f"{n(R['at_risk'] + R['prepaid'])} at risk",
+               (f"{n(R['at_risk'] + R['prepaid'])} pending delivery",
                 R["at_risk"] + R["prepaid"], "#185FA5")],
          footer=f"plan {n(R['plan_full'])} · discount {n(R['discount'])}"
                 + peak(sp_r),
@@ -990,7 +990,8 @@ elif view == "How to read this":
                                "dashed line. Green above means momentum is "
                                "building, grey below means fading."),
             ("Split bar", "On the chain cards it is order state. On revenue "
-                          "it is cash certainty — collected, owed, at risk."),
+                          "it is cash certainty — collected, owed, pending "
+                          "delivery."),
             ("Arrow", "Last 7 days against the 7 before, in points. Colour "
                       "says whether that direction is good."),
             ("Cost strip", "Appears only when dated costs exist and cost has "
@@ -1142,7 +1143,8 @@ elif view in ("Orders", "Units", "Revenue", "Margin"):
                 (f"Revenue {CUR}", n(R["total"]), f"{p(R['total']/R['paced']) if R['paced'] else 'n/a'} of pace"),
                 ("Collected", n(R["collected"]), p(R["collected"]/R["total"] if R["total"] else None)),
                 ("Owed", n(R["owed"]), p(R["owed"]/R["total"] if R["total"] else None)),
-                ("At risk", n(R["at_risk"]), p(R["at_risk"]/R["total"] if R["total"] else None))]):
+                ("Pending delivery", n(R["at_risk"]),
+                 p(R["at_risk"]/R["total"] if R["total"] else None))]):
             strip[i].metric(lab, v, sub, delta_color="off")
     else:
         for i, (lab, v, sub) in enumerate([
@@ -1309,7 +1311,7 @@ elif view == "Payment":
             st.error("The close-out does not tie: " + " · ".join(problems)
                      + ". Do not reconcile against these figures.")
 
-        st.markdown(f"<div class='sec'>Close-out · {co['period']} {YEAR}</div>",
+        st.markdown(f"<div class='sec'>Close-out · {scope.label} {YEAR}</div>",
                     unsafe_allow_html=True)
         st.caption("Revenue and collection are both recognised on the "
                    "delivery date. Opening balances carry everything "
@@ -1322,7 +1324,7 @@ elif view == "Payment":
         k[1].metric(f"Revenue {CUR}", n(M["delivered"]),
                     "net of discount", delta_color="off")
         k[2].metric(f"Collected {CUR}", n(M["collected"]),
-                    f"delivered in {co['period']} and marked paid",
+                    f"delivered in {scope.label} and marked paid",
                     delta_color="off")
         k[3].metric(f"Closing receivable {CUR}", n(M["closing"]),
                     "reconciles to the bank", delta_color="off")
@@ -1351,12 +1353,17 @@ elif view == "Payment":
 
         c2.markdown("<div class='sec'>Order book · boxes</div>",
                     unsafe_allow_html=True)
+        # Rounded to whole boxes before rendering. The shared formatter
+        # treats a box column as an integer, and a float there renders blank
+        # rather than failing loudly.
         table(pd.DataFrame([
-            {"movement": f"Opening · {scope.start:%d %b}", "boxes": B["opening"]},
-            {"movement": "Ordered", "boxes": B["ordered"]},
-            {"movement": "Delivered", "boxes": -B["delivered"]},
-            {"movement": "Cancelled", "boxes": -B["cancelled"]},
-            {"movement": f"Closing · {scope.end:%d %b}", "boxes": B["closing"]},
+            {"movement": f"Opening · {scope.start:%d %b}",
+             "boxes": round(B["opening"])},
+            {"movement": "Ordered", "boxes": round(B["ordered"])},
+            {"movement": "Delivered", "boxes": -round(B["delivered"])},
+            {"movement": "Cancelled", "boxes": -round(B["cancelled"])},
+            {"movement": f"Closing · {scope.end:%d %b}",
+             "boxes": round(B["closing"])},
         ]), into=c2)
         c2.caption(f"The {n(B['delivered'])} boxes delivered here is the same "
                    f"event as the {n(M['delivered'])} {CUR} opposite.")
