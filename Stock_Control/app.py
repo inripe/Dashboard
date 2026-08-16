@@ -1,5 +1,6 @@
 import streamlit as st, pandas as pd, numpy as np, altair as alt, os
 import engine
+import sharepoint_loader as sp
 
 st.set_page_config(page_title="Inripe Stock Control", page_icon="📦", layout="wide")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -13,12 +14,29 @@ thead tr th{background:#f5f5f5!important}
 </style>""", unsafe_allow_html=True)
 
 @st.cache_data(ttl=300, show_spinner="Loading data…")
-def get(path, _mtime):
+def get_local(path, _mtime):
     return engine.load(path)
 
-if not os.path.exists(DATA):
-    st.error(f"Entry file not found: {DATA}"); st.stop()
-ship, moves, count, cfg, errs = get(DATA, os.path.getmtime(DATA))
+@st.cache_data(ttl=300, show_spinner="Loading from SharePoint…")
+def get_sharepoint(_bust):
+    buf, meta = sp.fetch_workbook()
+    return engine.load(buf) + (meta,)
+
+SOURCE, SP_META, SP_ERROR = "local", None, None
+if sp.is_configured():
+    try:
+        ship, moves, count, cfg, errs, SP_META = get_sharepoint(
+            st.session_state.get("_refresh", 0))
+        SOURCE = "sharepoint"
+    except Exception as e:
+        SP_ERROR = str(e)
+
+if SOURCE == "local":
+    if not os.path.exists(DATA):
+        st.error(f"Entry file not found: {DATA}")
+        if SP_ERROR: st.error(f"SharePoint also failed: {SP_ERROR}")
+        st.stop()
+    ship, moves, count, cfg, errs = get_local(DATA, os.path.getmtime(DATA))
 
 # ---------- filters ----------
 st.title("Inripe stock control")
@@ -28,7 +46,21 @@ mkt = f1.selectbox("Market", markets, label_visibility="collapsed")
 shipments = ["All shipments"] + sorted(ship["Shipment ID"].dropna().unique().tolist())
 shp = f2.selectbox("Shipment", shipments, label_visibility="collapsed")
 as_of = pd.Timestamp(f3.date_input("As of", cfg["as_of"].date(), label_visibility="collapsed"))
-f4.caption(f"Last updated {pd.Timestamp.fromtimestamp(os.path.getmtime(DATA)):%d %b %Y · %H:%M}")
+with f4:
+    if SOURCE == "sharepoint":
+        when = pd.to_datetime(SP_META["modified"]).tz_convert(None)
+        who = SP_META.get("modified_by") or "unknown"
+        st.caption(f"SharePoint · edited {when:%d %b %Y · %H:%M} by {who}")
+    else:
+        st.caption(f"Local file · {pd.Timestamp.fromtimestamp(os.path.getmtime(DATA)):%d %b %Y · %H:%M}")
+    if st.button("Refresh", width="content"):
+        st.cache_data.clear()
+        st.session_state["_refresh"] = st.session_state.get("_refresh", 0) + 1
+        st.rerun()
+if SP_ERROR:
+    st.warning(f"SharePoint unavailable, showing the file in the repo instead. {SP_ERROR}")
+elif SOURCE == "local" and not sp.is_configured():
+    st.caption(f"SharePoint not configured yet — missing {', '.join(sp.missing_keys())}")
 
 sf = ship.copy(); mf = moves.copy()
 if mkt != "All markets":
