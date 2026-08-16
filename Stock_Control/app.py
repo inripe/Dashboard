@@ -115,6 +115,32 @@ def delta(df, col, unit=""):
 held_total = cour["Held"].sum() if len(cour) else 0
 oldest = int(stock.loc[stock["Store"] > 0, "AgeDays"].max()) if (stock["Store"] > 0).any() else 0
 
+
+RAMP_BLUE = ["#F2F7FD","#E6F1FB","#CFE4F8","#B5D4F4","#96BEEC","#6FA3E2"]
+RAMP_HEAT = ["#EAF3DE","#F7F0C8","#FAEEDA","#FAC775","#F0997B","#F09595"]
+RAMP_RED  = ["#FCEBEB","#F9DADA","#F7C1C1","#F4AEAE","#F09595","#E88080"]
+
+def _shade(v, lo, hi, ramp):
+    if pd.isna(v) or hi <= lo: return ""
+    i = int(round((float(v)-lo)/(hi-lo)*(len(ramp)-1)))
+    return f"background-color: {ramp[max(0,min(i,len(ramp)-1))]}"
+
+def heat_cols(df, cols, ramp):
+    """Colour specific numeric columns, no matplotlib."""
+    out = pd.DataFrame("", index=df.index, columns=df.columns)
+    for c in cols:
+        v = pd.to_numeric(df[c], errors="coerce")
+        lo, hi = v.min(), v.max()
+        out[c] = [_shade(x, lo, hi, ramp) for x in v]
+    return out
+
+def heat_all(df, ramp):
+    """Colour the whole frame on one shared scale."""
+    v = df.apply(pd.to_numeric, errors="coerce")
+    lo, hi = np.nanmin(v.values), np.nanmax(v.values)
+    return pd.DataFrame([[_shade(x, lo, hi, ramp) for x in row] for row in v.values],
+                        index=df.index, columns=df.columns)
+
 EMPTY = len(sf) == 0
 T1, T2, T3, T4, T5 = st.tabs(["Overview", "Stock", "Shipments", "Couriers", "Losses & check"])
 if EMPTY:
@@ -158,8 +184,10 @@ with T1:
                                  aggfunc="sum", fill_value=0))
         piv["Total"] = piv.sum(axis=1)
         piv.loc["Total"] = piv.sum()
-        st.dataframe(piv.style.format("{:,.0f}")
-                     .background_gradient(cmap="Blues", subset=piv.columns[:-1], axis=None),
+        body = piv.iloc[:-1, :-1]
+        sty = pd.DataFrame("", index=piv.index, columns=piv.columns)
+        sty.loc[body.index, body.columns] = heat_all(body, RAMP_BLUE).values
+        st.dataframe(piv.style.format("{:,.0f}").apply(lambda _: sty, axis=None),
                      use_container_width=True)
     else:
         st.info("No stock in the current filter.")
@@ -186,7 +214,7 @@ with T2:
     if len(ag):
         ag["Arrival"] = ag["Arrival"].dt.strftime("%d %b")
         st.dataframe(ag.style.format({"Qty":"{:,.0f}"})
-                     .background_gradient(cmap="YlOrRd", subset=["Days"]),
+                     .apply(lambda d: heat_cols(d, ["Days"], RAMP_HEAT), axis=None),
                      use_container_width=True, hide_index=True)
         st.altair_chart(
             alt.Chart(ag).mark_bar().encode(
@@ -281,7 +309,7 @@ with T4:
             "OrdersHanded":"{:,.0f}","OrdersDelivered":"{:,.0f}","OrdersReturned":"{:,.0f}",
             "OrdersOutstanding":"{:,.0f}","QtyOut":"{:,.0f}","QtyHeld":"{:,.0f}",
             "MaxDays":"{:,.0f}","Return %":"{:.1f}%"}, na_rep="—")
-            .background_gradient(cmap="Reds", subset=["Return %"]),
+            .apply(lambda d: heat_cols(d, ["Return %"], RAMP_RED), axis=None),
             use_container_width=True, hide_index=True)
 
         c1, c2 = st.columns(2)
@@ -358,7 +386,7 @@ with T5:
     li["Loss %"] = np.where(li["Received"]>0, li["Total loss"]/li["Received"]*100, 0)
     st.dataframe(li.style.format({c:"{:,.0f}" for c in
         ["Received","Customs","Scrap","ReturnScrap","Total loss"]} | {"Loss %":"{:.1f}%"})
-        .background_gradient(cmap="Reds", subset=["Loss %"]),
+        .apply(lambda d: heat_cols(d, ["Loss %"], RAMP_RED), axis=None),
         use_container_width=True, hide_index=True)
 
     st.divider()
