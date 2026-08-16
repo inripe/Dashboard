@@ -30,6 +30,13 @@ def load(path_or_buf):
                              "Market"].astype(str).tolist()
     except Exception:
         market_list = []
+    try:
+        it = xl.parse("MASTER", header=14, usecols=[1,2])
+        it.columns = ["Item Code","Item Name"]
+        item_names = dict(zip(it["Item Code"].dropna().astype(str),
+                              it["Item Name"].fillna("").astype(str)))
+    except Exception:
+        item_names = {}
     settings = {
         "as_of": pd.to_datetime(cfg.get("As-Of Date", pd.Timestamp.today())),
         "courier_limit": float(cfg.get("Courier holding limit (days)", 3)),
@@ -37,6 +44,7 @@ def load(path_or_buf):
         "loss_target": float(cfg.get("Loss % target", 0.03)),
         "var_tol": float(cfg.get("Count variance tolerance", 0.02)),
         "markets": market_list,
+        "item_names": item_names,
     }
     errors = pd.concat([
         _err(ship,"SHIPMENTS"), _err(moves,"MOVES"), _err(count,"COUNT")
@@ -92,7 +100,8 @@ def clearance_by_shipment(ship, moves, as_of, settings):
     hdr["Scrap"]     = g("Scrap","Qty") + g("Return to Scrap","Qty")
     hdr["Delivered"] = g("Delivered","Qty")
     hdr["Returned"]  = g("Returned","Qty")
-    hdr["Outstanding"] = hdr["Received"] - hdr["Delivered"] - hdr["Scrap"]
+    hdr["CountAdj"] = g("Count Adjustment","Qty")
+    hdr["Outstanding"] = (hdr["Received"] - hdr["Delivered"] - hdr["Scrap"] + hdr["CountAdj"])
     hdr["DaysOpen"] = (as_of - hdr["Arrival"]).dt.days
     dl = moves[moves["Movement"]=="Delivered"]
     if len(dl):

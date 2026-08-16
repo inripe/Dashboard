@@ -6,33 +6,57 @@ st.set_page_config(page_title="Inripe · Inventory Control", page_icon="📦", l
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("INRIPE_FILE", os.path.join(HERE, "INRIPE_Stock_Entry_v1.xlsx"))
 
-NAVY="#1F3864"; ACC="#2E75B6"; INK="#26324A"; MUT="#7A879C"
+NAVY="#13233B"; PANEL="#FFFFFF"; LINE="#E2E8F2"; INK="#1E2A3D"; MUT="#6B7A91"
+ACC="#2E75B6"; GRN="#1D8A5E"; RED="#C0392B"; AMB="#C77E1B"; VIO="#6C4FBF"
+
 st.markdown(f"""<style>
-.block-container{{padding-top:1.6rem;padding-bottom:3rem;max-width:1500px}}
-h1,h2,h3{{color:{INK};letter-spacing:-.01em}}
-h1{{font-weight:600!important;font-size:1.9rem!important;margin-bottom:.1rem!important}}
-h2{{font-weight:600!important;font-size:1.05rem!important;margin:1.6rem 0 .5rem!important;
-   text-transform:uppercase;letter-spacing:.06em;color:{MUT}!important}}
-h3{{font-weight:600!important;font-size:.95rem!important}}
-div[data-testid="stMetric"]{{background:#FFFFFF;border:1px solid #E3E8F0;border-left:3px solid {ACC};
-   border-radius:10px;padding:.75rem .95rem}}
-div[data-testid="stMetricLabel"] p{{font-size:.72rem!important;color:{MUT}!important;
-   text-transform:uppercase;letter-spacing:.05em;font-weight:600}}
-div[data-testid="stMetricValue"]{{font-size:1.75rem!important;font-weight:600!important;color:{INK}}}
-div[data-testid="stMetricDelta"]{{font-size:.75rem!important}}
-button[data-baseweb="tab"]{{font-weight:600;font-size:.9rem;letter-spacing:.01em}}
+.block-container{{padding-top:0rem;padding-bottom:3rem;max-width:1500px}}
+h2{{font-size:.78rem!important;font-weight:600!important;text-transform:uppercase;
+   letter-spacing:.09em;color:{MUT}!important;margin:1.7rem 0 .6rem!important}}
+h3{{font-size:.95rem!important;font-weight:600!important;margin:1rem 0 .4rem!important;color:{INK}}}
+button[data-baseweb="tab"]{{font-weight:600;font-size:.88rem}}
 div[data-baseweb="tab-highlight"]{{background:{ACC}!important}}
-div[data-testid="stTabs"] div[data-baseweb="tab-list"]{{gap:.4rem;border-bottom:1px solid #E3E8F0}}
-thead tr th{{background:#F4F7FB!important;color:{INK}!important;font-weight:600!important;
-   text-transform:uppercase;font-size:.7rem!important;letter-spacing:.04em}}
-div[data-testid="stDataFrame"]{{border:1px solid #E3E8F0;border-radius:10px}}
-div[data-testid="stAlert"]{{border-radius:10px;border-left-width:4px}}
-hr{{margin:1.6rem 0;border-color:#E3E8F0}}
-.spark-lbl{{font-size:.7rem;color:{MUT};text-transform:uppercase;letter-spacing:.05em;font-weight:600}}
-.spark-d{{float:right;font-weight:600;letter-spacing:0;text-transform:none}}
-.hdr-sub{{color:{MUT};font-size:.82rem;margin:-.2rem 0 .9rem}}
-.card{{background:#FFFFFF;border:1px solid #E3E8F0;border-radius:10px;padding:.7rem .9rem}}
+div[data-baseweb="tab-list"]{{gap:.3rem;border-bottom:1px solid {LINE}}}
+.stButton>button{{border-radius:8px;font-size:.8rem;border:1px solid {LINE}}}
+.stButton>button:hover{{border-color:{ACC};color:{ACC}}}
+hr{{border-color:{LINE}}}
+[data-testid="stHeaderActionElements"]{{display:none}}
+.band{{background:{NAVY};margin:0 -5rem 1.1rem;padding:1.15rem 5rem .95rem}}
+.hdr{{display:flex;align-items:center;gap:14px}}
+.hdr h1{{font-size:1.55rem;font-weight:600;margin:0;color:#FFFFFF;letter-spacing:-.01em}}
+.band .sub{{color:#9BB0CC;font-size:.79rem;margin:.25rem 0 0 58px}}
+.kpi{{background:{PANEL};border:1px solid {LINE};border-left:3px solid {ACC};
+   border-radius:10px;padding:.7rem .85rem}}
+.kpi .l{{font-size:.66rem;color:{MUT};text-transform:uppercase;letter-spacing:.07em;font-weight:600}}
+.kpi .v{{font-size:1.7rem;font-weight:600;line-height:1.25;color:{INK}}}
+.kpi .n{{font-size:.66rem;color:{MUT}}}
+.sl{{font-size:.66rem;color:{MUT};text-transform:uppercase;letter-spacing:.07em;font-weight:600}}
+.sd{{float:right;font-weight:600;letter-spacing:0;text-transform:none}}
+.tw{{overflow-x:auto;border:1px solid {LINE};border-radius:10px;background:{PANEL}}}
+.tw table{{width:100%;border-collapse:collapse;font-size:.82rem}}
+.tw th{{background:#F1F5FA;color:{MUT};font-weight:600;text-transform:uppercase;
+   font-size:.65rem;letter-spacing:.06em;padding:.55rem .7rem;text-align:right;
+   white-space:nowrap;border-bottom:1px solid {LINE}}}
+.tw th.blank,.tw th.index_name,.tw th.row_heading,.tw th.col0{{text-align:left}}
+.tw td{{padding:.5rem .7rem;text-align:right;border-bottom:1px solid #EEF2F8;color:{INK};white-space:nowrap}}
+.tw th.row_heading,.tw td:first-child{{text-align:left;font-weight:500}}
+.tw tbody tr:last-child td{{border-bottom:none}}
+.tw tbody tr:hover td{{background:#F5F8FC}}
+.pill{{display:inline-block;padding:.12rem .5rem;border-radius:999px;font-size:.68rem;font-weight:600}}
+.note{{color:{MUT};font-size:.72rem;margin-top:.35rem}}
+.card{{background:{PANEL};border:1px solid {LINE};border-radius:10px;padding:.8rem .95rem;color:{INK}}}
 </style>""", unsafe_allow_html=True)
+
+LOGO = f"""<svg width="44" height="44" viewBox="0 0 48 48" fill="none">
+<rect x="1" y="1" width="46" height="46" rx="11" fill="#1B3050" stroke="#2A456B"/>
+<path d="M24 11 L35 16.5 L24 22 L13 16.5 Z" fill="#6BA7E8"/>
+<path d="M13 19.5 L24 25 L24 37 L13 31.5 Z" fill="#6BA7E8" opacity=".42"/>
+<path d="M35 19.5 L24 25 L24 37 L35 31.5 Z" fill="#6BA7E8" opacity=".68"/>
+<path d="M5 26 h4 M5 30 h6 M5 34 h3" stroke="#4FD1A5" stroke-width="1.6" stroke-linecap="round"/>
+</svg>"""
+st.markdown(f'<div class="band"><div class="hdr">{LOGO}<h1>Inripe · Inventory Control</h1></div>'
+            f'<div class="sub">Shipments, stock, couriers and losses across all markets</div></div>',
+            unsafe_allow_html=True)
 
 @st.cache_data(ttl=300, show_spinner="Loading data…")
 def get_local(path, _mtime):
@@ -46,12 +70,10 @@ def get_sharepoint(_bust):
 SOURCE, SP_META, SP_ERROR = "local", None, None
 if sp.is_configured():
     try:
-        ship, moves, count, cfg, errs, SP_META = get_sharepoint(
-            st.session_state.get("_refresh", 0))
+        ship, moves, count, cfg, errs, SP_META = get_sharepoint(st.session_state.get("_refresh", 0))
         SOURCE = "sharepoint"
     except Exception as e:
         SP_ERROR = str(e)
-
 if SOURCE == "local":
     if not os.path.exists(DATA):
         st.error(f"Entry file not found: {DATA}")
@@ -59,11 +81,7 @@ if SOURCE == "local":
         st.stop()
     ship, moves, count, cfg, errs = get_local(DATA, os.path.getmtime(DATA))
 
-# ---------- filters ----------
-st.markdown("# Inripe · Inventory Control")
-st.markdown('<div class="hdr-sub">Shipment, stock, courier and loss control across all markets</div>',
-            unsafe_allow_html=True)
-f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.4, 2])
+f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.3, 2.1])
 markets = ["All markets"] + (cfg["markets"] or sorted(ship["Market"].dropna().unique().tolist()))
 mkt = f1.selectbox("Market", markets, label_visibility="collapsed")
 shipments = ["All shipments"] + sorted(ship["Shipment ID"].dropna().unique().tolist())
@@ -72,36 +90,90 @@ as_of = pd.Timestamp(f3.date_input("As of", cfg["as_of"].date(), label_visibilit
 with f4:
     if SOURCE == "sharepoint":
         when = pd.to_datetime(SP_META["modified"]).tz_convert(None)
-        who = SP_META.get("modified_by") or "unknown"
-        st.caption(f"SharePoint · edited {when:%d %b %Y · %H:%M} by {who}")
+        st.caption(f"SharePoint · edited {when:%d %b %Y · %H:%M} by {SP_META.get('modified_by') or 'unknown'}")
     else:
         st.caption(f"Local file · {pd.Timestamp.fromtimestamp(os.path.getmtime(DATA)):%d %b %Y · %H:%M}")
-    if st.button("Refresh", width="content"):
+    if st.button("Refresh"):
         st.cache_data.clear()
         st.session_state["_refresh"] = st.session_state.get("_refresh", 0) + 1
         st.rerun()
 if SP_ERROR:
     st.warning(f"SharePoint unavailable, showing the file in the repo instead. {SP_ERROR}")
-elif SOURCE == "local" and not sp.is_configured():
-    st.caption(f"SharePoint not configured yet — missing {', '.join(sp.missing_keys())}")
 
 sf = ship.copy(); mf = moves.copy()
-if mkt != "All markets":
-    sf = sf[sf["Market"] == mkt]; mf = mf[mf["Market"] == mkt]
-if shp != "All shipments":
-    sf = sf[sf["Shipment ID"] == shp]; mf = mf[mf["Shipment"] == shp]
+if mkt != "All markets": sf = sf[sf["Market"] == mkt]; mf = mf[mf["Market"] == mkt]
+if shp != "All shipments": sf = sf[sf["Shipment ID"] == shp]; mf = mf[mf["Shipment"] == shp]
 mf = mf[mf["Date"] <= as_of]
 cf = count[count["Shipment"].isin(sf["Shipment ID"])] if len(sf) else count.iloc[0:0]
 
+NAMES = cfg.get("item_names", {})
+nm = lambda code: NAMES.get(code, code)
 stock = engine.stock_by_item(sf, mf, as_of)
+stock["ItemName"] = stock["Item"].map(nm)
 clear = engine.clearance_by_shipment(sf, mf, as_of, cfg)
 cour  = engine.courier_positions(sf, mf, as_of, cfg)
 var   = engine.variance(stock, cf)
 
-# ---------- exceptions ----------
+# ---------------- shared helpers ----------------
+R_BLUE=["#F2F7FD","#E4EFFA","#CFE2F6","#B4D2F1","#95BEEA","#74A8E2"]
+R_HEAT=["#E9F4E4","#F4F3D6","#FBEEDA","#F9DCB4","#F5BFA0","#F0A79E"]
+R_RED =["#FCEEEE","#FADFDF","#F7CBCB","#F3B6B6","#EE9F9F","#E88686"]
+
+def _shade(v, lo, hi, ramp):
+    if pd.isna(v) or hi <= lo: return ""
+    i = int(round((float(v)-lo)/(hi-lo)*(len(ramp)-1)))
+    return f"background-color: {ramp[max(0,min(i,len(ramp)-1))]}"
+
+def heat_cols(df, cols, ramp):
+    out = pd.DataFrame("", index=df.index, columns=df.columns)
+    for c in cols:
+        v = pd.to_numeric(df[c], errors="coerce"); lo, hi = v.min(), v.max()
+        out[c] = [_shade(x, lo, hi, ramp) for x in v]
+    return out
+
+def heat_all(df, ramp):
+    v = df.apply(pd.to_numeric, errors="coerce")
+    lo, hi = np.nanmin(v.values), np.nanmax(v.values)
+    return pd.DataFrame([[_shade(x, lo, hi, ramp) for x in r] for r in v.values],
+                        index=df.index, columns=df.columns)
+
+def table(styler, index=False):
+    """Text columns align left, numbers right — headers follow their column."""
+    s = styler if index else styler.hide(axis="index")
+    df = s.data
+    txt = [i for i, c in enumerate(df.columns)
+           if df[c].dtype == object or not pd.api.types.is_numeric_dtype(df[c])]
+    if txt:
+        s = s.set_properties(subset=[df.columns[i] for i in txt], **{"text-align": "left"})
+        s = s.set_table_styles([{"selector": f"th.col{i}",
+                                 "props": [("text-align", "left")]} for i in txt],
+                               overwrite=False)
+    st.markdown(f'<div class="tw">{s.to_html()}</div>', unsafe_allow_html=True)
+
+def kpi(col, label, value, note=""):
+    col.markdown(f'<div class="kpi"><div class="l">{label}</div>'
+                 f'<div class="v">{value}</div><div class="n">{note}</div></div>',
+                 unsafe_allow_html=True)
+
+def dark(ch, h=280):
+    return (ch.properties(height=h, background="transparent")
+              .configure_view(strokeWidth=0)
+              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                              labelColor=MUT, titleColor=MUT, labelFontSize=11, titleFontSize=11)
+              .configure_legend(labelColor=MUT, titleColor=MUT, labelFontSize=11))
+
+def pill(text, kind):
+    c = {"ok":(GRN,"#E6F4EC"), "warn":(AMB,"#FCF0DC"), "bad":(RED,"#FBE9E7"), "mut":(MUT,"#EEF2F8")}[kind]
+    return f'<span class="pill" style="color:{c[0]};background:{c[1]}">{text}</span>'
+
+def _short(t, n=3):
+    parts=[p for p in str(t).split(", ") if p]
+    if len(parts)<=n: return ", ".join(parts)
+    return ", ".join(parts[:n]) + f" … and {len(parts)-n} more"
+
 def build_exceptions():
-    rows = []
-    a = lambda w,c,d,p: rows.append({"What":w,"Count":int(c),"Where":d,"Priority":p})
+    rows=[]
+    a=lambda w,c,d,p: rows.append({"Exception":w,"Count":int(c),"Where":d,"Priority":p})
     held = cour[cour["Flag"]=="Holding too long"] if len(cour) else cour
     a("Courier holding beyond limit", len(held),
       ", ".join(f"{r.Courier} · {r.Shipment} · {int(r.DaysSince)}d" for r in held.itertuples()), "High")
@@ -110,14 +182,14 @@ def build_exceptions():
       ", ".join(f"{r.Shipment} · {int(r.Outstanding)} boxes" for r in od.itertuples()), "High")
     vv = var[var["VarPct"].abs() > cfg["var_tol"]] if len(var) else var
     a("Physical count variance", len(vv),
-      ", ".join(f"{r.Shipment} · {r.Item} · {int(r.Var):+d}" for r in vv.itertuples()), "Med")
+      ", ".join(f"{r.Shipment} · {nm(r.Item)} · {int(r.Var):+d}" for r in vv.itertuples()), "Med")
     neg = stock[stock["Store"] < 0]
-    a("Negative stock", len(neg), ", ".join(f"{r.Shipment} · {r.Item}" for r in neg.itertuples()), "High")
+    a("Negative stock", len(neg), ", ".join(f"{r.Shipment} · {nm(r.Item)}" for r in neg.itertuples()), "High")
     qa = stock[stock["QA"].round(6) != 0]
-    a("Stock balance error", len(qa), ", ".join(f"{r.Shipment} · {r.Item}" for r in qa.itertuples()), "High")
+    a("Stock balance error", len(qa), ", ".join(f"{r.Shipment} · {nm(r.Item)}" for r in qa.itertuples()), "High")
     sd = stock[stock["ShipDiff"].round(6) != 0]
     a("Shipment quantity unexplained", len(sd),
-      ", ".join(f"{r.Shipment} · {r.Item} · {int(r.ShipDiff):+d}" for r in sd.itertuples()), "High")
+      ", ".join(f"{r.Shipment} · {nm(r.Item)} · {int(r.ShipDiff):+d}" for r in sd.itertuples()), "High")
     ov = cour[cour["Flag"]=="Over-delivered"] if len(cour) else cour
     a("Courier over-delivered", len(ov), ", ".join(f"{r.Courier} · {r.Shipment}" for r in ov.itertuples()), "High")
     oc = cour[cour["Flag"]=="Order count error"] if len(cour) else cour
@@ -125,387 +197,450 @@ def build_exceptions():
     rq = (mf.loc[mf.Movement=="Returned","Qty"].sum()
           - mf.loc[mf.Movement=="Return to Saleable","Qty"].sum()
           - mf.loc[mf.Movement=="Return to Scrap","Qty"].sum())
-    a("Returns not split to item", 1 if abs(rq) > 0.001 else 0, f"{rq:+.0f} boxes unaccounted" if rq else "", "Med")
+    a("Returns not split to item", 1 if abs(rq) > .001 else 0, f"{rq:+.0f} boxes unaccounted" if rq else "", "Med")
     a("Rows with entry errors", len(errs), f"{len(errs)} rows across the logs", "High")
     return pd.DataFrame(rows)
 
-exc = build_exceptions()
-open_exc = exc[exc["Count"] > 0]
-
-# ---------- history for sparklines ----------
 def history(days=30):
-    end = as_of; start = end - pd.Timedelta(days=days-1)
-    idx = pd.date_range(start, end, freq="D")
-    out = pd.DataFrame(index=idx)
-    q = lambda mt: mf[mf.Movement==mt].groupby("Date")["Qty"].sum().reindex(idx, fill_value=0)
-    rec, scr, tos, adj, tc = q("Received"), q("Scrap"), q("Return to Saleable"), q("Count Adjustment"), q("To Courier")
+    """True levels: cumulate from the first ever movement, then show the last N days."""
+    if mf.empty:
+        return pd.DataFrame({"Date": [as_of], "Available": [0], "Delivered": [0],
+                             "LossPct": [np.nan], "Held": [0]})
+    full = pd.date_range(mf["Date"].min(), as_of, freq="D")
+    q = lambda mt: mf[mf.Movement == mt].groupby("Date")["Qty"].sum().reindex(full, fill_value=0)
+    rec, scr, tos = q("Received"), q("Scrap"), q("Return to Saleable")
+    adj, tc, dlv, ret = q("Count Adjustment"), q("To Courier"), q("Delivered"), q("Returned")
+    out = pd.DataFrame(index=full)
     out["Available"] = (rec - scr + tos + adj - tc).cumsum()
-    out["Delivered"] = q("Delivered")
-    cum_loss = (scr + q("Customs / Loss") + q("Return to Scrap")).cumsum()
-    cum_rec = rec.cumsum()
-    out["LossPct"] = np.where(cum_rec > 0, cum_loss/cum_rec*100, np.nan)
-    out["Held"] = (tc - q("Delivered") - q("Returned")).cumsum()
-    return out.reset_index(names="Date")
+    out["Delivered"] = dlv.rolling(7, min_periods=1).mean()
+    cl_ = (scr + q("Customs / Loss") + q("Return to Scrap")).cumsum(); cr = rec.cumsum()
+    out["LossPct"] = np.where(cr > 0, cl_ / cr * 100, np.nan)
+    out["Held"] = (tc - dlv - ret).cumsum()
+    return out.tail(days).reset_index(names="Date")
 
-hist = history()
-
-def spark(df, col, color, pct=False):
-    d = df.dropna(subset=[col])
-    if d.empty or d[col].nunique() <= 1:
-        return alt.Chart(pd.DataFrame({"x":[0],"y":[0]})).mark_point(opacity=0).encode(x="x",y="y").properties(height=46)
+def spark(df,col,color):
+    d=df.dropna(subset=[col])
+    if d.empty or d[col].nunique()<=1 or len(d)<2:
+        return (alt.Chart(pd.DataFrame({"x":[0],"y":[0]})).mark_point(opacity=0)
+                .encode(x=alt.X("x:Q",axis=None), y=alt.Y("y:Q",axis=None))
+                .properties(height=42, background="transparent").configure_view(strokeWidth=0))
     return (alt.Chart(d).mark_line(color=color, strokeWidth=2, interpolate="monotone")
-            .encode(x=alt.X("Date:T", axis=None),
-                    y=alt.Y(f"{col}:Q", axis=None, scale=alt.Scale(zero=False)),
-                    tooltip=[alt.Tooltip("Date:T", format="%d %b"),
-                             alt.Tooltip(f"{col}:Q", format=".1f" if pct else ".0f")])
-            .properties(height=44).configure_view(strokeWidth=0))
+            .encode(x=alt.X("Date:T",axis=None), y=alt.Y(f"{col}:Q",axis=None,scale=alt.Scale(zero=False)),
+                    tooltip=[alt.Tooltip("Date:T",format="%d %b"),alt.Tooltip(f"{col}:Q",format=".1f")])
+            .properties(height=42, background="transparent").configure_view(strokeWidth=0))
 
-def delta(df, col, unit=""):
-    d = df.dropna(subset=[col])
-    if len(d) < 8: return None
-    now, prev = d[col].iloc[-1], d[col].iloc[-8]
-    if prev == 0: return None
+def delta(df,col,unit=""):
+    d=df.dropna(subset=[col])
+    if len(d)<8: return None
+    now,prev=d[col].iloc[-1],d[col].iloc[-8]
+    if prev==0: return None
     return f"{(now-prev)/abs(prev)*100:+.0f}%" if not unit else f"{now-prev:+.1f}{unit}"
 
-held_total = cour["Held"].sum() if len(cour) else 0
-oldest = int(stock.loc[stock["Store"] > 0, "AgeDays"].max()) if (stock["Store"] > 0).any() else 0
-
-
-RAMP_BLUE = ["#F2F7FD","#E6F1FB","#CFE4F8","#B5D4F4","#96BEEC","#6FA3E2"]
-RAMP_HEAT = ["#EAF3DE","#F7F0C8","#FAEEDA","#FAC775","#F0997B","#F09595"]
-RAMP_RED  = ["#FCEBEB","#F9DADA","#F7C1C1","#F4AEAE","#F09595","#E88080"]
-
-def _shade(v, lo, hi, ramp):
-    if pd.isna(v) or hi <= lo: return ""
-    i = int(round((float(v)-lo)/(hi-lo)*(len(ramp)-1)))
-    return f"background-color: {ramp[max(0,min(i,len(ramp)-1))]}"
-
-def heat_cols(df, cols, ramp):
-    """Colour specific numeric columns, no matplotlib."""
-    out = pd.DataFrame("", index=df.index, columns=df.columns)
-    for c in cols:
-        v = pd.to_numeric(df[c], errors="coerce")
-        lo, hi = v.min(), v.max()
-        out[c] = [_shade(x, lo, hi, ramp) for x in v]
-    return out
-
-def heat_all(df, ramp):
-    """Colour the whole frame on one shared scale."""
-    v = df.apply(pd.to_numeric, errors="coerce")
-    lo, hi = np.nanmin(v.values), np.nanmax(v.values)
-    return pd.DataFrame([[_shade(x, lo, hi, ramp) for x in row] for row in v.values],
-                        index=df.index, columns=df.columns)
-
-EMPTY = len(sf) == 0
-T1, T2, T3, T4, T5 = st.tabs(["Overview", "Stock", "Shipments", "Couriers", "Losses & check"])
+EMPTY = len(sf)==0
+TABS = st.tabs(["Overview","Stock","Shipments","Couriers","Losses","Data check","Guide"])
+T1,T2,T3,T4,T5,T6,T7 = TABS
 if EMPTY:
-    for T in (T1, T2, T3, T4, T5):
-        with T:
-            st.info("No shipments match this filter. Choose another market or shipment.")
+    for T in TABS[:-1]:
+        with T: st.info("No shipments match this filter. Choose another market or shipment.")
+    with T7: st.info("Choose a filter with data to see the guide in context.")
     st.stop()
 
-# ============================== TAB 1 · OVERVIEW ==============================
+exc = build_exceptions(); open_exc = exc[exc["Count"]>0]
+hist = history()
+held_total = cour["Held"].sum() if len(cour) else 0
+oldest = int(stock.loc[stock["Store"]>0,"AgeDays"].max()) if (stock["Store"]>0).any() else 0
+
+# ============================ 1 · OVERVIEW ============================
 with T1:
     if len(open_exc):
-        top = open_exc.iloc[0]
-        st.error(f"**{int(open_exc['Count'].sum())} exceptions** — {top['What']}: {top['Where']}")
+        n=int(open_exc["Count"].sum())
+        kinds=" · ".join(f'{r.Exception} ({r.Count})' for r in open_exc.head(3).itertuples())
+        more=f" · +{len(open_exc)-3} more types" if len(open_exc)>3 else ""
+        st.markdown(f'<div class="card" style="border-left:3px solid {RED}">'
+                    f'<b style="color:{RED}">{n} item{"s" if n!=1 else ""} need action</b>'
+                    f'<div class="note">{kinds}{more}</div></div>', unsafe_allow_html=True)
     else:
-        st.success("All controls pass")
+        st.markdown(f'<div class="card" style="border-left:3px solid {GRN}">'
+                    f'<b style="color:{GRN}">All controls pass</b></div>', unsafe_allow_html=True)
+    st.write("")
+    k=st.columns(6)
+    kpi(k[0],"Available to sell",f"{stock['Store'].sum():,.0f}","boxes in store")
+    kpi(k[1],"With couriers",f"{held_total:,.0f}","still Inripe stock")
+    kpi(k[2],"Open shipments",f"{int((clear['Cleared']=='No').sum())}","not fully cleared")
+    kpi(k[3],"Oldest stock",f"{oldest}","days since arrival")
+    kpi(k[4],"Orders outstanding",f"{clear['OrdersOutstanding'].sum():,.0f}","with couriers")
+    kpi(k[5],"Exceptions",f"{int(open_exc['Count'].sum())}","need action")
 
-    k = st.columns(6)
-    k[0].metric("Available to sell", f"{stock['Store'].sum():,.0f}")
-    k[1].metric("With couriers", f"{held_total:,.0f}")
-    k[2].metric("Open shipments", int((clear['Cleared']=='No').sum()))
-    k[3].metric("Oldest stock (days)", oldest)
-    k[4].metric("Orders outstanding", f"{clear['OrdersOutstanding'].sum():,.0f}")
-    k[5].metric("Exceptions", int(open_exc["Count"].sum()))
-
-    st.caption("30-day trend")
-    s = st.columns(4)
-    for col, (label, field, colour, unit, pct) in zip(s, [
-        ("Available", "Available", "#378ADD", "", False),
-        ("Delivered per day", "Delivered", "#1D9E75", "", False),
-        ("Loss % of received", "LossPct", "#E24B4A", "pp", True),
-        ("Boxes with couriers", "Held", "#EF9F27", "", False)]):
+    st.subheader("30-day trend")
+    s=st.columns(4)
+    for col,(lab,fld,c,unit,good_up) in zip(s,[
+        ("Available","Available",ACC,"",True),("Delivered per day (7-day avg)","Delivered",GRN,"",True),
+        ("Loss % of received","LossPct",RED,"pp",False),("Boxes with couriers","Held",AMB,"",False)]):
         with col:
-            d = delta(hist, field, unit)
-            dc = "#1D9E75" if (d and d.startswith("+") and field in ("Available","Delivered")) else \
-                 ("#C0392B" if (d and d.startswith("+") and field in ("LossPct","Held")) else MUT)
-            st.markdown(f"<div class='spark-lbl'>{label}"
-                        f"<span class='spark-d' style='color:{dc}'>{d or ''}</span></div>",
+            d=delta(hist,fld,unit); up=bool(d and d.startswith("+"))
+            dc=(GRN if up==good_up else RED) if d else MUT
+            st.markdown(f'<div class="sl">{lab}<span class="sd" style="color:{dc}">{d or ""}</span></div>',
                         unsafe_allow_html=True)
-            st.altair_chart(spark(hist, field, colour, pct), use_container_width=True)
+            st.altair_chart(spark(hist,fld,c), use_container_width=True)
 
     st.subheader("Available to sell")
-    if len(stock):
-        piv = (stock.pivot_table(index="Item", columns="Market", values="Store",
-                                 aggfunc="sum", fill_value=0))
-        piv["Total"] = piv.sum(axis=1)
-        piv.loc["Total"] = piv.sum()
-        body = piv.iloc[:-1, :-1]
-        sty = pd.DataFrame("", index=piv.index, columns=piv.columns)
-        sty.loc[body.index, body.columns] = heat_all(body, RAMP_BLUE).values
-        st.dataframe(piv.style.format("{:,.0f}").apply(lambda _: sty, axis=None),
-                     use_container_width=True)
-    else:
-        st.info("No stock in the current filter.")
+    piv=stock.pivot_table(index="ItemName",columns="Market",values="Store",aggfunc="sum",fill_value=0)
+    piv.columns.name=None; piv.index.name=None
+    piv["Total"]=piv.sum(axis=1)
+    piv=piv.sort_values("Total",ascending=False)
+    piv.loc["Total"]=piv.sum()
+    piv=piv.reset_index().rename(columns={"index":"Item"})
+    body=piv.iloc[:-1,1:-1]
+    sty=pd.DataFrame("",index=piv.index,columns=piv.columns)
+    sty.loc[body.index,body.columns]=heat_all(body,R_BLUE).values
+    table(piv.style.format({c:"{:,.0f}" for c in piv.columns if c!="Item"})
+             .apply(lambda _:sty,axis=None))
 
-    st.subheader("Top actions")
+    st.subheader("What needs action")
     if len(open_exc):
-        for r in open_exc.head(3).itertuples():
-            st.markdown(f"**{r.What}** ({r.Count}) — {r.Where}")
+        rows=[]
+        for r in open_exc.itertuples():
+            parts=[p for p in str(r.Where).split(", ") if p]
+            if not parts: parts=[""]
+            for i,p in enumerate(parts[:4]):
+                bits=[b.strip() for b in p.split("·")]
+                rows.append({"Priority": r.Priority if i==0 else "",
+                             "What": r.Exception if i==0 else "",
+                             "Where": bits[0] if bits else "",
+                             "Detail": " · ".join(bits[1:]) if len(bits)>1 else ""})
+            if len(parts)>4:
+                rows.append({"Priority":"","What":"","Where":f"+{len(parts)-4} more","Detail":""})
+        act=pd.DataFrame(rows)
+        def _st(d):
+            o=pd.DataFrame("",index=d.index,columns=d.columns)
+            o["Priority"]=[f"color:{RED};font-weight:600" if v=="High"
+                           else (f"color:{AMB};font-weight:600" if v=="Med" else "") for v in d["Priority"]]
+            o["What"]=["font-weight:600" if v else "" for v in d["What"]]
+            return o
+        table(act.style.apply(_st,axis=None))
     else:
-        st.write("Nothing needs action.")
+        st.markdown(f'<div class="card" style="border-left:3px solid {GRN}">'
+                    f'<b style="color:{GRN}">Nothing needs action</b></div>', unsafe_allow_html=True)
 
-# ============================== TAB 2 · STOCK ==============================
+# ============================== 2 · STOCK ==============================
 with T2:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Store stock", f"{stock['Store'].sum():,.0f}")
-    c2.metric("With couriers", f"{held_total:,.0f}")
-    c3.metric("Total owned", f"{stock['Store'].sum()+held_total:,.0f}")
-    c4.metric("Oldest (days)", oldest)
+    k=st.columns(4)
+    kpi(k[0],"Store stock",f"{stock['Store'].sum():,.0f}")
+    kpi(k[1],"With couriers",f"{held_total:,.0f}")
+    kpi(k[2],"Total owned",f"{stock['Store'].sum()+held_total:,.0f}")
+    kpi(k[3],"Oldest",f"{oldest}","days")
 
-    st.subheader("Stock aging")
-    ag = stock[stock["Store"] > 0][["Item","Market","Shipment","Arrival Date","AgeDays","Store"]]
-    ag = ag.sort_values("AgeDays", ascending=False).rename(
+    st.subheader("Stock aging · oldest first")
+    ag=stock[stock["Store"]>0][["ItemName","Market","Shipment","Arrival Date","AgeDays","Store"]]
+    ag=ag.rename(columns={"ItemName":"Item"})
+    ag=ag.sort_values("AgeDays",ascending=False).rename(
         columns={"AgeDays":"Days","Store":"Qty","Arrival Date":"Arrival"})
     if len(ag):
-        ag["Arrival"] = ag["Arrival"].dt.strftime("%d %b")
-        st.dataframe(ag.style.format({"Qty":"{:,.0f}"})
-                     .apply(lambda d: heat_cols(d, ["Days"], RAMP_HEAT), axis=None),
-                     use_container_width=True, hide_index=True)
-        st.altair_chart(
-            alt.Chart(ag).mark_bar().encode(
-                x=alt.X("Qty:Q", title="Boxes"),
-                y=alt.Y("Item:N", title=None, sort="-x"),
-                color=alt.Color("Days:Q", scale=alt.Scale(scheme="yelloworangered"), title="Days"),
-                tooltip=["Item","Market","Shipment","Days","Qty"]
-            ).properties(height=max(130, 36*ag["Item"].nunique())).configure_view(strokeWidth=0)
-              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
-                              labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
-            use_container_width=True)
+        ag["Arrival"]=ag["Arrival"].dt.strftime("%d %b")
+        table(ag.style.format({"Qty":"{:,.0f}"}).apply(lambda d: heat_cols(d,["Days"],R_HEAT),axis=None))
+        st.altair_chart(dark(alt.Chart(ag).mark_bar(cornerRadiusEnd=3).encode(
+            x=alt.X("Qty:Q",title="Boxes"), y=alt.Y("Item:N",title=None,sort="-x"),
+            color=alt.Color("Days:Q",scale=alt.Scale(range=["#B4D2F1","#E9A13B","#C0392B"]),title="Days"),
+            tooltip=["Item","Market","Shipment","Days","Qty"]),
+            h=max(140,38*ag["Item"].nunique())), use_container_width=True)
 
     st.subheader("Movements on the selected day")
-    day = mf[mf["Date"] == as_of]
-    mv = (day.groupby("Movement")["Qty"].sum()
-          .reindex(engine.MV).fillna(0).reset_index())
-    mv = mv[mv["Qty"] != 0]
-    if len(mv):
-        st.dataframe(mv.style.format({"Qty":"{:,.0f}"}), use_container_width=True, hide_index=True)
-    else:
-        st.caption("No movements on this date.")
+    day=mf[mf["Date"]==as_of]
+    mv=day.groupby("Movement")["Qty"].sum().reindex(engine.MV).fillna(0).reset_index()
+    mv=mv[mv["Qty"]!=0]
+    if len(mv): table(mv.style.format({"Qty":"{:,.0f}"}))
+    else: st.markdown(f'<span style="color:{MUT}">No movements on this date.</span>',unsafe_allow_html=True)
 
-# ============================== TAB 3 · SHIPMENTS ==============================
+# ============================ 3 · SHIPMENTS ============================
 with T3:
     st.subheader("Shipment status")
-    disp = clear.copy()
-    disp["Arrival"] = disp["Arrival"].dt.strftime("%d %b")
-    disp["Status"] = np.where(disp["Overdue"], "Overdue",
-                       np.where(disp["Cleared"]=="Yes", "Cleared", "Open"))
-    cols = ["Shipment","Market","Arrival","Received","Scrap","Delivered","Returned",
-            "Outstanding","DaysOpen","Span","Status","OrdersAssigned","OrdersHanded",
-            "OrdersOutstanding","OrdersVsAssigned"]
-    st.dataframe(disp[cols].style.format(
-        {c:"{:,.0f}" for c in ["Received","Scrap","Delivered","Returned","Outstanding",
-                               "DaysOpen","Span","OrdersAssigned","OrdersHanded",
-                               "OrdersOutstanding","OrdersVsAssigned"]}, na_rep="—"),
-        use_container_width=True, hide_index=True)
+    d=clear.copy(); d["Arrival"]=d["Arrival"].dt.strftime("%d %b")
+    d["Status"]=np.where(d["Overdue"],"Overdue",np.where(d["Cleared"]=="Yes","Cleared","Open"))
+    cols=["Shipment","Market","Arrival","Received","Scrap","Delivered","Returned","Outstanding",
+          "DaysOpen","Span","Status","OrdersAssigned","OrdersHanded","OrdersOutstanding","OrdersVsAssigned"]
+    table(d[cols].style.format({c:"{:,.0f}" for c in
+        ["Received","Scrap","Delivered","Returned","Outstanding","DaysOpen","Span",
+         "OrdersAssigned","OrdersHanded","OrdersOutstanding","OrdersVsAssigned"]}, na_rep="—")
+        .apply(lambda x: heat_cols(x,["Outstanding"],R_HEAT),axis=None))
 
     st.subheader("Clearance curve")
-    st.caption(f"Cumulative % of received delivered, by day since arrival. Target {cfg['clear_target']:.0f} days.")
-    dl = mf[mf["Movement"]=="Delivered"].copy()
+    st.markdown(f'<span style="color:{MUT};font-size:.78rem">Cumulative % of received delivered, by day '
+                f'since arrival. Target {cfg["clear_target"]:.0f} days.</span>', unsafe_allow_html=True)
+    dl=mf[mf["Movement"]=="Delivered"].copy()
     if len(dl):
-        arr = clear.set_index("Shipment")["Arrival"]
-        base = clear.set_index("Shipment")["Received"]
-        dl["Day"] = (dl["Date"] - dl["Shipment"].map(arr)).dt.days
-        cur = dl.groupby(["Shipment","Day"])["Qty"].sum().reset_index()
-        cur["Cum"] = cur.groupby("Shipment")["Qty"].cumsum()
-        cur["Pct"] = cur["Cum"] / cur["Shipment"].map(base) * 100
-        st.altair_chart(
-            alt.Chart(cur).mark_line(point=True).encode(
-                x=alt.X("Day:Q", title="Days since arrival"),
-                y=alt.Y("Pct:Q", title="% delivered", scale=alt.Scale(domain=[0,100])),
-                color=alt.Color("Shipment:N", title=None),
-                tooltip=["Shipment","Day",alt.Tooltip("Pct:Q",format=".1f")]
-            ).properties(height=300).configure_view(strokeWidth=0)
-              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
-                              labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
+        arr=clear.set_index("Shipment")["Arrival"]; base=clear.set_index("Shipment")["Received"]
+        dl["Day"]=(dl["Date"]-dl["Shipment"].map(arr)).dt.days
+        cur=dl.groupby(["Shipment","Day"])["Qty"].sum().reset_index()
+        cur["Cum"]=cur.groupby("Shipment")["Qty"].cumsum()
+        cur["Pct"]=cur["Cum"]/cur["Shipment"].map(base)*100
+        st.altair_chart(dark(alt.Chart(cur).mark_line(point=True,strokeWidth=2).encode(
+            x=alt.X("Day:Q",title="Days since arrival"),
+            y=alt.Y("Pct:Q",title="% delivered",scale=alt.Scale(domain=[0,100])),
+            color=alt.Color("Shipment:N",title=None,
+                            scale=alt.Scale(range=[ACC,GRN,AMB,VIO,RED])),
+            tooltip=["Shipment","Day",alt.Tooltip("Pct:Q",format=".1f")]), h=300),
             use_container_width=True)
     else:
-        st.info("No deliveries recorded yet.")
+        st.markdown(f'<span style="color:{MUT}">No deliveries recorded yet.</span>',unsafe_allow_html=True)
 
     st.subheader("Item breakdown")
-    pick = None
-    if len(clear):
-        pick = st.selectbox("Shipment", clear["Shipment"].tolist(), label_visibility="collapsed")
+    pick=None
+    if len(clear): pick=st.selectbox("Shipment",clear["Shipment"].tolist(),label_visibility="collapsed")
     if pick:
-        b = stock[stock["Shipment"]==pick][
-            ["Item","Source","Shipped Qty","Customs","Received","Scrap",
-             "ToSaleable","ToCourier","Store","AgeDays"]]
-        b = b.rename(columns={"Shipped Qty":"Shipped","ToSaleable":"Back to stock",
-                              "ToCourier":"To courier","Store":"In store","AgeDays":"Days"})
-        st.dataframe(b.style.format({c:"{:,.0f}" for c in b.columns if c not in ("Item","Source")}),
-                     use_container_width=True, hide_index=True)
+        b=stock[stock["Shipment"]==pick][["ItemName","Source","Shipped Qty","Customs","Received",
+            "Scrap","ToSaleable","ToCourier","Store","AgeDays"]]
+        b=b.rename(columns={"ItemName":"Item","Shipped Qty":"Shipped","ToSaleable":"Back to stock",
+                            "ToCourier":"To courier","Store":"In store","AgeDays":"Days"})
+        table(b.style.format({c:"{:,.0f}" for c in b.columns if c not in ("Item","Source")}))
 
-# ============================== TAB 4 · COURIERS ==============================
+# ============================ 4 · COURIERS ============================
 with T4:
     if not len(cour):
-        st.info("No courier activity in the current filter.")
+        st.markdown(f'<span style="color:{MUT}">No courier activity in this filter.</span>',unsafe_allow_html=True)
     else:
-        sc = cour.groupby(["Courier","Market"]).agg(
-            OrdersHanded=("OrdersHanded","sum"), OrdersDelivered=("OrdersDelivered","sum"),
-            OrdersReturned=("OrdersReturned","sum"), OrdersOutstanding=("OrdersOutstanding","sum"),
-            QtyOut=("ToCourier","sum"), QtyHeld=("Held","sum"),
-            MaxDays=("DaysSince","max")).reset_index()
-        sc["Return %"] = np.where(sc["OrdersHanded"]>0,
-                                  sc["OrdersReturned"]/sc["OrdersHanded"]*100, 0)
-        sc["Flag"] = np.where(sc["QtyHeld"]<0, "Over-delivered",
-                      np.where((sc["QtyHeld"]>0)&(sc["MaxDays"]>cfg["courier_limit"]),
-                               "Holding too long", "OK"))
-        k = st.columns(4)
-        k[0].metric("Orders handed", f"{sc['OrdersHanded'].sum():,.0f}")
-        k[1].metric("Orders outstanding", f"{sc['OrdersOutstanding'].sum():,.0f}")
-        k[2].metric("Boxes held", f"{sc['QtyHeld'].sum():,.0f}")
-        k[3].metric("Return rate", f"{sc['OrdersReturned'].sum()/max(sc['OrdersHanded'].sum(),1)*100:.1f}%")
+        sc=cour.groupby(["Courier","Market"]).agg(
+            OrdersHanded=("OrdersHanded","sum"),OrdersDelivered=("OrdersDelivered","sum"),
+            OrdersReturned=("OrdersReturned","sum"),OrdersOutstanding=("OrdersOutstanding","sum"),
+            QtyOut=("ToCourier","sum"),QtyHeld=("Held","sum"),MaxDays=("DaysSince","max")).reset_index()
+        sc["Return %"]=np.where(sc["OrdersHanded"]>0,sc["OrdersReturned"]/sc["OrdersHanded"]*100,0)
+        sc["Flag"]=np.where(sc["QtyHeld"]<0,"Over-delivered",
+                    np.where((sc["QtyHeld"]>0)&(sc["MaxDays"]>cfg["courier_limit"]),"Holding too long","OK"))
+        k=st.columns(4)
+        kpi(k[0],"Orders handed",f"{sc['OrdersHanded'].sum():,.0f}")
+        kpi(k[1],"Orders outstanding",f"{sc['OrdersOutstanding'].sum():,.0f}")
+        kpi(k[2],"Boxes held",f"{sc['QtyHeld'].sum():,.0f}")
+        kpi(k[3],"Return rate",f"{sc['OrdersReturned'].sum()/max(sc['OrdersHanded'].sum(),1)*100:.1f}%")
 
         st.subheader("Scorecard")
-        st.dataframe(sc.style.format({
-            "OrdersHanded":"{:,.0f}","OrdersDelivered":"{:,.0f}","OrdersReturned":"{:,.0f}",
-            "OrdersOutstanding":"{:,.0f}","QtyOut":"{:,.0f}","QtyHeld":"{:,.0f}",
-            "MaxDays":"{:,.0f}","Return %":"{:.1f}%"}, na_rep="—")
-            .apply(lambda d: heat_cols(d, ["Return %"], RAMP_RED), axis=None),
-            use_container_width=True, hide_index=True)
+        table(sc.style.format({"OrdersHanded":"{:,.0f}","OrdersDelivered":"{:,.0f}",
+            "OrdersReturned":"{:,.0f}","OrdersOutstanding":"{:,.0f}","QtyOut":"{:,.0f}",
+            "QtyHeld":"{:,.0f}","MaxDays":"{:,.0f}","Return %":"{:.1f}%"}, na_rep="—")
+            .apply(lambda d: heat_cols(d,["Return %"],R_RED),axis=None))
 
-        c1, c2 = st.columns(2)
+        c1,c2=st.columns(2)
         with c1:
             st.subheader("Boxes held now")
-            st.altair_chart(
-                alt.Chart(sc).mark_bar().encode(
-                    x=alt.X("QtyHeld:Q", title="Boxes"),
-                    y=alt.Y("Courier:N", title=None, sort="-x"),
-                    color=alt.condition(alt.datum.MaxDays > cfg["courier_limit"],
-                                        alt.value("#E24B4A"), alt.value("#85B7EB")),
-                    tooltip=["Courier","QtyHeld","MaxDays"]
-                ).properties(height=max(130, 42*len(sc))).configure_view(strokeWidth=0)
-                  .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
-                                  labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
+            st.altair_chart(dark(alt.Chart(sc).mark_bar(cornerRadiusEnd=3).encode(
+                x=alt.X("QtyHeld:Q",title="Boxes"), y=alt.Y("Courier:N",title=None,sort="-x"),
+                color=alt.condition(alt.datum.MaxDays>cfg["courier_limit"],alt.value(RED),alt.value(ACC)),
+                tooltip=["Courier","QtyHeld","MaxDays"]), h=max(140,42*len(sc))),
                 use_container_width=True)
         with c2:
             st.subheader("Open positions")
-            op = cour[cour["Held"] != 0][
-                ["Courier","Shipment","Market","ToCourier","Delivered","Returned","Held","DaysSince"]]
+            op=cour[cour["Held"]!=0][["Courier","Shipment","Market","ToCourier","Delivered",
+                                      "Returned","Held","DaysSince"]]
             if len(op):
-                st.dataframe(op.style.format({c:"{:,.0f}" for c in
-                    ["ToCourier","Delivered","Returned","Held","DaysSince"]}, na_rep="—"),
-                    use_container_width=True, hide_index=True)
+                table(op.style.format({c:"{:,.0f}" for c in
+                    ["ToCourier","Delivered","Returned","Held","DaysSince"]},na_rep="—"))
             else:
-                st.caption("Every courier is clear.")
+                st.markdown(f'<span style="color:{MUT}">Every courier is clear.</span>',unsafe_allow_html=True)
 
-# ============================== TAB 5 · LOSSES & CHECK ==============================
+# ============================= 5 · LOSSES =============================
 with T5:
-    rec = stock["Received"].sum()
-    customs = stock["Customs"].sum(); scrap = stock["Scrap"].sum()
-    rscrap = stock["ReturnScrap"].sum(); total_loss = customs + scrap + rscrap
-    loss_pct = total_loss/rec*100 if rec else 0
-    k = st.columns(4)
-    k[0].metric("Customs / transit", f"{customs:,.0f}")
-    k[1].metric("QC scrap", f"{scrap:,.0f}")
-    k[2].metric("Return scrap", f"{rscrap:,.0f}")
-    k[3].metric("Total loss", f"{total_loss:,.0f}",
-                f"{loss_pct-cfg['loss_target']*100:+.1f}pp vs target", delta_color="inverse")
+    rec=stock["Received"].sum(); customs=stock["Customs"].sum()
+    scrap=stock["Scrap"].sum(); rscrap=stock["ReturnScrap"].sum()
+    total_loss=customs+scrap+rscrap; loss_pct=total_loss/rec*100 if rec else 0
+    k=st.columns(4)
+    kpi(k[0],"Customs / transit",f"{customs:,.0f}","not scrap")
+    kpi(k[1],"QC scrap",f"{scrap:,.0f}")
+    kpi(k[2],"Return scrap",f"{rscrap:,.0f}")
+    kpi(k[3],"Total loss",f"{total_loss:,.0f}",
+        f"{loss_pct:.1f}% of received · target {cfg['loss_target']*100:.0f}%")
 
     st.subheader("Loss % of received")
-    h = hist.dropna(subset=["LossPct"])
+    h=hist.dropna(subset=["LossPct"])
     if len(h):
-        line = alt.Chart(h).mark_line(color="#E24B4A", strokeWidth=2).encode(
-            x=alt.X("Date:T", title=None), y=alt.Y("LossPct:Q", title="% of received"),
-            tooltip=[alt.Tooltip("Date:T",format="%d %b"), alt.Tooltip("LossPct:Q",format=".2f")])
-        tgt = alt.Chart(pd.DataFrame({"y":[cfg["loss_target"]*100]})).mark_rule(
-            color="#888", strokeDash=[5,4]).encode(y="y:Q")
-        st.altair_chart((line+tgt).properties(height=250).configure_view(strokeWidth=0)
-              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
-                              labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
-            use_container_width=True)
+        line=alt.Chart(h).mark_line(color=RED,strokeWidth=2,interpolate="monotone").encode(
+            x=alt.X("Date:T",title=None),y=alt.Y("LossPct:Q",title="% of received"),
+            tooltip=[alt.Tooltip("Date:T",format="%d %b"),alt.Tooltip("LossPct:Q",format=".2f")])
+        tgt=alt.Chart(pd.DataFrame({"y":[cfg["loss_target"]*100]})).mark_rule(
+            color=MUT,strokeDash=[5,4]).encode(y="y:Q")
+        st.altair_chart(dark(line+tgt,h=250), use_container_width=True)
 
-    c1, c2 = st.columns(2)
+    c1,c2=st.columns(2)
     with c1:
         st.subheader("Scrap by reason")
-        sr = mf[mf["Movement"].isin(["Scrap","Return to Scrap"])].groupby("Reason")["Qty"].sum().reset_index()
+        sr=mf[mf["Movement"].isin(["Scrap","Return to Scrap"])].groupby("Reason")["Qty"].sum().reset_index()
         if len(sr):
-            st.altair_chart(alt.Chart(sr).mark_bar(color="#EF9F27").encode(
-                x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
-                tooltip=["Reason","Qty"]).properties(height=max(130,36*len(sr)))
-                  .configure_view(strokeWidth=0)
-                  .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
-                                  labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
-                use_container_width=True)
-        else:
-            st.caption("No scrap recorded.")
+            st.altair_chart(dark(alt.Chart(sr).mark_bar(color=AMB,cornerRadiusEnd=3).encode(
+                x=alt.X("Qty:Q",title="Boxes"),y=alt.Y("Reason:N",title=None,sort="-x"),
+                tooltip=["Reason","Qty"]), h=max(140,36*len(sr))), use_container_width=True)
+        else: st.markdown(f'<span style="color:{MUT}">No scrap recorded.</span>',unsafe_allow_html=True)
     with c2:
         st.subheader("Returns by reason")
-        rr = mf[mf["Movement"]=="Returned"].groupby("Reason")["Qty"].sum().reset_index()
+        rr=mf[mf["Movement"]=="Returned"].groupby("Reason")["Qty"].sum().reset_index()
         if len(rr):
-            st.altair_chart(alt.Chart(rr).mark_bar(color="#D4537E").encode(
-                x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
-                tooltip=["Reason","Qty"]).properties(height=max(130,36*len(rr)))
-                  .configure_view(strokeWidth=0)
-                  .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
-                                  labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
-                use_container_width=True)
-        else:
-            st.caption("No returns recorded.")
+            st.altair_chart(dark(alt.Chart(rr).mark_bar(color=VIO,cornerRadiusEnd=3).encode(
+                x=alt.X("Qty:Q",title="Boxes"),y=alt.Y("Reason:N",title=None,sort="-x"),
+                tooltip=["Reason","Qty"]), h=max(140,36*len(rr))), use_container_width=True)
+        else: st.markdown(f'<span style="color:{MUT}">No returns recorded.</span>',unsafe_allow_html=True)
 
     st.subheader("Loss by item")
-    li = stock.groupby("Item").agg(Received=("Received","sum"), Customs=("Customs","sum"),
-                                   Scrap=("Scrap","sum"), ReturnScrap=("ReturnScrap","sum")).reset_index()
-    li["Total loss"] = li["Customs"]+li["Scrap"]+li["ReturnScrap"]
-    li["Loss %"] = np.where(li["Received"]>0, li["Total loss"]/li["Received"]*100, 0)
-    st.dataframe(li.style.format({c:"{:,.0f}" for c in
+    li=stock.groupby("ItemName").agg(Received=("Received","sum"),Customs=("Customs","sum"),
+        Scrap=("Scrap","sum"),ReturnScrap=("ReturnScrap","sum")).reset_index()
+    li=li.rename(columns={"ItemName":"Item"}).sort_values("Received",ascending=False)
+    li["Total loss"]=li["Customs"]+li["Scrap"]+li["ReturnScrap"]
+    li["Loss %"]=np.where(li["Received"]>0,li["Total loss"]/li["Received"]*100,0)
+    table(li.style.format({c:"{:,.0f}" for c in
         ["Received","Customs","Scrap","ReturnScrap","Total loss"]} | {"Loss %":"{:.1f}%"})
-        .apply(lambda d: heat_cols(d, ["Loss %"], RAMP_RED), axis=None),
-        use_container_width=True, hide_index=True)
+        .apply(lambda d: heat_cols(d,["Loss %"],R_RED),axis=None))
 
-    st.divider()
+# =========================== 6 · DATA CHECK ===========================
+with T6:
+    st.subheader("Is this data trustworthy?")
+    trust_ok = len(errs)==0 and abs(stock["QA"]).sum()<1e-6 and abs(stock["ShipDiff"]).sum()==0
+    if trust_ok:
+        st.markdown(f'<div class="card" style="border-left:3px solid {GRN}">'
+                    f'<b style="color:{GRN}">Data is clean</b>'
+                    f'<div class="note">Every row passed its entry check and every balance reconciles.</div></div>',
+                    unsafe_allow_html=True)
+    else:
+        st.markdown(f'<div class="card" style="border-left:3px solid {RED}">'
+                    f'<b style="color:{RED}">Do not trust these numbers yet</b>'
+                    f'<div class="note">Fix the rows listed below in the Excel file, save, then hit Refresh.</div></div>',
+                    unsafe_allow_html=True)
+    st.write("")
+
+    st.subheader("Entry errors in the Excel file")
+    if len(errs):
+        st.markdown(f'<div class="card" style="border-left:3px solid {RED};margin-bottom:.6rem">'
+                    f'<b style="color:{RED}">{len(errs)} rows need fixing</b>'
+                    f'<div class="note">Open the sheet, go to the row number, read the red Check column.</div></div>',
+                    unsafe_allow_html=True)
+        table(errs.style)
+    else:
+        st.markdown(f'<div class="card">{pill("Clean","ok")} &nbsp;'
+                    f'<span style="color:{MUT}">0 rows flagged across SHIPMENTS, MOVES and COUNT.</span></div>',
+                    unsafe_allow_html=True)
+
     st.subheader("Reconciliation")
-    checks = [
-        ("Shipment", abs(stock["ShipDiff"]).sum() == 0, "shipped = customs + received"),
-        ("Stock", abs(stock["QA"]).sum() < 1e-6, "received − scrap + returns − to courier = store"),
-        ("Courier", (cour["Held"] >= 0).all() if len(cour) else True, "out = delivered + returned + held"),
-        ("Returns", abs(mf.loc[mf.Movement=="Returned","Qty"].sum()
-                        - mf.loc[mf.Movement=="Return to Saleable","Qty"].sum()
-                        - mf.loc[mf.Movement=="Return to Scrap","Qty"].sum()) < 1e-6,
-         "returned = back to stock + scrapped"),
-    ]
-    cc = st.columns(4)
-    for col,(name, ok, note) in zip(cc, checks):
-        bg, fg, mark = ("#EAF6EE","#1D6F45","Balanced") if ok else ("#FDECEC","#B3261E","Off")
-        col.markdown(
-            f"<div style='background:{bg};border-radius:10px;padding:.7rem .85rem'>"
-            f"<div style='font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;"
-            f"font-weight:600;color:{fg};opacity:.8'>{name}</div>"
-            f"<div style='font-size:1.05rem;font-weight:600;color:{fg}'>{mark}</div>"
-            f"<div style='font-size:.68rem;color:{fg};opacity:.75;margin-top:.15rem'>{note}</div></div>",
-            unsafe_allow_html=True)
+    checks=[("Shipment", abs(stock["ShipDiff"]).sum()==0,
+             "shipped = customs + received", f"{stock['Shipped Qty'].sum():,.0f} shipped"),
+            ("Stock", abs(stock["QA"]).sum()<1e-6,
+             "received − scrap + returns − to courier = store", f"{stock['Store'].sum():,.0f} in store"),
+            ("Courier", (cour["Held"]>=0).all() if len(cour) else True,
+             "out = delivered + returned + held", f"{held_total:,.0f} held"),
+            ("Returns", abs(mf.loc[mf.Movement=="Returned","Qty"].sum()
+                            -mf.loc[mf.Movement=="Return to Saleable","Qty"].sum()
+                            -mf.loc[mf.Movement=="Return to Scrap","Qty"].sum())<1e-6,
+             "returned = back to stock + scrapped",
+             f"{mf.loc[mf.Movement=='Returned','Qty'].sum():,.0f} returned")]
+    cc=st.columns(4)
+    for col,(name,ok,note,val) in zip(cc,checks):
+        c,bg=(GRN,"#E6F4EC") if ok else (RED,"#FBE9E7")
+        col.markdown(f'<div class="card" style="border-left:3px solid {c}">'
+                     f'<div class="l" style="font-size:.66rem;color:{MUT};text-transform:uppercase;'
+                     f'letter-spacing:.07em;font-weight:600">{name}</div>'
+                     f'<div style="font-size:1.05rem;font-weight:600;color:{c}">'
+                     f'{"Balanced" if ok else "Off"}</div>'
+                     f'<div class="note">{val}<br>{note}</div></div>', unsafe_allow_html=True)
 
     st.subheader("Exceptions")
-    show = exc.copy(); show["Status"] = np.where(show["Count"]>0, show["Priority"], "clear")
-    st.dataframe(show[["What","Count","Where","Status"]], use_container_width=True, hide_index=True)
+    e=exc.copy()
+    e["Status"]=np.where(e["Count"]>0,e["Priority"],"clear")
+    def _row_style(d):
+        out=pd.DataFrame("",index=d.index,columns=d.columns)
+        for i in d.index:
+            if d.loc[i,"Count"]>0:
+                bg="#FBE9E7" if d.loc[i,"Priority"]=="High" else "#FCF0DC"
+                out.loc[i,:]=f"background-color: {bg}"
+            else:
+                out.loc[i,:]=f"color: {MUT}"
+        return out
+    e["Where"]=e["Where"].map(lambda t: _short(t, 2))
+    table(e[["Exception","Count","Where","Status"]].style.apply(
+        lambda d: _row_style(e).loc[:, ["Exception","Count","Where","Status"]], axis=None))
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Count variance")
-        if len(var):
-            v = var[["Date","Shipment","Item","System","Physical","Var"]].copy()
-            v["Date"] = v["Date"].dt.strftime("%d %b")
-            st.dataframe(v.style.format({c:"{:,.0f}" for c in ["System","Physical","Var"]}),
-                         use_container_width=True, hide_index=True)
-            st.caption("To correct a variance, post a Count Adjustment row in MOVES with a reason.")
-        else:
-            st.caption("No counts recorded.")
-    with c2:
-        st.subheader("Data entry errors")
-        if len(errs):
-            st.error(f"{len(errs)} rows need fixing before this data can be trusted.")
-            st.dataframe(errs, use_container_width=True, hide_index=True)
-        else:
-            st.success("0 rows flagged across SHIPMENTS, MOVES and COUNT.")
+    st.subheader("Physical count variance")
+    if len(var):
+        v=var[["Date","Shipment","Item","System","Physical","Var"]].copy()
+        v["Item"]=v["Item"].map(nm)
+        v["Date"]=v["Date"].dt.strftime("%d %b")
+        table(v.style.format({c:"{:,.0f}" for c in ["System","Physical","Var"]})
+              .apply(lambda d: heat_cols(d.assign(AbsVar=d["Var"].abs()).drop(columns="AbsVar"),
+                                         ["Var"],R_RED),axis=None))
+        st.markdown(f'<div class="note">To correct a variance, post a Count Adjustment row in MOVES '
+                    f'with a reason. A count never changes stock by itself.</div>',unsafe_allow_html=True)
+    else:
+        st.markdown(f'<span style="color:{MUT}">No counts recorded in this filter.</span>',unsafe_allow_html=True)
+
+# ============================== 7 · GUIDE ==============================
+with T7:
+    st.subheader("How this works")
+    st.markdown(f"""<div class="card">
+<b>You type three things in Excel.</b> Everything on this dashboard is calculated from them.<br><br>
+<span style="color:{MUT}">SHIPMENTS</span> — what Egypt sent, one row per shipment and item.<br>
+<span style="color:{MUT}">MOVES</span> — every physical event, one row each. The main log.<br>
+<span style="color:{MUT}">COUNT</span> — the physical stock check, weekly.<br><br>
+<b>Golden rule:</b> stock only ever changes through MOVES. A count never changes stock by itself.
+</div>""", unsafe_allow_html=True)
+
+    st.subheader("The numbers, and how each one is worked out")
+    terms=pd.DataFrame([
+     ["Available to sell","Received − scrap + returns back to stock + count adjustments − sent to courier",
+      "Boxes physically in the store, free to sell today."],
+     ["With couriers","Sent to courier − delivered − returned",
+      "Still your stock. It only stops being yours when it is delivered or scrapped."],
+     ["Total owned","Available + with couriers","Everything Inripe owns in that market."],
+     ["Stock age (days)","Today − the shipment's arrival date",
+      "Returned boxes keep their original age. The clock never resets."],
+     ["Outstanding (shipment)","Received − delivered − scrap",
+      "What is left of that shipment, in the store or on a van."],
+     ["Clearance span","Last delivery date − arrival date",
+      "How many days that shipment took to clear. Lower is better."],
+     ["Orders assigned","Order count entered once per shipment",
+      "Orders the shipment was sent to cover, known at departure."],
+     ["Orders handed","Sum of Courier Handover order counts",
+      "Orders actually given to couriers. Grows as the shipment clears."],
+     ["Orders vs assigned","Orders handed − orders assigned",
+      "Positive means the overstock you shipped ahead captured extra orders."],
+     ["Orders outstanding","Orders handed − delivered − returned","Orders still sitting with a courier."],
+     ["Return %","Orders returned ÷ orders handed",
+      "The courier number that costs you stock and a day of shelf life."],
+     ["Loss %","(customs + QC scrap + return scrap) ÷ received",
+      "Everything that never reached a customer, as a share of what arrived."],
+     ["Count variance","Physical counted − system calculated",
+      "Never overwrites stock. Post a Count Adjustment in MOVES to correct it."],
+    ], columns=["Term","How it is calculated","What it tells you"])
+    table(terms.style)
+
+    st.subheader("The eleven movement types")
+    mtypes=pd.DataFrame([
+     ["Received","item, qty","Goods counted in at the store"],
+     ["Customs / Loss","item, qty","Taken in transit. Not scrap."],
+     ["Scrap","item, qty, reason","Thrown away from store stock"],
+     ["To Courier","item, qty, courier","Handed to a courier"],
+     ["Orders Assigned","orders","Orders the shipment was sent to cover"],
+     ["Courier Handover","orders, courier","Order count given to that courier"],
+     ["Delivered","qty, orders, courier","Reached the customer"],
+     ["Returned","qty, orders, courier, reason","Came back from the courier"],
+     ["Return to Saleable","item, qty","Returned goods that passed QC"],
+     ["Return to Scrap","item, qty, reason","Returned goods that failed QC"],
+     ["Count Adjustment","item, qty, reason","Corrects stock after a physical count"],
+    ], columns=["Movement","What you fill in","What it means"])
+    table(mtypes.style)
+
+    st.subheader("Your daily routine")
+    st.markdown(f"""<div class="card">
+<b>1.</b> New shipment landed? Add its lines on SHIPMENTS first — one row per item.<br>
+<b>2.</b> Type today's events on MOVES, one row each. Pick the Movement first; the Check column
+tells you which fields it needs.<br>
+<b>3.</b> Check every new row shows OK in the Check column.<br>
+<b>4.</b> Save the file in SharePoint.<br>
+<b>5.</b> Come here, press Refresh, and read the Overview tab.<br><br>
+<span style="color:{MUT}">If the Data check tab is red, fix the row it names before trusting any number.</span>
+</div>""", unsafe_allow_html=True)
+
+    st.subheader("Settings behind these numbers")
+    settings=pd.DataFrame([
+     ["Courier holding limit", f"{cfg['courier_limit']:.0f} days",
+      "A courier holding stock longer than this is flagged"],
+     ["Shipment clearance target", f"{cfg['clear_target']:.0f} days",
+      "A shipment still open past this is flagged overdue"],
+     ["Loss % target", f"{cfg['loss_target']*100:.1f}%", "The dashed line on the loss chart"],
+     ["Count variance tolerance", f"{cfg['var_tol']*100:.1f}%",
+      "Variance beyond this raises an exception"],
+    ], columns=["Setting","Current value","What it controls"])
+    table(settings.style)
+    st.markdown(f'<div class="note">All four live on the MASTER sheet of the Excel file. '
+                f'Change them there — not in code.</div>', unsafe_allow_html=True)
