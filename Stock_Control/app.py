@@ -2,7 +2,8 @@ import streamlit as st, pandas as pd, numpy as np, altair as alt, os
 import engine
 
 st.set_page_config(page_title="Inripe Stock Control", page_icon="📦", layout="wide")
-DATA = os.environ.get("INRIPE_FILE", "INRIPE_Stock_Entry_v1.xlsx")
+HERE = os.path.dirname(os.path.abspath(__file__))
+DATA = os.environ.get("INRIPE_FILE", os.path.join(HERE, "INRIPE_Stock_Entry_v1.xlsx"))
 
 st.markdown("""<style>
 .block-container{padding-top:2rem;padding-bottom:2rem;max-width:1400px}
