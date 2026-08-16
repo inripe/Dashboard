@@ -2,15 +2,36 @@ import streamlit as st, pandas as pd, numpy as np, altair as alt, os
 import engine
 import sharepoint_loader as sp
 
-st.set_page_config(page_title="Inripe Stock Control", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Inripe · Inventory Control", page_icon="📦", layout="wide")
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("INRIPE_FILE", os.path.join(HERE, "INRIPE_Stock_Entry_v1.xlsx"))
 
-st.markdown("""<style>
-.block-container{padding-top:2rem;padding-bottom:2rem;max-width:1400px}
-div[data-testid="stMetricValue"]{font-size:1.6rem}
-div[data-testid="stMetricLabel"]{font-size:0.75rem;color:#666}
-thead tr th{background:#f5f5f5!important}
+NAVY="#1F3864"; ACC="#2E75B6"; INK="#26324A"; MUT="#7A879C"
+st.markdown(f"""<style>
+.block-container{{padding-top:1.6rem;padding-bottom:3rem;max-width:1500px}}
+h1,h2,h3{{color:{INK};letter-spacing:-.01em}}
+h1{{font-weight:600!important;font-size:1.9rem!important;margin-bottom:.1rem!important}}
+h2{{font-weight:600!important;font-size:1.05rem!important;margin:1.6rem 0 .5rem!important;
+   text-transform:uppercase;letter-spacing:.06em;color:{MUT}!important}}
+h3{{font-weight:600!important;font-size:.95rem!important}}
+div[data-testid="stMetric"]{{background:#FFFFFF;border:1px solid #E3E8F0;border-left:3px solid {ACC};
+   border-radius:10px;padding:.75rem .95rem}}
+div[data-testid="stMetricLabel"] p{{font-size:.72rem!important;color:{MUT}!important;
+   text-transform:uppercase;letter-spacing:.05em;font-weight:600}}
+div[data-testid="stMetricValue"]{{font-size:1.75rem!important;font-weight:600!important;color:{INK}}}
+div[data-testid="stMetricDelta"]{{font-size:.75rem!important}}
+button[data-baseweb="tab"]{{font-weight:600;font-size:.9rem;letter-spacing:.01em}}
+div[data-baseweb="tab-highlight"]{{background:{ACC}!important}}
+div[data-testid="stTabs"] div[data-baseweb="tab-list"]{{gap:.4rem;border-bottom:1px solid #E3E8F0}}
+thead tr th{{background:#F4F7FB!important;color:{INK}!important;font-weight:600!important;
+   text-transform:uppercase;font-size:.7rem!important;letter-spacing:.04em}}
+div[data-testid="stDataFrame"]{{border:1px solid #E3E8F0;border-radius:10px}}
+div[data-testid="stAlert"]{{border-radius:10px;border-left-width:4px}}
+hr{{margin:1.6rem 0;border-color:#E3E8F0}}
+.spark-lbl{{font-size:.7rem;color:{MUT};text-transform:uppercase;letter-spacing:.05em;font-weight:600}}
+.spark-d{{float:right;font-weight:600;letter-spacing:0;text-transform:none}}
+.hdr-sub{{color:{MUT};font-size:.82rem;margin:-.2rem 0 .9rem}}
+.card{{background:#FFFFFF;border:1px solid #E3E8F0;border-radius:10px;padding:.7rem .9rem}}
 </style>""", unsafe_allow_html=True)
 
 @st.cache_data(ttl=300, show_spinner="Loading data…")
@@ -39,7 +60,9 @@ if SOURCE == "local":
     ship, moves, count, cfg, errs = get_local(DATA, os.path.getmtime(DATA))
 
 # ---------- filters ----------
-st.title("Inripe stock control")
+st.markdown("# Inripe · Inventory Control")
+st.markdown('<div class="hdr-sub">Shipment, stock, courier and loss control across all markets</div>',
+            unsafe_allow_html=True)
 f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.4, 2])
 markets = ["All markets"] + (cfg["markets"] or sorted(ship["Market"].dropna().unique().tolist()))
 mkt = f1.selectbox("Market", markets, label_visibility="collapsed")
@@ -130,12 +153,12 @@ def spark(df, col, color, pct=False):
     d = df.dropna(subset=[col])
     if d.empty or d[col].nunique() <= 1:
         return alt.Chart(pd.DataFrame({"x":[0],"y":[0]})).mark_point(opacity=0).encode(x="x",y="y").properties(height=46)
-    return (alt.Chart(d).mark_line(color=color, strokeWidth=2)
+    return (alt.Chart(d).mark_line(color=color, strokeWidth=2, interpolate="monotone")
             .encode(x=alt.X("Date:T", axis=None),
                     y=alt.Y(f"{col}:Q", axis=None, scale=alt.Scale(zero=False)),
                     tooltip=[alt.Tooltip("Date:T", format="%d %b"),
                              alt.Tooltip(f"{col}:Q", format=".1f" if pct else ".0f")])
-            .properties(height=46))
+            .properties(height=44).configure_view(strokeWidth=0))
 
 def delta(df, col, unit=""):
     d = df.dropna(subset=[col])
@@ -206,8 +229,11 @@ with T1:
         ("Boxes with couriers", "Held", "#EF9F27", "", False)]):
         with col:
             d = delta(hist, field, unit)
-            st.markdown(f"<div style='font-size:.75rem;color:#666'>{label} "
-                        f"<span style='float:right'>{d or ''}</span></div>", unsafe_allow_html=True)
+            dc = "#1D9E75" if (d and d.startswith("+") and field in ("Available","Delivered")) else \
+                 ("#C0392B" if (d and d.startswith("+") and field in ("LossPct","Held")) else MUT)
+            st.markdown(f"<div class='spark-lbl'>{label}"
+                        f"<span class='spark-d' style='color:{dc}'>{d or ''}</span></div>",
+                        unsafe_allow_html=True)
             st.altair_chart(spark(hist, field, colour, pct), use_container_width=True)
 
     st.subheader("Available to sell")
@@ -254,7 +280,10 @@ with T2:
                 y=alt.Y("Item:N", title=None, sort="-x"),
                 color=alt.Color("Days:Q", scale=alt.Scale(scheme="yelloworangered"), title="Days"),
                 tooltip=["Item","Market","Shipment","Days","Qty"]
-            ).properties(height=max(120, 34*ag["Item"].nunique())), use_container_width=True)
+            ).properties(height=max(130, 36*ag["Item"].nunique())).configure_view(strokeWidth=0)
+              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                              labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
+            use_container_width=True)
 
     st.subheader("Movements on the selected day")
     day = mf[mf["Date"] == as_of]
@@ -298,7 +327,10 @@ with T3:
                 y=alt.Y("Pct:Q", title="% delivered", scale=alt.Scale(domain=[0,100])),
                 color=alt.Color("Shipment:N", title=None),
                 tooltip=["Shipment","Day",alt.Tooltip("Pct:Q",format=".1f")]
-            ).properties(height=280), use_container_width=True)
+            ).properties(height=300).configure_view(strokeWidth=0)
+              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                              labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
+            use_container_width=True)
     else:
         st.info("No deliveries recorded yet.")
 
@@ -354,7 +386,10 @@ with T4:
                     color=alt.condition(alt.datum.MaxDays > cfg["courier_limit"],
                                         alt.value("#E24B4A"), alt.value("#85B7EB")),
                     tooltip=["Courier","QtyHeld","MaxDays"]
-                ).properties(height=max(120, 40*len(sc))), use_container_width=True)
+                ).properties(height=max(130, 42*len(sc))).configure_view(strokeWidth=0)
+                  .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                                  labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
+                use_container_width=True)
         with c2:
             st.subheader("Open positions")
             op = cour[cour["Held"] != 0][
@@ -387,7 +422,10 @@ with T5:
             tooltip=[alt.Tooltip("Date:T",format="%d %b"), alt.Tooltip("LossPct:Q",format=".2f")])
         tgt = alt.Chart(pd.DataFrame({"y":[cfg["loss_target"]*100]})).mark_rule(
             color="#888", strokeDash=[5,4]).encode(y="y:Q")
-        st.altair_chart((line+tgt).properties(height=240), use_container_width=True)
+        st.altair_chart((line+tgt).properties(height=250).configure_view(strokeWidth=0)
+              .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                              labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
+            use_container_width=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -396,7 +434,10 @@ with T5:
         if len(sr):
             st.altair_chart(alt.Chart(sr).mark_bar(color="#EF9F27").encode(
                 x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
-                tooltip=["Reason","Qty"]).properties(height=max(120,34*len(sr))),
+                tooltip=["Reason","Qty"]).properties(height=max(130,36*len(sr)))
+                  .configure_view(strokeWidth=0)
+                  .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                                  labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
                 use_container_width=True)
         else:
             st.caption("No scrap recorded.")
@@ -406,7 +447,10 @@ with T5:
         if len(rr):
             st.altair_chart(alt.Chart(rr).mark_bar(color="#D4537E").encode(
                 x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
-                tooltip=["Reason","Qty"]).properties(height=max(120,34*len(rr))),
+                tooltip=["Reason","Qty"]).properties(height=max(130,36*len(rr)))
+                  .configure_view(strokeWidth=0)
+                  .configure_axis(grid=True, gridColor="#EDF1F7", domainColor="#DDE3EC",
+                                  labelColor="#7A879C", titleColor="#7A879C", labelFontSize=11),
                 use_container_width=True)
         else:
             st.caption("No returns recorded.")
@@ -434,8 +478,14 @@ with T5:
     ]
     cc = st.columns(4)
     for col,(name, ok, note) in zip(cc, checks):
-        col.markdown(f"**{name}** — {'✅ balanced' if ok else '❌ off'}  \n<span style='font-size:.72rem;color:#666'>{note}</span>",
-                     unsafe_allow_html=True)
+        bg, fg, mark = ("#EAF6EE","#1D6F45","Balanced") if ok else ("#FDECEC","#B3261E","Off")
+        col.markdown(
+            f"<div style='background:{bg};border-radius:10px;padding:.7rem .85rem'>"
+            f"<div style='font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;"
+            f"font-weight:600;color:{fg};opacity:.8'>{name}</div>"
+            f"<div style='font-size:1.05rem;font-weight:600;color:{fg}'>{mark}</div>"
+            f"<div style='font-size:.68rem;color:{fg};opacity:.75;margin-top:.15rem'>{note}</div></div>",
+            unsafe_allow_html=True)
 
     st.subheader("Exceptions")
     show = exc.copy(); show["Status"] = np.where(show["Count"]>0, show["Priority"], "clear")
