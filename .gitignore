@@ -1,9 +1,7 @@
-
 .streamlit/secrets.toml
 **/.streamlit/secrets.toml
 __pycache__/
 .DS_Store
-*.xlsx
 
 .venv/
 **/.venv/
