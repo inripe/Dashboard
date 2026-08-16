@@ -22,12 +22,21 @@ def load(path_or_buf):
         for c in cols: d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
     cfg = xl.parse("MASTER", header=None, usecols=[1,2], nrows=11)
     cfg = dict(zip(cfg[1].astype(str), cfg[2]))
+    try:
+        mk = xl.parse("MASTER", header=14, usecols=[5,6])
+        mk.columns = ["Market","Active"]
+        market_list = mk.loc[mk["Market"].notna() &
+                             (mk["Active"].astype(str).str.strip().str.lower()=="yes"),
+                             "Market"].astype(str).tolist()
+    except Exception:
+        market_list = []
     settings = {
         "as_of": pd.to_datetime(cfg.get("As-Of Date", pd.Timestamp.today())),
         "courier_limit": float(cfg.get("Courier holding limit (days)", 3)),
         "clear_target": float(cfg.get("Shipment clearance target (days)", 4)),
         "loss_target": float(cfg.get("Loss % target", 0.03)),
         "var_tol": float(cfg.get("Count variance tolerance", 0.02)),
+        "markets": market_list,
     }
     errors = pd.concat([
         _err(ship,"SHIPMENTS"), _err(moves,"MOVES"), _err(count,"COUNT")
@@ -35,9 +44,16 @@ def load(path_or_buf):
     return ship, moves, count, settings, errors
 
 def _err(df, name):
-    bad = df[df["Check"].astype(str).str.strip() != "OK"].copy()
-    if bad.empty: return pd.DataFrame(columns=["Sheet","Row","Problem"])
-    bad["Sheet"] = name; bad["Row"] = bad.index + 7
+    if "Check" not in df.columns or df.empty:
+        return pd.DataFrame({"Sheet":pd.Series(dtype=str),"Row":pd.Series(dtype=str),"Problem":pd.Series(dtype=str)})
+    chk = df["Check"]
+    blank = chk.isna() | (chk.astype(str).str.strip() == "")
+    if blank.all():
+        return pd.DataFrame([{"Sheet": name, "Row": "all",
+            "Problem": "Check column is empty - open the file in Excel and save it so the checks recalculate"}])
+    bad = df[~blank & (chk.astype(str).str.strip() != "OK")].copy()
+    if bad.empty: return pd.DataFrame({"Sheet":pd.Series(dtype=str),"Row":pd.Series(dtype=str),"Problem":pd.Series(dtype=str)})
+    bad["Sheet"] = name; bad["Row"] = (bad.index + 7).astype(str)
     return bad[["Sheet","Row","Check"]].rename(columns={"Check":"Problem"})
 
 def _q(moves, mtype, by):

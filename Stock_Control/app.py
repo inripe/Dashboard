@@ -23,7 +23,7 @@ ship, moves, count, cfg, errs = get(DATA, os.path.getmtime(DATA))
 # ---------- filters ----------
 st.title("Inripe stock control")
 f1, f2, f3, f4 = st.columns([1.2, 1.2, 1.4, 2])
-markets = ["All markets"] + sorted(ship["Market"].dropna().unique().tolist())
+markets = ["All markets"] + (cfg["markets"] or sorted(ship["Market"].dropna().unique().tolist()))
 mkt = f1.selectbox("Market", markets, label_visibility="collapsed")
 shipments = ["All shipments"] + sorted(ship["Shipment ID"].dropna().unique().tolist())
 shp = f2.selectbox("Shipment", shipments, label_visibility="collapsed")
@@ -115,7 +115,13 @@ def delta(df, col, unit=""):
 held_total = cour["Held"].sum() if len(cour) else 0
 oldest = int(stock.loc[stock["Store"] > 0, "AgeDays"].max()) if (stock["Store"] > 0).any() else 0
 
+EMPTY = len(sf) == 0
 T1, T2, T3, T4, T5 = st.tabs(["Overview", "Stock", "Shipments", "Couriers", "Losses & check"])
+if EMPTY:
+    for T in (T1, T2, T3, T4, T5):
+        with T:
+            st.info("No shipments match this filter. Choose another market or shipment.")
+    st.stop()
 
 # ============================== TAB 1 · OVERVIEW ==============================
 with T1:
@@ -150,7 +156,6 @@ with T1:
     if len(stock):
         piv = (stock.pivot_table(index="Item", columns="Market", values="Store",
                                  aggfunc="sum", fill_value=0))
-        names = ship.drop_duplicates("Item Code").set_index("Item Code")["Item Code"]
         piv["Total"] = piv.sum(axis=1)
         piv.loc["Total"] = piv.sum()
         st.dataframe(piv.style.format("{:,.0f}")
@@ -196,8 +201,10 @@ with T2:
     mv = (day.groupby("Movement")["Qty"].sum()
           .reindex(engine.MV).fillna(0).reset_index())
     mv = mv[mv["Qty"] != 0]
-    st.dataframe(mv.style.format({"Qty":"{:,.0f}"}), use_container_width=True, hide_index=True) \
-        if len(mv) else st.caption("No movements on this date.")
+    if len(mv):
+        st.dataframe(mv.style.format({"Qty":"{:,.0f}"}), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No movements on this date.")
 
 # ============================== TAB 3 · SHIPMENTS ==============================
 with T3:
@@ -236,8 +243,9 @@ with T3:
         st.info("No deliveries recorded yet.")
 
     st.subheader("Item breakdown")
-    pick = st.selectbox("Shipment", clear["Shipment"].tolist(), label_visibility="collapsed") \
-           if len(clear) else None
+    pick = None
+    if len(clear):
+        pick = st.selectbox("Shipment", clear["Shipment"].tolist(), label_visibility="collapsed")
     if pick:
         b = stock[stock["Shipment"]==pick][
             ["Item","Source","Shipped Qty","Customs","Received","Scrap",
@@ -291,10 +299,12 @@ with T4:
             st.subheader("Open positions")
             op = cour[cour["Held"] != 0][
                 ["Courier","Shipment","Market","ToCourier","Delivered","Returned","Held","DaysSince"]]
-            st.dataframe(op.style.format({c:"{:,.0f}" for c in
-                ["ToCourier","Delivered","Returned","Held","DaysSince"]}, na_rep="—"),
-                use_container_width=True, hide_index=True) if len(op) \
-                else st.caption("Every courier is clear.")
+            if len(op):
+                st.dataframe(op.style.format({c:"{:,.0f}" for c in
+                    ["ToCourier","Delivered","Returned","Held","DaysSince"]}, na_rep="—"),
+                    use_container_width=True, hide_index=True)
+            else:
+                st.caption("Every courier is clear.")
 
 # ============================== TAB 5 · LOSSES & CHECK ==============================
 with T5:
@@ -323,17 +333,23 @@ with T5:
     with c1:
         st.subheader("Scrap by reason")
         sr = mf[mf["Movement"].isin(["Scrap","Return to Scrap"])].groupby("Reason")["Qty"].sum().reset_index()
-        st.altair_chart(alt.Chart(sr).mark_bar(color="#EF9F27").encode(
-            x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
-            tooltip=["Reason","Qty"]).properties(height=max(120,34*len(sr))),
-            use_container_width=True) if len(sr) else st.caption("No scrap recorded.")
+        if len(sr):
+            st.altair_chart(alt.Chart(sr).mark_bar(color="#EF9F27").encode(
+                x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
+                tooltip=["Reason","Qty"]).properties(height=max(120,34*len(sr))),
+                use_container_width=True)
+        else:
+            st.caption("No scrap recorded.")
     with c2:
         st.subheader("Returns by reason")
         rr = mf[mf["Movement"]=="Returned"].groupby("Reason")["Qty"].sum().reset_index()
-        st.altair_chart(alt.Chart(rr).mark_bar(color="#D4537E").encode(
-            x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
-            tooltip=["Reason","Qty"]).properties(height=max(120,34*len(rr))),
-            use_container_width=True) if len(rr) else st.caption("No returns recorded.")
+        if len(rr):
+            st.altair_chart(alt.Chart(rr).mark_bar(color="#D4537E").encode(
+                x=alt.X("Qty:Q", title="Boxes"), y=alt.Y("Reason:N", title=None, sort="-x"),
+                tooltip=["Reason","Qty"]).properties(height=max(120,34*len(rr))),
+                use_container_width=True)
+        else:
+            st.caption("No returns recorded.")
 
     st.subheader("Loss by item")
     li = stock.groupby("Item").agg(Received=("Received","sum"), Customs=("Customs","sum"),
