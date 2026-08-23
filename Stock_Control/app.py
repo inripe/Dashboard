@@ -1,6 +1,8 @@
 import streamlit as st, pandas as pd, numpy as np, altair as alt, os
 import engine
 import sharepoint_loader as sp
+import dispatch as dsp
+import shopify_reader as shopify
 
 st.set_page_config(page_title="Inripe · Inventory Control", page_icon="📦", layout="wide")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +35,8 @@ hr{{border-color:{LINE}}}
 .sl{{font-size:.66rem;color:{MUT};text-transform:uppercase;letter-spacing:.07em;font-weight:600}}
 .sd{{float:right;font-weight:600;letter-spacing:0;text-transform:none}}
 .tw{{overflow-x:auto;border:1px solid {LINE};border-radius:10px;background:{PANEL}}}
+.tw.scroll{{overflow-y:auto;max-height:var(--tw-h,400px)}}
+.tw.scroll thead th{{position:sticky;top:0;z-index:2}}
 .tw table{{width:100%;border-collapse:collapse;font-size:.82rem}}
 .tw th{{background:#F1F5FA;color:{MUT};font-weight:600;text-transform:uppercase;
    font-size:.65rem;letter-spacing:.06em;padding:.55rem .7rem;text-align:right;
@@ -124,11 +128,17 @@ def _shade(v, lo, hi, ramp):
     i = int(round((float(v)-lo)/(hi-lo)*(len(ramp)-1)))
     return f"background-color: {ramp[max(0,min(i,len(ramp)-1))]}"
 
-def heat_cols(df, cols, ramp):
+def heat_cols(df, cols, ramp, skip_zero=True):
+    """Shade a numeric column. Zero and blank stay uncoloured by default."""
     out = pd.DataFrame("", index=df.index, columns=df.columns)
     for c in cols:
-        v = pd.to_numeric(df[c], errors="coerce"); lo, hi = v.min(), v.max()
-        out[c] = [_shade(x, lo, hi, ramp) for x in v]
+        v = pd.to_numeric(df[c], errors="coerce")
+        pos = v[v > 0] if skip_zero else v.dropna()
+        if pos.empty:
+            continue
+        lo, hi = pos.min(), pos.max()
+        out[c] = ["" if (pd.isna(x) or (skip_zero and x <= 0))
+                  else _shade(x, lo, hi, ramp) for x in v]
     return out
 
 def heat_all(df, ramp):
@@ -137,8 +147,11 @@ def heat_all(df, ramp):
     return pd.DataFrame([[_shade(x, lo, hi, ramp) for x in r] for r in v.values],
                         index=df.index, columns=df.columns)
 
-def table(styler, index=False):
-    """Text columns align left, numbers right — headers follow their column."""
+TABLE_H = 400   # height in px of a scrolling table. 100px is about 2 rows.
+
+def table(styler, index=False, scroll=False, height=None):
+    """Text columns align left, numbers right — headers follow their column.
+    scroll=True keeps the table at a fixed height with its own scrollbar."""
     s = styler if index else styler.hide(axis="index")
     df = s.data
     txt = [i for i, c in enumerate(df.columns)
@@ -148,7 +161,9 @@ def table(styler, index=False):
         s = s.set_table_styles([{"selector": f"th.col{i}",
                                  "props": [("text-align", "left")]} for i in txt],
                                overwrite=False)
-    st.markdown(f'<div class="tw">{s.to_html()}</div>', unsafe_allow_html=True)
+    cls = "tw scroll" if scroll else "tw"
+    sty = f' style="--tw-h:{height or TABLE_H}px"' if scroll else ""
+    st.markdown(f'<div class="{cls}"{sty}>{s.to_html()}</div>', unsafe_allow_html=True)
 
 def kpi(col, label, value, note=""):
     col.markdown(f'<div class="kpi"><div class="l">{label}</div>'
@@ -237,8 +252,8 @@ def delta(df,col,unit=""):
     return f"{(now-prev)/abs(prev)*100:+.0f}%" if not unit else f"{now-prev:+.1f}{unit}"
 
 EMPTY = len(sf)==0
-TABS = st.tabs(["Overview","Stock","Shipments","Couriers","Losses","Data check","Guide"])
-T1,T2,T3,T4,T5,T6,T7 = TABS
+TABS = st.tabs(["Overview","Stock","Shipments","Couriers","Losses","Dispatch","Data check","Guide"])
+T1,T2,T3,T4,T5,TD,T6,T7 = TABS
 if EMPTY:
     for T in TABS[:-1]:
         with T: st.info("No shipments match this filter. Choose another market or shipment.")
@@ -644,3 +659,205 @@ tells you which fields it needs.<br>
     table(settings.style)
     st.markdown(f'<div class="note">All four live on the MASTER sheet of the Excel file. '
                 f'Change them there — not in code.</div>', unsafe_allow_html=True)
+
+# ============================= 6 · DISPATCH =============================
+with TD:
+    if not shopify.is_configured():
+        st.warning("Shopify is not connected yet. Add SHOP_DOMAIN, SHOP_CLIENT_ID, "
+                   "SHOP_CLIENT_SECRET and SHOP_MARKET to the app secrets. Missing: "
+                   + ", ".join(shopify.missing_keys()))
+        st.markdown('<div class="note">Until then this tab stays empty. '
+                    'Nothing else on the dashboard is affected.</div>',
+                    unsafe_allow_html=True)
+    else:
+        smkt = shopify.market()
+        d_stock = stock[stock["Market"] == smkt] if smkt in set(stock["Market"]) else stock.iloc[0:0]
+        if d_stock.empty:
+            st.warning(f"No stock in the sheet for market '{smkt}'.")
+        else:
+            cA, cB = st.columns([3, 1])
+            with cB:
+                win = st.selectbox("Order window", [7, 14, 30, 60],
+                                   index=2, format_func=lambda d: f"Last {d} days")
+            try:
+                with st.spinner("Reading orders from Shopify…"):
+                    orders = shopify.fetch_orders(days=win)
+            except Exception as e:
+                orders = None
+                st.error(f"Could not read Shopify: {e}")
+
+            if orders is not None:
+                codes = set(cfg.get("item_names", {}).keys())
+                dd, sh_, xx, pool_after = dsp.allocate(orders, d_stock, codes)
+                chk = dsp.checks(dd, sh_, xx, orders, d_stock, pool_after)
+                shipno = dsp.ship_no_per_order(dd)
+                xg = dsp.group_excluded(xx)
+                rec = dsp.reconcile(dd, sh_, orders, d_stock, codes, cfg.get("item_names"))
+                o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
+                allpass = bool(chk["Pass"].all())
+                n_disp = dd["Order"].nunique() if len(dd) else 0
+
+                bar_c, bar_t = (GRN, "All checks pass") if allpass else (RED, "A check failed")
+                st.markdown(
+                    f'<div class="card" style="border-left:3px solid {bar_c}">'
+                    f'<b style="color:{bar_c}">{bar_t}</b> &nbsp;&middot;&nbsp; '
+                    f'<b>{ex["allocated"]:,.0f}</b> boxes ready for <b>{n_disp}</b> orders'
+                    f' &nbsp;&middot;&nbsp; <span style="color:{MUT}">read-only, '
+                    f'nothing is written</span>'
+                    f'<div class="note">Stock from '
+                    f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"}, '
+                    f'orders from Shopify just now &nbsp;&middot;&nbsp; '
+                    f'Urgent to Oldest to Maximise boxes cleared &nbsp;&middot;&nbsp; '
+                    f'all-or-nothing, oldest shipment first</div></div>',
+                    unsafe_allow_html=True)
+
+                st.subheader(f"1 \u00b7 Orders \u00b7 {smkt}, last {win} days")
+                def _ostyle(d):
+                    out = pd.DataFrame("", index=d.index, columns=d.columns)
+                    for i in d.index:
+                        stg = str(d.loc[i, "Stage"])
+                        if stg.startswith("READY"):
+                            out.loc[i, :] = f"color:{GRN};font-weight:600"
+                        elif "short" in stg:
+                            out.loc[i, :] = f"color:{AMB}"
+                        elif stg.startswith("   "):
+                            out.loc[i, :] = f"color:{MUT}"
+                        else:
+                            out.loc[i, :] = "font-weight:600"
+                    return out
+                table(o_fun.style.format({"Orders": "{:,.0f}", "Boxes": "{:,.0f}"},
+                                         na_rep="\u2014").apply(_ostyle, axis=None))
+
+                st.subheader("2 \u00b7 Boxes")
+                def _bstyle(d):
+                    out = pd.DataFrame("", index=d.index, columns=d.columns)
+                    for i in d.index:
+                        w = str(d.loc[i, "Where the boxes are"])
+                        if w.startswith("SHORT"):
+                            out.loc[i, :] = f"color:{RED};font-weight:600"
+                        elif "allocated" in w:
+                            out.loc[i, :] = f"color:{GRN};font-weight:600"
+                        elif "blocked" in w:
+                            out.loc[i, :] = f"color:{AMB}"
+                        elif w.startswith("   "):
+                            out.loc[i, :] = f"color:{MUT}"
+                        else:
+                            out.loc[i, :] = "font-weight:600"
+                    return out
+                table(b_fun.style.format({"Qty": "{:,.0f}"}).apply(_bstyle, axis=None))
+                st.markdown('<div class="note">Available = Allocated + Left'
+                            ' &nbsp;&middot;&nbsp; Wanted = Allocated + Blocked</div>',
+                            unsafe_allow_html=True)
+
+                with st.expander("By item", expanded=True):
+                    if len(rec):
+                        r2 = rec.rename(columns={"Needed": "Wanted",
+                                                 "Not allocated": "Blocked"})
+                        icols = ["Available","Wanted","Allocated","Blocked",
+                                 "Short to buy","Left"]
+                        tot = {"Item": "Total"}
+                        for c in icols: tot[c] = r2[c].sum()
+                        r2 = pd.concat([r2, pd.DataFrame([tot])], ignore_index=True)
+                        def _istyle(d):
+                            out = pd.DataFrame("", index=d.index, columns=d.columns)
+                            for i in d.index:
+                                if d.loc[i, "Item"] == "Total":
+                                    out.loc[i, :] = "font-weight:600"
+                                elif float(d.loc[i, "Wanted"]) == 0:
+                                    out.loc[i, :] = f"color:{MUT}"
+                            return out
+                        table(r2[["Item"] + icols].style
+                              .format({c: "{:,.0f}" for c in icols})
+                              .apply(_istyle, axis=None)
+                              .apply(lambda d: heat_cols(d, ["Short to buy"], R_RED),
+                                     axis=None),
+                              scroll=True, height=320)
+                        bad = int((rec["Stock check"] != "OK").sum()
+                                  + (rec["Demand check"] != "OK").sum())
+                        if bad:
+                            st.markdown(f'<div class="note" style="color:{RED}">'
+                                        f'{bad} rows do not reconcile.</div>',
+                                        unsafe_allow_html=True)
+                        else:
+                            st.markdown('<div class="note">Every row reconciles. '
+                                        'Totals tie to the funnel above.</div>',
+                                        unsafe_allow_html=True)
+
+                st.subheader(f"3 \u00b7 Dispatch list \u00b7 {n_disp} orders")
+                if len(dd):
+                    lines = dd.assign(ItemName=dd["Item"].map(nm))
+                    items = (lines.groupby(["Order","ItemName"])["Qty"].sum()
+                                  .reset_index()
+                                  .assign(txt=lambda t: t["ItemName"] + " x" +
+                                          t["Qty"].astype(int).astype(str))
+                                  .groupby("Order")["txt"]
+                                  .apply(lambda v: ", ".join(v)))
+                    per = (lines.groupby("Order")
+                                .agg(Placed=("Placed","first"), Rule=("Rule","first"),
+                                     Boxes=("Qty","sum"),
+                                     From=("Shipment", lambda v: ", ".join(sorted(set(v)))))
+                                .reset_index())
+                    per["Items"] = per["Order"].map(items)
+                    per["Ship. No."] = per["Order"].map(shipno)
+                    per["_u"] = (per["Rule"] != "URG")
+                    per = per.sort_values(["_u","Placed"]).drop(columns="_u")
+                    dcols = ["Order","Placed","Rule","Items","Boxes","From","Ship. No."]
+                    table(per[dcols].style.format({"Boxes":"{:,.0f}"}), scroll=True)
+                    urg_txt = f" \u00b7 {ex['urgent']} urgent first" if ex["urgent"] else ""
+                    st.markdown(f'<div class="note">{len(per)} orders{urg_txt} '
+                                f'\u00b7 scroll inside the table</div>',
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<span style="color:{MUT}">Nothing can be dispatched '
+                                f'from current stock.</span>', unsafe_allow_html=True)
+
+                blockers = ""
+                if len(sh_):
+                    top = (sh_.assign(Item=sh_["Item"].map(nm))
+                              .groupby("Item")["Short by"].sum()
+                              .sort_values(ascending=False).head(2).index.tolist())
+                    blockers = " \u00b7 blocked by " + " and ".join(top)
+                with st.expander(f"4 \u00b7 Short orders \u00b7 {ex['short_orders']} orders, "
+                                 f"{ex['short_boxes']:,.0f} boxes{blockers}"):
+                    if len(sh_):
+                        table(sh_.assign(Item=sh_["Item"].map(nm))
+                              .style.format({"Short by":"{:,.0f}"}),
+                              scroll=True, height=300)
+                        st.markdown('<div class="note">Boxes to buy are in the By item '
+                                    'table above.</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'<span style="color:{MUT}">Nothing short.</span>',
+                                    unsafe_allow_html=True)
+
+                summ = ""
+                if len(xg):
+                    summ = " \u00b7 " + ", ".join(
+                        f"{int(r.Orders)} {str(r.Reason).lower()}"
+                        for r in xg.head(2).itertuples())
+                with st.expander(f"5 \u00b7 Not considered \u00b7 {len(xx)} orders{summ}"):
+                    if len(xg):
+                        table(xg.style.format({"Orders":"{:,.0f}"}))
+                        st.markdown(f'<div class="note">{n_disp} + {ex["short_orders"]} + '
+                                    f'{len(xx)} = {len(orders)} orders read. '
+                                    f'Nothing hidden.</div>', unsafe_allow_html=True)
+                        st.write("")
+                        table(xx.style, scroll=True, height=300)
+                    else:
+                        st.markdown(f'<span style="color:{MUT}">Every order was '
+                                    f'considered.</span>', unsafe_allow_html=True)
+
+                ctxt = f"all {len(chk)} pass" if allpass else "FAILED"
+                with st.expander(f"6 \u00b7 Checks \u00b7 {ctxt}"):
+                    cc = st.columns(2)
+                    for i, r in enumerate(chk.itertuples()):
+                        mark, colr = ("PASS", GRN) if r.Pass else ("FAIL", RED)
+                        cc[i % 2].markdown(
+                            f'<div style="font-size:.8rem;color:{colr}">{mark} \u2014 '
+                            f'{r.Check} <span style="color:{MUT}">\u2014 {r.Result}'
+                            f'</span></div>', unsafe_allow_html=True)
+
+                st.markdown(f'<div class="card" style="border-left:3px solid {MUT}">'
+                            f'<b>Confirm is not available in this build.</b>'
+                            f'<div class="note">Writing to Shopify and Excel is added '
+                            f'only after this list has been checked against your own '
+                            f'judgement.</div></div>', unsafe_allow_html=True)
