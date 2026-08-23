@@ -6,20 +6,76 @@ MV = ["Received","Customs / Loss","Scrap","To Courier","Orders Assigned","Courie
       "Delivered","Returned","Return to Saleable","Return to Scrap","Count Adjustment"]
 
 def _tbl(xl, sheet, header_row, ncols):
-    df = xl.parse(sheet, header=header_row, usecols=range(ncols))
+    """Read a sheet's table. Tolerates a file with fewer columns than expected."""
+    try:
+        df = xl.parse(sheet, header=header_row, usecols=range(ncols))
+    except Exception:
+        df = xl.parse(sheet, header=header_row)
+        if df.shape[1] > ncols:
+            df = df.iloc[:, :ncols]
     df.columns = [str(c).strip() for c in df.columns]
+    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
+    if df.empty or not len(df.columns):
+        return df
     key = df.columns[0]
     return df[df[key].notna()].reset_index(drop=True)
 
 def load(path_or_buf):
     xl = pd.ExcelFile(path_or_buf)
     ship  = _tbl(xl,"SHIPMENTS",5,9)
-    moves = _tbl(xl,"MOVES",5,11)
-    count = _tbl(xl,"COUNT",5,7)
+    moves = _tbl(xl,"MOVES",5,16)
+    count = _tbl(xl,"COUNT",5,8)
+    if "Shipment No" not in ship.columns and "Shipment ID" not in ship.columns:
+        raise ValueError(
+            "This looks like an older version of the entry file. "
+            "Use the current INRIPE_Stock_Entry file - SHIPMENTS should start with 'Shipment No'.")
+    if "In" not in moves.columns or "Out" not in moves.columns:
+        raise ValueError(
+            "This looks like an older version of the entry file. "
+            "MOVES needs separate 'In' and 'Out' columns. Replace the Excel file with the current one.")
+    # normalise the friendly column names to what the engine works in
+    ship = ship.rename(columns={"Shipment No":"Shipment ID","Item Code":"Item Code"})
+    if "Ship Date" not in ship.columns:
+        ship["Ship Date"] = ship["Arrival Date"]
+    moves = moves.rename(columns={"Shipment No":"Shipment"})
+    if "Item Code" in moves.columns:
+        moves["Item"] = moves["Item Code"]
+    count = count.rename(columns={"Shipment No":"Shipment"})
+    if "Item Code" in count.columns:
+        count["Item"] = count["Item Code"]
+    # Count Adjustment split into Add / Remove -> one signed movement
+    if "Movement" in moves.columns:
+        moves["Movement"] = moves["Movement"].replace({
+            "Count Adjustment - Add":"Count Adjustment",
+            "Count Adjustment - Remove":"Count Adjustment Out"})
+    try:
+        disp = _tbl(xl,"DISPATCH",5,9)
+        disp = disp.rename(columns={"Shipment No":"Shipment"})
+        if "Item Code" in disp.columns: disp["Item"] = disp["Item Code"]
+        disp = disp[disp["Order"].notna() & (disp["Order"].astype(str).str.strip()!="")]
+        disp["Qty"] = pd.to_numeric(disp["Qty"], errors="coerce").fillna(0)
+        disp["Date"] = pd.to_datetime(disp["Date"])
+    except Exception:
+        disp = pd.DataFrame(columns=["Date","Market","Order","Shipment","Item","Qty","Courier"])
+    if "Void" in moves.columns:
+        moves = moves[moves["Void"].astype(str).str.strip().str.lower() != "yes"].reset_index(drop=True)
+    if len(disp):
+        extra = pd.DataFrame({
+            "Date": disp["Date"], "Market": disp["Market"], "Shipment": disp["Shipment"],
+            "Movement": "To Courier", "Item": disp["Item"], "Qty": disp["Qty"],
+            "Orders": np.nan, "Courier": disp["Courier"], "Reason": np.nan,
+            "Note": "from DISPATCH", "Check": "OK"})
+        moves = pd.concat([moves, extra], ignore_index=True)
     for d,c in ((ship,"Ship Date"),(ship,"Arrival Date"),(moves,"Date"),(count,"Date")):
         d[c] = pd.to_datetime(d[c])
     for d,cols in ((ship,["Shipped Qty"]),(moves,["Qty","Orders"]),(count,["Physical Qty"])):
-        for c in cols: d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
+        for c in cols:
+            if c in d.columns: d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
+    # "Count Adjustment Out" is negative
+    if "Movement" in moves.columns:
+        neg = moves["Movement"] == "Count Adjustment Out"
+        moves.loc[neg,"Qty"] = -moves.loc[neg,"Qty"]
+        moves.loc[neg,"Movement"] = "Count Adjustment"
     cfg = xl.parse("MASTER", header=None, usecols=[1,2], nrows=11)
     cfg = dict(zip(cfg[1].astype(str), cfg[2]))
     try:
@@ -32,7 +88,7 @@ def load(path_or_buf):
         market_list = []
     try:
         it = xl.parse("MASTER", header=14, usecols=[1,2])
-        it.columns = ["Item Code","Item Name"]
+        it.columns = ["Item Name","Item Code"]
         item_names = dict(zip(it["Item Code"].dropna().astype(str),
                               it["Item Name"].fillna("").astype(str)))
     except Exception:
@@ -46,9 +102,8 @@ def load(path_or_buf):
         "markets": market_list,
         "item_names": item_names,
     }
-    errors = pd.concat([
-        _err(ship,"SHIPMENTS"), _err(moves,"MOVES"), _err(count,"COUNT")
-    ], ignore_index=True)
+    errors = pd.concat([_err(ship,"SHIPMENTS"), _err(moves,"MOVES"), _err(count,"COUNT")],
+                       ignore_index=True)
     return ship, moves, count, settings, errors
 
 def _err(df, name):
@@ -59,7 +114,7 @@ def _err(df, name):
     if blank.all():
         return pd.DataFrame([{"Sheet": name, "Row": "all",
             "Problem": "Check column is empty - open the file in Excel and save it so the checks recalculate"}])
-    bad = df[~blank & (chk.astype(str).str.strip() != "OK")].copy()
+    bad = df[~blank & (~chk.astype(str).str.strip().isin(["OK","VOID"]))].copy()
     if bad.empty: return pd.DataFrame({"Sheet":pd.Series(dtype=str),"Row":pd.Series(dtype=str),"Problem":pd.Series(dtype=str)})
     bad["Sheet"] = name; bad["Row"] = (bad.index + 7).astype(str)
     return bad[["Sheet","Row","Check"]].rename(columns={"Check":"Problem"})
