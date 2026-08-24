@@ -104,6 +104,36 @@ def _file_item(hdr, site_id) -> dict:
         f"Check SP_FILE_NAME matches the file name exactly, including the extension.")
 
 
+_item_cache = {"site": None, "id": None}
+
+
+def fetch_meta() -> dict:
+    """Cheap metadata-only call: when was the file last saved, and by whom.
+    Used as the cache key so a save in SharePoint is picked up automatically."""
+    hdr = {"Authorization": f"Bearer {_token()}"}
+    if not _item_cache["site"]:
+        _item_cache["site"] = _site_id(hdr)
+    site_id = _item_cache["site"]
+    if not _item_cache["id"]:
+        _item_cache["id"] = _file_item(hdr, site_id)["id"]
+    r = requests.get(f"{GRAPH}/sites/{site_id}/drive/items/{_item_cache['id']}",
+                     headers=hdr, timeout=TIMEOUT)
+    if r.status_code != 200:
+        # the file may have been moved or renamed - forget it and look again
+        _item_cache["id"] = None
+        item = _file_item(hdr, site_id)
+        _item_cache["id"] = item["id"]
+    else:
+        item = r.json()
+    return {"id": item.get("id"),
+            "name": item.get("name"),
+            "modified": item.get("lastModifiedDateTime"),
+            "modified_by": (item.get("lastModifiedBy", {})
+                            .get("user", {}).get("displayName")),
+            "size_kb": round(item.get("size", 0) / 1024),
+            "web_url": item.get("webUrl")}
+
+
 def fetch_workbook() -> tuple[io.BytesIO, dict]:
     """Return (file-like workbook, metadata). Raises with a readable message."""
     hdr = {"Authorization": f"Bearer {_token()}"}

@@ -66,15 +66,23 @@ st.markdown(f'<div class="band"><div class="hdr">{LOGO}<h1>Inripe · Inventory C
 def get_local(path, _mtime):
     return engine.load(path)
 
-@st.cache_data(ttl=300, show_spinner="Loading from SharePoint…")
-def get_sharepoint(_bust):
+@st.cache_data(ttl=30, show_spinner=False)
+def sp_meta(_bust):
+    """Cheap check: has the file been saved since we last read it?"""
+    return sp.fetch_meta()
+
+@st.cache_data(show_spinner="Loading from SharePoint…")
+def get_sharepoint(stamp, _bust):
+    """Keyed on the file's last-modified stamp, so a save is picked up by itself."""
     buf, meta = sp.fetch_workbook()
     return engine.load(buf) + (meta,)
 
 SOURCE, SP_META, SP_ERROR = "local", None, None
 if sp.is_configured():
     try:
-        ship, moves, count, cfg, errs, SP_META = get_sharepoint(st.session_state.get("_refresh", 0))
+        bust = st.session_state.get("_refresh", 0)
+        stamp = sp_meta(bust).get("modified")
+        ship, moves, count, cfg, errs, SP_META = get_sharepoint(stamp, bust)
         SOURCE = "sharepoint"
     except Exception as e:
         SP_ERROR = str(e)
