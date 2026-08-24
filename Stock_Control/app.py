@@ -700,18 +700,7 @@ with TD:
 
             if orders is not None:
                 codes = set(cfg.get("item_names", {}).keys())
-                dd, sh_, xx, pool_after = dsp.allocate(orders, d_stock, codes)
-                chk = dsp.checks(dd, sh_, xx, orders, d_stock, pool_after)
-                shipno = dsp.ship_no_per_order(dd)
-                xg = dsp.group_excluded(xx)
-                rec = dsp.reconcile(dd, sh_, orders, d_stock, codes, cfg.get("item_names"))
-                o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
-                allpass = bool(chk["Pass"].all())
-                n_disp = dd["Order"].nunique() if len(dd) else 0
-                if truncated:
-                    st.warning("Shopify still had more orders when reading stopped. "
-                               "The counts below are incomplete - narrow the window "
-                               "or tell me and I will raise the page limit.")
+                as_of_orders = pd.Timestamp.now().normalize()
                 if SOURCE == "sharepoint" and SP_META:
                     _w = pd.to_datetime(SP_META["modified"]).tz_convert(None)
                     stock_stamp = f"saved {_w:%d %b %H:%M}"
@@ -723,6 +712,86 @@ with TD:
                 shop_stamp = (shop_read_at.strftime("%d %b %H:%M")
                               if shop_read_at is not None else "unknown")
 
+                # ---------- 1 · strategy ----------
+                st.subheader("1 \u00b7 How to allocate")
+                g1, g2 = st.columns([1, 3])
+                with g1:
+                    cap = st.selectbox("Nothing waits longer than", [1, 2, 3, 5, 7, 0],
+                                       index=2,
+                                       format_func=lambda d: "no cap" if d == 0
+                                       else f"{d} day" + ("" if d == 1 else "s"))
+                cap_days = None if cap == 0 else cap
+                with st.spinner("Working out the best combinations…"):
+                    cmpdf = dsp.compare_strategies(orders, d_stock, codes,
+                                                   cap_days, as_of_orders)
+                names = cmpdf["Strategy"].tolist()
+                same = {}
+                for a in names:
+                    for b in names:
+                        if a != b and cmpdf.loc[cmpdf.Strategy == a, "_sel"].iloc[0] == \
+                                      cmpdf.loc[cmpdf.Strategy == b, "_sel"].iloc[0]:
+                            same.setdefault(a, b)
+                view = cmpdf.drop(columns="_sel").copy()
+                view["Use it when"] = [
+                    f"Same as {same[n]} today" if n in same and names.index(same[n]) < names.index(n)
+                    else w for n, w in zip(view["Strategy"], view["Use it when"])]
+                strat = st.radio("Strategy", names, index=1, horizontal=True,
+                                 label_visibility="collapsed")
+                def _sstyle(dfx):
+                    o = pd.DataFrame("", index=dfx.index, columns=dfx.columns)
+                    for i2 in dfx.index:
+                        if dfx.loc[i2, "Strategy"] == strat:
+                            o.loc[i2, :] = f"background-color:#EAF2FB;color:{ACC};font-weight:600"
+                    return o
+                table(view.style.format({"Orders": "{:,.0f}", "Boxes out": "{:,.0f}",
+                                         "Left in store": "{:,.0f}",
+                                         "Oldest waiting": "{:,.0f} days"})
+                      .apply(_sstyle, axis=None))
+                n_cap = 0
+                st.markdown(f'<div class="note">Urgent orders are always in, whatever you '
+                            f'pick. {int(d_stock["Store"].sum()):,} boxes in stock.</div>',
+                            unsafe_allow_html=True)
+
+                dd, sh_, xx, pool_after = dsp.allocate(orders, d_stock, codes,
+                                                       strat, cap_days, as_of_orders)
+                nchosen = dsp.passed_over()
+                chk = dsp.checks(dd, sh_, xx, orders, d_stock, pool_after,
+                                 cap_days, as_of_orders, codes)
+                shipno = dsp.ship_no_per_order(dd)
+                xg = dsp.group_excluded(xx)
+                rec = dsp.reconcile(dd, sh_, orders, d_stock, codes, cfg.get("item_names"))
+                o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
+                allpass = bool(chk["Pass"].all())
+                n_disp = dd["Order"].nunique() if len(dd) else 0
+                if len(dd):
+                    n_cap = int((dd.drop_duplicates("Order")["Rule"] == "CAP").sum())
+
+                # what changes if you switch
+                cur = cmpdf.loc[cmpdf.Strategy == strat, "_sel"].iloc[0]
+                bits = []
+                for other in names:
+                    if other == strat:
+                        continue
+                    osel = cmpdf.loc[cmpdf.Strategy == other, "_sel"].iloc[0]
+                    add, drop = sorted(cur - osel), sorted(osel - cur)
+                    if not add and not drop:
+                        bits.append(f"<b>{strat} instead of {other}</b> "
+                                    f"<span style=\'color:{MUT}\'>&mdash; same orders</span>")
+                    else:
+                        bits.append(
+                            f"<b>{strat} instead of {other}</b> "
+                            f"<span style=\'color:{MUT}\'>&mdash; adds {len(add)}, "
+                            f"drops {len(drop)}</span><br>"
+                            + (f"adds: {', '.join(add[:4])}"
+                               + (f" +{len(add)-4} more" if len(add) > 4 else "") + "<br>" if add else "")
+                            + (f"drops: {', '.join(drop[:4])}"
+                               + (f" +{len(drop)-4} more" if len(drop) > 4 else "") if drop else ""))
+                cc1, cc2 = st.columns(2)
+                for col, b in zip((cc1, cc2), bits):
+                    col.markdown(f'<div class="card" style="font-size:.78rem;'
+                                 f'line-height:1.7">{b}</div>', unsafe_allow_html=True)
+                st.write("")
+
                 bar_c, bar_t = (GRN, "All checks pass") if allpass else (RED, "A check failed")
                 st.markdown(
                     f'<div class="card" style="border-left:3px solid {bar_c}">'
@@ -730,16 +799,15 @@ with TD:
                     f'<b>{ex["allocated"]:,.0f}</b> boxes ready for <b>{n_disp}</b> orders'
                     f' &nbsp;&middot;&nbsp; <span style="color:{MUT}">read-only, '
                     f'nothing is written</span>'
-                    f'<div class="note">Stock from '
+                    f'<div class="note">{strat}'
+                    f'{f" &middot; {cap_days} day cap &middot; {n_cap} orders forced out" if cap_days else " &middot; no age cap"}'
+                    f' &nbsp;&middot;&nbsp; stock from '
                     f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"} '
-                    f'({stock_stamp}) &nbsp;&middot;&nbsp; '
-                    f'Shopify read {shop_stamp} &nbsp;&middot;&nbsp; '
-                    f'Urgent to Oldest to Maximise boxes cleared &nbsp;&middot;&nbsp; '
-                    f'all-or-nothing, oldest shipment first</div></div>',
-                    unsafe_allow_html=True)
+                    f'({stock_stamp}) &nbsp;&middot;&nbsp; Shopify read {shop_stamp}'
+                    f'</div></div>', unsafe_allow_html=True)
 
                 _wl = "all dates" if not win else f"last {win} days"
-                st.subheader(f"1 \u00b7 Orders \u00b7 {smkt}, {_wl}")
+                st.subheader(f"2 \u00b7 Orders \u00b7 {smkt}, {_wl}")
                 def _ostyle(d):
                     out = pd.DataFrame("", index=d.index, columns=d.columns)
                     for i in d.index:
@@ -756,7 +824,7 @@ with TD:
                 table(o_fun.style.format({"Orders": "{:,.0f}", "Boxes": "{:,.0f}"},
                                          na_rep="\u2014").apply(_ostyle, axis=None))
 
-                st.subheader("2 \u00b7 Boxes")
+                st.subheader("3 \u00b7 Boxes")
                 def _bstyle(d):
                     out = pd.DataFrame("", index=d.index, columns=d.columns)
                     for i in d.index:
@@ -811,7 +879,7 @@ with TD:
                                         'Totals tie to the funnel above.</div>',
                                         unsafe_allow_html=True)
 
-                st.subheader(f"3 \u00b7 Dispatch list \u00b7 {n_disp} orders")
+                st.subheader(f"4 \u00b7 Dispatch list \u00b7 {n_disp} orders")
                 if len(dd):
                     lines = dd.assign(ItemName=dd["Item"].map(nm))
                     items = (lines.groupby(["Order","ItemName"])["Qty"].sum()
@@ -835,20 +903,10 @@ with TD:
                     st.markdown(f'<div class="note">{len(per)} orders{urg_txt} '
                                 f'\u00b7 scroll inside the table</div>',
                                 unsafe_allow_html=True)
-                    e1, e2 = st.columns(2)
-                    e1.download_button(
-                        "Download dispatch list (one row per order)",
+                    st.download_button(
+                        "Download dispatch list",
                         per[dcols].to_csv(index=False).encode("utf-8"),
                         file_name=f"dispatch_{smkt}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
-                        mime="text/csv")
-                    picks = dd.assign(Item=dd["Item"].map(nm))
-                    picks["Ship. No."] = picks["Order"].map(shipno)
-                    picks = picks[["Order","Placed","Rule","Item","Qty",
-                                   "Shipment","Arrival","Ship. No."]]
-                    e2.download_button(
-                        "Download picking list (one row per item)",
-                        picks.to_csv(index=False).encode("utf-8"),
-                        file_name=f"picking_{smkt}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
                         mime="text/csv")
                 else:
                     st.markdown(f'<span style="color:{MUT}">Nothing can be dispatched '
@@ -860,7 +918,7 @@ with TD:
                               .groupby("Item")["Short by"].sum()
                               .sort_values(ascending=False).head(2).index.tolist())
                     blockers = " \u00b7 blocked by " + " and ".join(top)
-                with st.expander(f"4 \u00b7 Short orders \u00b7 {ex['short_orders']} orders, "
+                with st.expander(f"5 \u00b7 Short \u00b7 {ex['short_orders']} orders, "
                                  f"{ex['short_boxes']:,.0f} boxes{blockers}"):
                     if len(sh_):
                         table(sh_.assign(Item=sh_["Item"].map(nm))
@@ -877,8 +935,11 @@ with TD:
                     summ = " \u00b7 " + ", ".join(
                         f"{int(r.Orders)} {str(r.Reason).lower()}"
                         for r in xg.head(2).itertuples())
-                with st.expander(f"5 \u00b7 Excluded \u00b7 {len(xx)} of "
-                                 f"{ex['scope']} stage 2 orders{summ}"):
+                dead = dsp.dead_stage2(orders)
+                with st.expander(f"6 \u00b7 Excluded \u00b7 {len(xx)} of "
+                                 f"{ex['scope']} stage 2 orders{summ}"
+                                 + (f"  \u00b7  plus {len(dead)} cancelled or voided"
+                                    if len(dead) else "")):
                     if len(xx):
                         st.markdown('<div class="note">These are stage 2 orders the engine '
                                     'cannot allocate. Each one is listed with its reason.'
@@ -896,8 +957,15 @@ with TD:
                         st.markdown(f'<span style="color:{MUT}">Nothing excluded \u2014 '
                                     f'every stage 2 order could be allocated.</span>',
                                     unsafe_allow_html=True)
+                    if len(dead):
+                        st.write("")
+                        st.markdown('<div class="note">Cancelled or voided, so not '
+                                    'counted anywhere above. Shopify hides these too, '
+                                    'which is why the stage 2 count matches your '
+                                    'Shopify view.</div>', unsafe_allow_html=True)
+                        table(dead.style)
 
-                with st.expander(f"6 \u00b7 All stage 2 orders \u00b7 {ex['scope']} "
+                with st.expander(f"7 \u00b7 All stage 2 orders \u00b7 {ex['scope']} "
                                  f"\u00b7 for checking against Shopify"):
                     sl = dsp.scope_list(orders, dd, sh_, xx)
                     if len(sl):
@@ -917,7 +985,7 @@ with TD:
                                     unsafe_allow_html=True)
 
                 ctxt = f"all {len(chk)} pass" if allpass else "FAILED"
-                with st.expander(f"7 \u00b7 Checks \u00b7 {ctxt}"):
+                with st.expander(f"8 \u00b7 Checks \u00b7 {ctxt}"):
                     cc = st.columns(2)
                     for i, r in enumerate(chk.itertuples()):
                         mark, colr = ("PASS", GRN) if r.Pass else ("FAIL", RED)

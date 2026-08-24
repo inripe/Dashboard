@@ -33,7 +33,9 @@ orders=[o("#1",10,[(A,1)]),
         o("#7",10,[(A,1)],fin="PAID")]
 d,s,x,pool=dispatch.allocate(orders,stock,codes)
 ck("stage 2 + COD included", set(d["Order"])=={"#1","#7"}, sorted(set(d["Order"])))
-ck("4 orders excluded (stage-1 is out of scope, not rejected)", len(x)==4, f"{len(x)}")
+ck("2 orders excluded - fulfilled and bad sku", len(x)==2, sorted(x["Order"]) if len(x) else [])
+ck("cancelled and refunded are out of scope, not excluded",
+   not {"#4","#5"} & (set(x["Order"]) if len(x) else set()))
 ck("every exclusion has a reason", x["Reason"].notna().all() and (x["Reason"]!="").all())
 ck("unknown sku excluded", "#6" in set(x["Order"]))
 ck("the stage-1 order is not listed at all", "#2" not in set(x["Order"]))
@@ -172,11 +174,11 @@ orders=[o("#F1",5,[(A,2)]), o("#F2",6,[(A,qa+50)]), o("#F3",7,[(B,1)]),
 d,s_,x,pool=dispatch.allocate(orders,stock,codes)
 of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
 eq("reviewed counts every stage-2 order", of.loc[0,"Orders"], len(dispatch.in_scope(orders)))
-eq("ready = reviewed - not considered - short", of.loc[3,"Orders"],
-   of.loc[0,"Orders"]-of.loc[1,"Orders"]-of.loc[2,"Orders"])
-eq("ready orders matches dispatch list", of.loc[3,"Orders"],
+eq("ready = reviewed less every loss", of.loc[4,"Orders"],
+   of.loc[0,"Orders"]-of.loc[1,"Orders"]-of.loc[2,"Orders"]-of.loc[3,"Orders"])
+eq("ready orders matches dispatch list", of.loc[4,"Orders"],
    d["Order"].nunique() if len(d) else 0)
-eq("ready boxes matches dispatch list", of.loc[3,"Boxes"],
+eq("ready boxes matches dispatch list", of.loc[4,"Boxes"],
    d["Qty"].sum() if len(d) else 0)
 eq("reviewed boxes = allocated + blocked", ex["reviewed_boxes"],
    ex["allocated"]+ex["blocked"])
@@ -207,11 +209,11 @@ ck("funnel first row is Reviewed", str(of.loc[0,"Stage"]).startswith("Reviewed")
 eq("first row counts only stage 2", of.loc[0,"Orders"], 1)
 ck("the total read is still shown as a note", "unfulfilled read" in str(of.loc[0,"Note"]),
    str(of.loc[0,"Note"]))
-eq("funnel has 4 rows", len(of), 4)
-eq("ready still ties to the dispatch list", of.loc[3,"Orders"],
+eq("funnel has 5 rows", len(of), 5)
+eq("ready still ties to the dispatch list", of.loc[4,"Orders"],
    d["Order"].nunique() if len(d) else 0)
-eq("reviewed = not considered + short + ready", of.loc[0,"Orders"],
-   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"])
+eq("reviewed = excluded + short + not chosen + ready", of.loc[0,"Orders"],
+   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"]+of.loc[4,"Orders"])
 
 print("=== Q. TRUNCATION IS SURFACED ===")
 import shopify_reader as sr
@@ -261,9 +263,9 @@ ck("a real stage-2 rejection is still listed", "#NOSKU" in set(x["Order"]))
 of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
 eq("funnel scope is stage 2 only", ex["scope"], 2)
 eq("funnel reconciles within stage 2", of.loc[0,"Orders"],
-   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"])
+   sum(of.loc[i,"Orders"] for i in (1,2,3,4)))
 eq("boxes reconcile within stage 2 too", of.loc[0,"Boxes"],
-   of.loc[1,"Boxes"]+of.loc[2,"Boxes"]+of.loc[3,"Boxes"])
+   sum(of.loc[i,"Boxes"] for i in (1,2,3,4)))
 eq("boxes funnel wanted excludes rejected orders", ex["reviewed_boxes"],
    ex["scope_boxes"]-ex["excluded_boxes"])
 c=dispatch.checks(d,s_,x,orders,stock,pool)
@@ -299,18 +301,94 @@ orders=[o("#T1",5,[(A,1)]), o("#T2",6,[("BAD",1)]),
         o("#T5",9,[(A,qa+99)])]
 d,s_,x,pool=dispatch.allocate(orders,stock,codes)
 of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
-eq("all five are stage 2", ex["scope"], 5)
-eq("three are excluded", len(x), 3)
-ck("voided is one of them", "Voided" in set(x["Reason"]), sorted(set(x["Reason"])))
-ck("cancelled is one of them", "Cancelled" in set(x["Reason"]))
+eq("cancelled and voided are out of scope", ex["scope"], 3)
+eq("only the bad-sku order is excluded", len(x), 1)
+dead=dispatch.dead_stage2(orders)
+eq("the dead ones are listed separately", len(dead), 2)
+ck("and named", set(dead["Order"])=={"#T3","#T4"}, sorted(dead["Order"]))
 ck("the funnel row is labelled excluded", "excluded" in str(of.loc[1,"Stage"]),
    str(of.loc[1,"Stage"]))
 eq("funnel excluded count matches", of.loc[1,"Orders"], len(x))
-eq("ready + short + excluded = stage 2",
-   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"], ex["scope"])
+eq("ready + short + not chosen + excluded = stage 2",
+   sum(of.loc[i,"Orders"] for i in (1,2,3,4)), ex["scope"])
 sl=dispatch.scope_list(orders,d,s_,x)
-eq("every stage-2 order is in the list", len(sl), 5)
-eq("and three of them say Excluded", (sl["Outcome"]=="Excluded").sum(), 3)
+eq("every live stage-2 order is in the list", len(sl), 3)
+eq("and one says Excluded", (sl["Outcome"]=="Excluded").sum(), 1)
+ck("no cancelled order in the list", not {"#T3","#T4"} & set(sl["Order"]))
+
+print("=== U. STRATEGIES AND THE AGE CAP ===")
+import datetime as _dt
+NOW=pd.Timestamp("2026-08-24")
+def od(name, days_old, lines, **kw):
+    d=o(name,1,lines,**kw)
+    d["created"]=(NOW-pd.Timedelta(days=days_old)).isoformat()
+    return d
+mix=[od("#U1",9,[(A,1)]), od("#U2",4,[(A,2)]), od("#U3",0,[(A,1)]),
+     od("#U4",0,[(A,3)]), od("#U5",0,[(B,1)]), od("#U6",0,[(A,1)]),
+     od("#U7",1,[(A,2)],urgent=True)]
+res={}
+for st in dispatch.STRATEGIES:
+    d_,s_,x_,p_=dispatch.allocate(mix,stock,codes,st,3,NOW)
+    res[st]=(d_["Order"].nunique() if len(d_) else 0,
+             float(d_["Qty"].sum()) if len(d_) else 0.0, d_)
+ck("all three strategies run", len(res)==3)
+ck("most orders has the most orders",
+   res["Most orders"][0]>=max(v[0] for v in res.values()),
+   {k:v[0] for k,v in res.items()})
+ck("most stock out moves the most boxes",
+   res["Most stock out"][1]>=max(v[1] for v in res.values()),
+   {k:v[1] for k,v in res.items()})
+for st,(n,b,d_) in res.items():
+    rules=set(d_.drop_duplicates("Order")["Rule"]) if len(d_) else set()
+    ck(f"{st}: urgent order is in", "#U7" in set(d_["Order"]) if len(d_) else False)
+    ck(f"{st}: the 9-day-old order is forced in by the cap",
+       "#U1" in set(d_["Order"]) if len(d_) else False)
+    ck(f"{st}: rules are only URG, CAP, FIT", rules<= {"URG","CAP","FIT"}, rules)
+d_,s_,x_,p_=dispatch.allocate(mix,stock,codes,"Balanced",None,NOW)
+ck("with no cap nothing is marked CAP",
+   "CAP" not in set(d_["Rule"]) if len(d_) else True)
+d_,s_,x_,p_=dispatch.allocate(mix,stock,codes,"Balanced",1,NOW)
+capped=set(d_.loc[d_["Rule"]=="CAP","Order"]) if len(d_) else set()
+ck("a 1-day cap forces the 1-day-old and older orders",
+   {"#U1","#U2"} <= capped or "#U1" in capped, sorted(capped))
+c=dispatch.compare_strategies(mix,stock,codes,3,NOW)
+eq("comparison has one row per strategy", len(c), 3)
+ck("comparison carries the order set for diffing", "_sel" in c.columns)
+ck("boxes out + left = stock, every strategy",
+   all(abs(r["Boxes out"]+r["Left in store"]-stock["Store"].sum())<1e-6
+       for _,r in c.iterrows()))
+d_,s_,x_,p_=dispatch.allocate(mix,stock,codes,"Balanced",3,NOW)
+chk=dispatch.checks(d_,s_,x_,mix,stock,p_,3,NOW,codes)
+ck("the cap check is present",
+   any("older than" in str(r) for r in chk["Check"]), chk["Check"].tolist())
+ck("every check passes on the mixed set", chk["Pass"].all(),
+   chk[~chk["Pass"]][["Check","Result"]].to_dict("records"))
+
+print("=== V. CANCELLED AND VOIDED ARE OUT OF SCOPE ===")
+mix=[o("#V1",5,[(A,1)]),
+     o("#V2",5,[(A,1)],canc=True),
+     o("#V3",5,[(A,1)],fin="VOIDED"),
+     o("#V4",5,[(A,1)],fin="REFUNDED"),
+     o("#V5",5,[(A,1)],canc=True,urgent=True),
+     o("#V6",5,[(A,1)],stage="1. Under Review Sales = Unfulfilled Status")]
+d_,s_,x_,p_=dispatch.allocate(mix,stock,codes)
+eq("only the live stage-2 order is in scope", len(dispatch.in_scope(mix)), 1)
+ck("no dead order reaches the dispatch list",
+   not {"#V2","#V3","#V4","#V5"} & (set(d_["Order"]) if len(d_) else set()))
+ck("no dead order is listed as excluded",
+   not {"#V2","#V3","#V4","#V5"} & (set(x_["Order"]) if len(x_) else set()))
+dead=dispatch.dead_stage2(mix)
+eq("all four dead stage-2 orders are shown separately", len(dead), 4)
+ck("a stage-1 cancelled order is not shown", "#V6" not in set(dead["Order"]))
+ck("the urgent one is flagged",
+   dead.loc[dead["Order"]=="#V5","Urgent"].iloc[0]=="Yes")
+ck("reasons are named", set(dead["Reason"]) <= {"Cancelled","Voided","Refunded"},
+   sorted(set(dead["Reason"])))
+of,bf,ex=dispatch.funnel(mix,d_,s_,stock,codes)
+eq("the funnel counts only live stage-2 orders", of.loc[0,"Orders"], 1)
+chk=dispatch.checks(d_,s_,x_,mix,stock,p_,3,None,codes)
+ck("reconciliation still holds", chk["Pass"].all(),
+   chk[~chk["Pass"]][["Check","Result"]].to_dict("records"))
 
 print()
 for l in F: print(l)
