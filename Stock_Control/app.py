@@ -835,6 +835,21 @@ with TD:
                     st.markdown(f'<div class="note">{len(per)} orders{urg_txt} '
                                 f'\u00b7 scroll inside the table</div>',
                                 unsafe_allow_html=True)
+                    e1, e2 = st.columns(2)
+                    e1.download_button(
+                        "Download dispatch list (one row per order)",
+                        per[dcols].to_csv(index=False).encode("utf-8"),
+                        file_name=f"dispatch_{smkt}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                        mime="text/csv")
+                    picks = dd.assign(Item=dd["Item"].map(nm))
+                    picks["Ship. No."] = picks["Order"].map(shipno)
+                    picks = picks[["Order","Placed","Rule","Item","Qty",
+                                   "Shipment","Arrival","Ship. No."]]
+                    e2.download_button(
+                        "Download picking list (one row per item)",
+                        picks.to_csv(index=False).encode("utf-8"),
+                        file_name=f"picking_{smkt}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                        mime="text/csv")
                 else:
                     st.markdown(f'<span style="color:{MUT}">Nothing can be dispatched '
                                 f'from current stock.</span>', unsafe_allow_html=True)
