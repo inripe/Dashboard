@@ -687,9 +687,11 @@ with TD:
             with cB:
                 win = st.selectbox("Order window", [7, 14, 30, 60],
                                    index=2, format_func=lambda d: f"Last {d} days")
+            shop_read_at = None
             try:
                 with st.spinner("Reading orders from Shopify…"):
                     orders = shopify.fetch_orders(days=win)
+                shop_read_at = pd.Timestamp.now()
             except Exception as e:
                 orders = None
                 st.error(f"Could not read Shopify: {e}")
@@ -704,6 +706,16 @@ with TD:
                 o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
                 allpass = bool(chk["Pass"].all())
                 n_disp = dd["Order"].nunique() if len(dd) else 0
+                if SOURCE == "sharepoint" and SP_META:
+                    _w = pd.to_datetime(SP_META["modified"]).tz_convert(None)
+                    stock_stamp = f"saved {_w:%d %b %H:%M}"
+                elif os.path.exists(DATA):
+                    stock_stamp = ("saved " + pd.Timestamp.fromtimestamp(
+                        os.path.getmtime(DATA)).strftime("%d %b %H:%M"))
+                else:
+                    stock_stamp = "unknown"
+                shop_stamp = (shop_read_at.strftime("%d %b %H:%M")
+                              if shop_read_at is not None else "unknown")
 
                 bar_c, bar_t = (GRN, "All checks pass") if allpass else (RED, "A check failed")
                 st.markdown(
@@ -713,8 +725,9 @@ with TD:
                     f' &nbsp;&middot;&nbsp; <span style="color:{MUT}">read-only, '
                     f'nothing is written</span>'
                     f'<div class="note">Stock from '
-                    f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"}, '
-                    f'orders from Shopify just now &nbsp;&middot;&nbsp; '
+                    f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"} '
+                    f'({stock_stamp}) &nbsp;&middot;&nbsp; '
+                    f'Shopify read {shop_stamp} &nbsp;&middot;&nbsp; '
                     f'Urgent to Oldest to Maximise boxes cleared &nbsp;&middot;&nbsp; '
                     f'all-or-nothing, oldest shipment first</div></div>',
                     unsafe_allow_html=True)
