@@ -79,16 +79,23 @@ query($cursor: String, $filter: String) {
 """
 
 
-def fetch_orders(limit_pages: int = 5, days: int = 30):
-    """Return a list of plain dicts. Read-only. Only the last `days` days."""
+def fetch_orders(limit_pages: int = 40, days: int | None = 30):
+    """Return (orders, truncated). Read-only.
+
+    days=None reads every unfulfilled order, no date cutoff.
+    `truncated` is True if Shopify still had more pages when we stopped -
+    the caller must surface that, never hide it.
+    """
     import datetime as _dt
-    since = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    filt = f"fulfillment_status:unfulfilled AND created_at:>={since}"
+    filt = "fulfillment_status:unfulfilled"
+    if days:
+        since = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        filt += f" AND created_at:>={since}"
     dom = _cfg("SHOP_DOMAIN")
     tok = _access_token()
     url = f"https://{dom}/admin/api/{API}/graphql.json"
     hdr = {"X-Shopify-Access-Token": tok, "Content-Type": "application/json"}
-    out, cursor = [], None
+    out, cursor, truncated = [], None, False
     for _ in range(limit_pages):
         r = requests.post(url, headers=hdr, timeout=30,
                           json={"query": QUERY,
@@ -115,9 +122,12 @@ def fetch_orders(limit_pages: int = 5, days: int = 30):
                            "sku": li["node"].get("sku")}
                           for li in n["lineItems"]["edges"]],
             })
-        if not blk["pageInfo"]["hasNextPage"]: break
+        if not blk["pageInfo"]["hasNextPage"]:
+            break
         cursor = blk["pageInfo"]["endCursor"]
-    return out
+    else:
+        truncated = True
+    return out, truncated
 
 
 def selftest():
@@ -125,8 +135,9 @@ def selftest():
         print("NOT CONFIGURED. Missing:", ", ".join(missing_keys())); return
     try:
         _access_token(); print("token obtained OK")
-        o = fetch_orders(limit_pages=1)
-        print(f"CONNECTED OK - {len(o)} unfulfilled orders read from {_cfg('SHOP_DOMAIN')}")
+        o, trunc = fetch_orders(limit_pages=1)
+        print(f"CONNECTED OK - {len(o)} unfulfilled orders read from {_cfg('SHOP_DOMAIN')}"
+              + (" (more pages available)" if trunc else ""))
         if o: print("  newest:", o[0]["name"], "|", o[0]["stage"])
     except Exception as e:
         print("FAILED\n ", e)

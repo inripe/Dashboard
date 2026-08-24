@@ -30,10 +30,19 @@ STAGE_MEANING = {
 }
 
 
+def in_scope(orders):
+    """Stage 2 only. Everything else is simply not this run's business."""
+    return [o for o in orders if (o.get("stage") or "").strip() == INCLUDE_STAGE]
+
+
 def screen_orders(orders, item_codes):
-    """Split orders into eligible / excluded, with a plain reason for every exclusion."""
+    """Of the stage-2 orders, which can be allocated and which cannot, and why.
+
+    Orders at any other stage are not returned at all - they are out of scope,
+    not rejected, so listing them would be noise.
+    """
     elig, excl = [], []
-    for o in orders:
+    for o in in_scope(orders):
         r = None
         if o.get("fulfillment") not in (None, "", "UNFULFILLED"):
             r = "Already fulfilled"
@@ -41,15 +50,6 @@ def screen_orders(orders, item_codes):
             r = f"{str(o.get('financial','')).title()}"
         elif o.get("cancelled"):
             r = "Cancelled"
-        elif (o.get("stage") or "") != INCLUDE_STAGE:
-            raw = (o.get("stage") or "").strip()
-            num = raw.split(".")[0] if raw else ""
-            if num in STAGE_MEANING:
-                r = f"Stage {num} - {STAGE_MEANING[num]}"
-            elif raw:
-                r = f"Stage not recognised: {raw[:40]}"
-            else:
-                r = "No order stage set"
         else:
             missing = [li["title"] for li in o["lines"]
                        if not li.get("sku") or li["sku"] not in item_codes]
@@ -163,8 +163,10 @@ def checks(dispatch, short, excluded, orders, stock, pool_after):
     a("No order counted twice",
       (n_disp == len(set(dispatch['Order']))) if len(dispatch) else True,
       f"{n_disp} unique order numbers")
-    a("Order counts add up to orders read", n_disp + n_short + n_excl == len(orders),
-      f"{n_disp} + {n_short} + {n_excl} = {len(orders)}")
+    n_scope = len(in_scope(orders))
+    a("Order counts add up to the stage-2 orders",
+      n_disp + n_short + n_excl == n_scope,
+      f"{n_disp} + {n_short} + {n_excl} = {n_scope}")
     if len(dispatch):
         breach = 0
         for sku, g in dispatch.groupby("Item"):
@@ -234,8 +236,11 @@ def funnel(orders, dispatch, short, stock, item_codes):
     Returns (orders_df, boxes_df, extras dict).  Every figure here is derived
     from the same allocation, so the funnels and the item table always agree.
     """
+    scope = in_scope(orders)
     elig, excl = screen_orders(orders, item_codes)
-    reviewed_boxes = sum(sum(_need(o).values()) for o in elig)
+    scope_boxes = sum(sum(_need(o).values()) for o in scope)     # every stage-2 box
+    excl_boxes = sum(sum(_need(o).values()) for o in excl)       # rejected before allocation
+    reviewed_boxes = scope_boxes - excl_boxes                    # boxes actually in play
     n_disp = dispatch["Order"].nunique() if len(dispatch) else 0
     boxes_alloc = float(dispatch["Qty"].sum()) if len(dispatch) else 0.0
     short_orders = short["Order"].nunique() if len(short) else 0
@@ -247,9 +252,10 @@ def funnel(orders, dispatch, short, stock, item_codes):
     buy_items = short["Item"].nunique() if len(short) else 0
 
     o_df = pd.DataFrame([
-        {"Stage": "Orders read",            "Orders": len(orders),  "Boxes": None,           "Note": ""},
-        {"Stage": "   less not considered", "Orders": len(excl),    "Boxes": None,           "Note": "see below"},
-        {"Stage": "Reviewed, stage 2",      "Orders": len(elig),    "Boxes": reviewed_boxes, "Note": ""},
+        {"Stage": "Reviewed, stage 2", "Orders": len(scope), "Boxes": scope_boxes,
+         "Note": f"of {len(orders)} unfulfilled read"},
+        {"Stage": "   less excluded", "Orders": len(excl),
+         "Boxes": excl_boxes, "Note": "see below"},
         {"Stage": "   less short",          "Orders": short_orders, "Boxes": short_boxes,    "Note": "cannot complete"},
         {"Stage": "READY TO DISPATCH",      "Orders": n_disp,       "Boxes": boxes_alloc,
          "Note": f"{urgent} urgent" if urgent else ""},
@@ -264,8 +270,33 @@ def funnel(orders, dispatch, short, stock, item_codes):
          "Note": f"{buy_items} item{'s' if buy_items != 1 else ''}" if buy_items else ""},
     ])
     extras = {"reviewed_boxes": reviewed_boxes, "allocated": boxes_alloc,
+              "scope": len(scope), "scope_boxes": scope_boxes,
+              "excluded_boxes": excl_boxes,
               "available": avail, "blocked": reviewed_boxes - boxes_alloc,
               "left": avail - boxes_alloc, "buy": buy, "urgent": urgent,
               "eligible": len(elig), "excluded": len(excl),
               "short_orders": short_orders, "short_boxes": short_boxes}
     return o_df, b_df, extras
+
+
+def scope_list(orders, dispatch, short, excluded):
+    """Every stage-2 order, with where it ended up. For reconciling against Shopify."""
+    disp = set(dispatch["Order"]) if len(dispatch) else set()
+    shrt = set(short["Order"]) if len(short) else set()
+    excl = dict(zip(excluded["Order"], excluded["Reason"])) if len(excluded) else {}
+    rows = []
+    for o in in_scope(orders):
+        n = o["name"]
+        if n in excl:      outcome, why = "Excluded", excl[n]
+        elif n in disp:    outcome, why = "Ready to dispatch", ""
+        elif n in shrt:    outcome, why = "Short", "stock not available"
+        else:              outcome, why = "Short", ""
+        rows.append({"Order": n,
+                     "Placed": pd.to_datetime(o["created"]).tz_localize(None).date(),
+                     "Boxes": sum(_need(o).values()),
+                     "Urgent": "Yes" if o.get("urgent") else "",
+                     "Outcome": outcome, "Why": why})
+    df = pd.DataFrame(rows)
+    if len(df):
+        df = df.sort_values("Order", ascending=False).reset_index(drop=True)
+    return df

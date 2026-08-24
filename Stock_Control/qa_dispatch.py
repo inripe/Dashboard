@@ -33,9 +33,10 @@ orders=[o("#1",10,[(A,1)]),
         o("#7",10,[(A,1)],fin="PAID")]
 d,s,x,pool=dispatch.allocate(orders,stock,codes)
 ck("stage 2 + COD included", set(d["Order"])=={"#1","#7"}, sorted(set(d["Order"])))
-ck("5 orders excluded", len(x)==5, f"{len(x)}")
+ck("4 orders excluded (stage-1 is out of scope, not rejected)", len(x)==4, f"{len(x)}")
 ck("every exclusion has a reason", x["Reason"].notna().all() and (x["Reason"]!="").all())
 ck("unknown sku excluded", "#6" in set(x["Order"]))
+ck("the stage-1 order is not listed at all", "#2" not in set(x["Order"]))
 
 print("=== B. URGENT BEATS OLDEST ===")
 orders=[o("#OLD",1,[(A,qa)]), o("#URG",20,[(A,qa)],urgent=True)]
@@ -89,13 +90,12 @@ d,s,x,pool=dispatch.allocate(orders,stock,codes)
 ck("multi-item order fully allocated", len(d)>=2 and d["Qty"].sum()==4, int(d["Qty"].sum()))
 
 print("=== I. CHECKS PANEL ===")
-orders=[o("#1",5,[(A,1)]), o("#2",6,[(A,qa+99)]),
-        o("#3",6,[(A,1)],stage="6. On Hold = Unfulfilled Status")]
+orders=[o("#1",5,[(A,1)]), o("#2",6,[(A,qa+99)]), o("#3",6,[("BAD-SKU",1)])]
 d,s,x,pool=dispatch.allocate(orders,stock,codes)
 c=dispatch.checks(d,s,x,orders,stock,pool)
 ck("all built-in checks pass", c["Pass"].all(),
    c[~c["Pass"]]["Check"].tolist() if not c["Pass"].all() else "")
-ck("reconciliation adds up", 1+1+1==len(orders))
+ck("reconciliation adds up within stage 2", 1+1+1==len(dispatch.in_scope(orders)))
 
 print("=== J. EMPTY CASES ===")
 d,s,x,pool=dispatch.allocate([],stock,codes)
@@ -105,47 +105,43 @@ d,s,x,pool=dispatch.allocate([o("#Z",5,[(A,1)])],empty,codes)
 ck("no stock does not crash", len(d)==0 and len(s)==1)
 
 # ===== K. LABELS AND GROUPING (added) =====
-print("=== K. STAGE LABELS ===")
-P2,F2=[],[]
-def ck2(n,ok,note=""):
-    (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
-stages={"1":"Not reviewed yet","3":"Already dispatched","4":"Confirmed by Sales Ops",
-        "5":"Delivered","6":"On hold"}
-for num,word in stages.items():
-    full=[k for k in ["1. Under Review Sales = Unfulfilled Status",
-                      "3. In progress | Stand by for Sales Ops = Unfulfilled Status",
-                      "4. OFD | Confirmed - Scheduled (Fill Field # 3) = Unfulfilled Status",
-                      "5. Partially Delivered = Fulfilled Status | Mark as Delivered",
-                      "6. On Hold = Unfulfilled Status"] if k.startswith(num)][0]
+print("=== K. OTHER STAGES ARE OUT OF SCOPE ===")
+stages={"1":"1. Under Review Sales = Unfulfilled Status",
+        "3":"3. In progress | Stand by for Sales Ops = Unfulfilled Status",
+        "4":"4. OFD | Confirmed - Scheduled (Fill Field # 3) = Unfulfilled Status",
+        "5":"5. Partially Delivered = Fulfilled Status | Mark as Delivered",
+        "6":"6. On Hold = Unfulfilled Status"}
+for num,full in stages.items():
     d,s_,x,pool=dispatch.allocate([o("#S",5,[(A,1)],stage=full)],stock,codes)
-    ck2(f"stage {num} labelled '{word}'",
-        len(x)==1 and word in str(x.iloc[0]["Reason"]), str(x.iloc[0]["Reason"]) if len(x) else "")
+    ck(f"stage {num} is not dispatched", len(d)==0)
+    ck(f"stage {num} is not listed as excluded", len(x)==0, f"{len(x)} rows")
 d,s_,x,pool=dispatch.allocate([o("#N",5,[(A,1)],stage=None)],stock,codes)
-ck2("missing stage labelled", "No order stage set" in str(x.iloc[0]["Reason"]))
+ck("no stage set is out of scope", len(d)==0 and len(x)==0)
 d,s_,x,pool=dispatch.allocate([o("#W",5,[(A,1)],stage="99. Something New")],stock,codes)
-ck2("unknown stage does not crash", "not recognised" in str(x.iloc[0]["Reason"]).lower())
+ck("an unknown stage is out of scope", len(d)==0 and len(x)==0)
 
 print("=== L. EXCLUSION GROUPING ===")
-many=[o(f"#G{i}",5,[(A,1)],stage="6. On Hold = Unfulfilled Status") for i in range(7)]
+many=[o(f"#G{i}",5,[("BAD-SKU",1)]) for i in range(7)]
 d,s_,x,pool=dispatch.allocate(many,stock,codes)
 g=dispatch.group_excluded(x)
-ck2("7 identical exclusions become 1 row", len(g)==1, f"{len(g)} rows")
-ck2("count is right", int(g.iloc[0]["Orders"])==7)
-ck2("examples are capped", "+4 more" in g.iloc[0]["Examples"], g.iloc[0]["Examples"])
-ck2("empty exclusions do not crash", len(dispatch.group_excluded(x.iloc[0:0]))==0)
+ck("7 identical exclusions become 1 row", len(g)==1, f"{len(g)} rows")
+ck("count is right", int(g.iloc[0]["Orders"])==7)
+ck("examples are capped", "+4 more" in g.iloc[0]["Examples"], g.iloc[0]["Examples"])
+ck("empty exclusions do not crash", len(dispatch.group_excluded(x.iloc[0:0]))==0)
 
 print("=== M. NO SKU vs UNKNOWN SKU ===")
 oo=o("#K1",5,[(A,1)]); oo["lines"][0]["sku"]=None
 d,s_,x,pool=dispatch.allocate([oo],stock,codes)
-ck2("missing SKU says 'no SKU in Shopify'", "no SKU in Shopify" in str(x.iloc[0]["Reason"]))
+ck("missing SKU says 'no SKU in Shopify'", "no SKU in Shopify" in str(x.iloc[0]["Reason"]))
 d,s_,x,pool=dispatch.allocate([o("#K2",5,[("BAD-SKU",1)])],stock,codes)
-ck2("unknown SKU says 'not in your item list'",
+ck("unknown SKU says 'not in your item list'",
     "not in your item list" in str(x.iloc[0]["Reason"]))
 
 print("=== N. RECONCILIATION BY ITEM ===")
 names=cfg.get("item_names",{})
 orders=[o("#R1",5,[(A,3)]), o("#R2",6,[(A,qa+40)]), o("#R3",7,[(B,2)]),
         o("#R4",8,[(A,1)],stage="6. On Hold = Unfulfilled Status")]
+# #R4 is out of scope entirely, so it must not appear in demand
 d,s_,x,pool=dispatch.allocate(orders,stock,codes)
 rec=dispatch.reconcile(d,s_,orders,stock,codes,names)
 ck("every row passes the stock identity", (rec["Stock check"]=="OK").all())
@@ -172,16 +168,15 @@ ck("item names are used, not codes", names.get(A,A) in set(rec["Item"]))
 print("=== O. FUNNELS ===")
 orders=[o("#F1",5,[(A,2)]), o("#F2",6,[(A,qa+50)]), o("#F3",7,[(B,1)]),
         o("#F4",8,[(A,1)],stage="6. On Hold = Unfulfilled Status"),
-        o("#F5",9,[(A,1)],ful="FULFILLED")]
+        o("#F5",9,[(A,1)],ful="FULFILLED")]  # F4 out of scope, F5 a stage-2 rejection
 d,s_,x,pool=dispatch.allocate(orders,stock,codes)
 of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
-eq("orders read matches input", of.loc[0,"Orders"], len(orders))
-eq("not considered matches excluded", of.loc[1,"Orders"], len(x))
-eq("reviewed = read - not considered", of.loc[2,"Orders"], len(orders)-len(x))
-eq("ready = reviewed - short", of.loc[4,"Orders"], of.loc[2,"Orders"]-of.loc[3,"Orders"])
-eq("ready orders matches dispatch list", of.loc[4,"Orders"],
+eq("reviewed counts every stage-2 order", of.loc[0,"Orders"], len(dispatch.in_scope(orders)))
+eq("ready = reviewed - not considered - short", of.loc[3,"Orders"],
+   of.loc[0,"Orders"]-of.loc[1,"Orders"]-of.loc[2,"Orders"])
+eq("ready orders matches dispatch list", of.loc[3,"Orders"],
    d["Order"].nunique() if len(d) else 0)
-eq("ready boxes matches dispatch list", of.loc[4,"Boxes"],
+eq("ready boxes matches dispatch list", of.loc[3,"Boxes"],
    d["Qty"].sum() if len(d) else 0)
 eq("reviewed boxes = allocated + blocked", ex["reviewed_boxes"],
    ex["allocated"]+ex["blocked"])
@@ -201,6 +196,121 @@ eq("funnel ties to reconcile: short to buy", bf.loc[5,"Qty"],
 of0,bf0,ex0=dispatch.funnel([],d.iloc[0:0],s_.iloc[0:0],stock,codes)
 eq("empty orders do not crash the funnel", of0.loc[0,"Orders"], 0)
 eq("empty funnel still shows the stock", bf0.loc[0,"Qty"], stock["Store"].sum())
+
+print("=== P. FUNNEL STARTS AT REVIEWED ===")
+orders=[o("#P1",5,[(A,1)]), o("#P2",6,[(A,1)],stage="1. Under Review Sales = Unfulfilled Status"),
+        o("#P3",7,[(A,1)],stage="6. On Hold = Unfulfilled Status")]
+d,s_,x,pool=dispatch.allocate(orders,stock,codes)
+of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
+ck("funnel first row is Reviewed", str(of.loc[0,"Stage"]).startswith("Reviewed"),
+   str(of.loc[0,"Stage"]))
+eq("first row counts only stage 2", of.loc[0,"Orders"], 1)
+ck("the total read is still shown as a note", "unfulfilled read" in str(of.loc[0,"Note"]),
+   str(of.loc[0,"Note"]))
+eq("funnel has 4 rows", len(of), 4)
+eq("ready still ties to the dispatch list", of.loc[3,"Orders"],
+   d["Order"].nunique() if len(d) else 0)
+eq("reviewed = not considered + short + ready", of.loc[0,"Orders"],
+   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"])
+
+print("=== Q. TRUNCATION IS SURFACED ===")
+import shopify_reader as sr
+_orig = sr.requests
+class _FakeResp:
+    status_code=200
+    def json(self):
+        return {"data":{"orders":{"pageInfo":{"hasNextPage":True,"endCursor":"c"},
+                "edges":[{"node":{"name":"#1","createdAt":"2026-08-01T00:00:00Z",
+                "cancelledAt":None,"displayFulfillmentStatus":"UNFULFILLED",
+                "displayFinancialStatus":"PENDING","stage":None,"urgent":None,
+                "lineItems":{"edges":[]}}}]}}}
+class _FakeReq:
+    @staticmethod
+    def post(url, **kw):
+        if "oauth" in url:
+            class R: status_code=200
+            R.json=lambda self=None: {"access_token":"t","expires_in":86400}
+            return R()
+        return _FakeResp()
+sr.requests=_FakeReq
+sr._token_cache={"value":"t","expires":9e18}
+import os as _os
+for k,v in {"SHOP_DOMAIN":"x.myshopify.com","SHOP_CLIENT_ID":"a",
+            "SHOP_CLIENT_SECRET":"b","SHOP_MARKET":"Qatar"}.items(): _os.environ[k]=v
+res, trunc = sr.fetch_orders(limit_pages=2)
+ck("more pages left is reported as truncated", trunc is True, str(trunc))
+sr.requests=_orig
+
+print("=== R. STAGE 2 ONLY, EVERYWHERE ===")
+others=["1. Under Review Sales = Unfulfilled Status",
+        "3. In progress | Stand by for Sales Ops = Unfulfilled Status",
+        "4. OFD | Confirmed - Scheduled (Fill Field # 3) = Unfulfilled Status",
+        "5. Partially Delivered = Fulfilled Status | Mark as Delivered",
+        "6. On Hold = Unfulfilled Status"]
+orders=[o("#S2",5,[(A,1)])]
+oo=o("#NOSKU",5,[(A,1)]); oo["lines"][0]["sku"]=None
+orders.append(oo)
+orders += [o(f"#OT{i}",6,[(A,1)],stage=st) for i,st in enumerate(others)]
+orders.append(o("#NOSTAGE",7,[(A,1)],stage=None))
+d,s_,x,pool=dispatch.allocate(orders,stock,codes)
+eq("only stage 2 is in scope", len(dispatch.in_scope(orders)), 2)
+ck("no other stage appears in Not considered",
+   not any(str(n).startswith("#OT") for n in x["Order"]), sorted(x["Order"]))
+ck("orders with no stage are out of scope too", "#NOSTAGE" not in set(x["Order"]))
+ck("a real stage-2 rejection is still listed", "#NOSKU" in set(x["Order"]))
+of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
+eq("funnel scope is stage 2 only", ex["scope"], 2)
+eq("funnel reconciles within stage 2", of.loc[0,"Orders"],
+   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"])
+eq("boxes reconcile within stage 2 too", of.loc[0,"Boxes"],
+   of.loc[1,"Boxes"]+of.loc[2,"Boxes"]+of.loc[3,"Boxes"])
+eq("boxes funnel wanted excludes rejected orders", ex["reviewed_boxes"],
+   ex["scope_boxes"]-ex["excluded_boxes"])
+c=dispatch.checks(d,s_,x,orders,stock,pool)
+ck("the count check now uses stage 2", c["Pass"].all(),
+   c[~c["Pass"]][["Check","Result"]].to_dict("records"))
+
+print("=== S. SCOPE LIST ===")
+orders=[o("#L1",5,[(A,2)]), o("#L2",6,[(A,qa+99)]), o("#L3",7,[("BAD-SKU",1)]),
+        o("#L4",8,[(A,1)],stage="6. On Hold = Unfulfilled Status"),
+        o("#L5",9,[(A,1)],urgent=True)]
+d,s_,x,pool=dispatch.allocate(orders,stock,codes)
+sl=dispatch.scope_list(orders,d,s_,x)
+eq("one row per stage-2 order", len(sl), len(dispatch.in_scope(orders)))
+ck("out-of-scope order is absent", "#L4" not in set(sl["Order"]))
+ck("every row has an outcome", sl["Outcome"].notna().all() and (sl["Outcome"]!="").all())
+ck("outcomes are only the three we expect",
+   set(sl["Outcome"]) <= {"Ready to dispatch","Short","Excluded"}, set(sl["Outcome"]))
+eq("ready rows match the dispatch list", (sl["Outcome"]=="Ready to dispatch").sum(),
+   d["Order"].nunique() if len(d) else 0)
+eq("short rows match the short list", (sl["Outcome"]=="Short").sum(),
+   s_["Order"].nunique() if len(s_) else 0)
+eq("excluded rows match", (sl["Outcome"]=="Excluded").sum(), len(x))
+ck("the rejected order carries its reason",
+   sl.loc[sl["Order"]=="#L3","Why"].iloc[0] != "")
+ck("urgent is flagged", sl.loc[sl["Order"]=="#L5","Urgent"].iloc[0]=="Yes")
+eq("boxes tie to the order", sl.loc[sl["Order"]=="#L1","Boxes"].iloc[0], 2)
+ck("csv export does not crash", len(sl.to_csv(index=False))>0)
+eq("empty scope gives an empty list", len(dispatch.scope_list([],d,s_,x)), 0)
+
+print("=== T. EXCLUDED IS PART OF STAGE 2 ===")
+orders=[o("#T1",5,[(A,1)]), o("#T2",6,[("BAD",1)]),
+        o("#T3",7,[(A,1)],fin="VOIDED"), o("#T4",8,[(A,1)],canc=True),
+        o("#T5",9,[(A,qa+99)])]
+d,s_,x,pool=dispatch.allocate(orders,stock,codes)
+of,bf,ex=dispatch.funnel(orders,d,s_,stock,codes)
+eq("all five are stage 2", ex["scope"], 5)
+eq("three are excluded", len(x), 3)
+ck("voided is one of them", "Voided" in set(x["Reason"]), sorted(set(x["Reason"])))
+ck("cancelled is one of them", "Cancelled" in set(x["Reason"]))
+ck("the funnel row is labelled excluded", "excluded" in str(of.loc[1,"Stage"]),
+   str(of.loc[1,"Stage"]))
+eq("funnel excluded count matches", of.loc[1,"Orders"], len(x))
+eq("ready + short + excluded = stage 2",
+   of.loc[1,"Orders"]+of.loc[2,"Orders"]+of.loc[3,"Orders"], ex["scope"])
+sl=dispatch.scope_list(orders,d,s_,x)
+eq("every stage-2 order is in the list", len(sl), 5)
+eq("and three of them say Excluded", (sl["Outcome"]=="Excluded").sum(), 3)
 
 print()
 for l in F: print(l)

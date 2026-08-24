@@ -685,12 +685,14 @@ with TD:
         else:
             cA, cB = st.columns([3, 1])
             with cB:
-                win = st.selectbox("Order window", [7, 14, 30, 60],
-                                   index=2, format_func=lambda d: f"Last {d} days")
+                win = st.selectbox("Order window", [0, 7, 14, 30, 60], index=0,
+                                   format_func=lambda d: "All dates" if d == 0
+                                   else f"Last {d} days")
             shop_read_at = None
+            truncated = False
             try:
                 with st.spinner("Reading orders from Shopify…"):
-                    orders = shopify.fetch_orders(days=win)
+                    orders, truncated = shopify.fetch_orders(days=win or None)
                 shop_read_at = pd.Timestamp.now()
             except Exception as e:
                 orders = None
@@ -706,6 +708,10 @@ with TD:
                 o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
                 allpass = bool(chk["Pass"].all())
                 n_disp = dd["Order"].nunique() if len(dd) else 0
+                if truncated:
+                    st.warning("Shopify still had more orders when reading stopped. "
+                               "The counts below are incomplete - narrow the window "
+                               "or tell me and I will raise the page limit.")
                 if SOURCE == "sharepoint" and SP_META:
                     _w = pd.to_datetime(SP_META["modified"]).tz_convert(None)
                     stock_stamp = f"saved {_w:%d %b %H:%M}"
@@ -732,7 +738,8 @@ with TD:
                     f'all-or-nothing, oldest shipment first</div></div>',
                     unsafe_allow_html=True)
 
-                st.subheader(f"1 \u00b7 Orders \u00b7 {smkt}, last {win} days")
+                _wl = "all dates" if not win else f"last {win} days"
+                st.subheader(f"1 \u00b7 Orders \u00b7 {smkt}, {_wl}")
                 def _ostyle(d):
                     out = pd.DataFrame("", index=d.index, columns=d.columns)
                     for i in d.index:
@@ -855,20 +862,47 @@ with TD:
                     summ = " \u00b7 " + ", ".join(
                         f"{int(r.Orders)} {str(r.Reason).lower()}"
                         for r in xg.head(2).itertuples())
-                with st.expander(f"5 \u00b7 Not considered \u00b7 {len(xx)} orders{summ}"):
-                    if len(xg):
-                        table(xg.style.format({"Orders":"{:,.0f}"}))
-                        st.markdown(f'<div class="note">{n_disp} + {ex["short_orders"]} + '
-                                    f'{len(xx)} = {len(orders)} orders read. '
-                                    f'Nothing hidden.</div>', unsafe_allow_html=True)
-                        st.write("")
-                        table(xx.style, scroll=True, height=300)
+                with st.expander(f"5 \u00b7 Excluded \u00b7 {len(xx)} of "
+                                 f"{ex['scope']} stage 2 orders{summ}"):
+                    if len(xx):
+                        st.markdown('<div class="note">These are stage 2 orders the engine '
+                                    'cannot allocate. Each one is listed with its reason.'
+                                    '</div>', unsafe_allow_html=True)
+                        xd = xx.copy()
+                        if len(xd) > 15:
+                            table(xg.style.format({"Orders": "{:,.0f}"}))
+                            st.write("")
+                        table(xd.style, scroll=True, height=280)
+                        st.markdown(f'<div class="note">{n_disp} ready + '
+                                    f'{ex["short_orders"]} short + {len(xx)} excluded '
+                                    f'= {ex["scope"]} orders at stage 2.</div>',
+                                    unsafe_allow_html=True)
                     else:
-                        st.markdown(f'<span style="color:{MUT}">Every order was '
-                                    f'considered.</span>', unsafe_allow_html=True)
+                        st.markdown(f'<span style="color:{MUT}">Nothing excluded \u2014 '
+                                    f'every stage 2 order could be allocated.</span>',
+                                    unsafe_allow_html=True)
+
+                with st.expander(f"6 \u00b7 All stage 2 orders \u00b7 {ex['scope']} "
+                                 f"\u00b7 for checking against Shopify"):
+                    sl = dsp.scope_list(orders, dd, sh_, xx)
+                    if len(sl):
+                        table(sl.style.format({"Boxes": "{:,.0f}"}), scroll=True, height=340)
+                        st.download_button(
+                            "Download this list as CSV",
+                            sl.to_csv(index=False).encode("utf-8"),
+                            file_name=f"stage2_orders_{smkt}_"
+                                      f"{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                            mime="text/csv")
+                        st.markdown('<div class="note">Export the same view from Shopify '
+                                    'and compare the order numbers. Any order here but '
+                                    'not there, or the reverse, is the one to look at.'
+                                    '</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(f'<span style="color:{MUT}">No stage 2 orders.</span>',
+                                    unsafe_allow_html=True)
 
                 ctxt = f"all {len(chk)} pass" if allpass else "FAILED"
-                with st.expander(f"6 \u00b7 Checks \u00b7 {ctxt}"):
+                with st.expander(f"7 \u00b7 Checks \u00b7 {ctxt}"):
                     cc = st.columns(2)
                     for i, r in enumerate(chk.itertuples()):
                         mark, colr = ("PASS", GRN) if r.Pass else ("FAIL", RED)
