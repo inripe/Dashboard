@@ -171,6 +171,30 @@ def _shade(v, lo, hi, ramp):
     i = int(round((float(v)-lo)/(hi-lo)*(len(ramp)-1)))
     return f"background-color: {ramp[max(0,min(i,len(ramp)-1))]}"
 
+def legend(text, ramp, low="low", high="high", extra=""):
+    """A small colour key under a shaded table. Colour with no key is just decoration."""
+    sw = "".join(f'<span style="display:inline-block;width:15px;height:9px;'
+                 f'background:{c};border:1px solid rgba(0,0,0,.06)"></span>' for c in ramp)
+    st.markdown(
+        f'<div class="note" style="margin-top:-.35rem">{text} '
+        f'<span style="color:{MUT}">{low}</span> {sw} '
+        f'<span style="color:{MUT}">{high}</span>'
+        + (f' &nbsp;&middot;&nbsp; {extra}' if extra else "") + '</div>',
+        unsafe_allow_html=True)
+
+
+def neg_red(df, cols):
+    """Negative numbers in red. A negative box count is impossible, so it must show."""
+    out = pd.DataFrame("", index=df.index, columns=df.columns)
+    for c in cols:
+        if c not in df.columns:
+            continue
+        v = pd.to_numeric(df[c], errors="coerce")
+        out[c] = [f"color:{RED};font-weight:600" if (pd.notna(x) and x < 0) else ""
+                  for x in v]
+    return out
+
+
 def heat_cols(df, cols, ramp, skip_zero=True):
     """Shade a numeric column. Zero and blank stay uncoloured by default."""
     out = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -351,8 +375,14 @@ with T1:
     body=piv.iloc[:-1,1:-1]
     sty=pd.DataFrame("",index=piv.index,columns=piv.columns)
     sty.loc[body.index,body.columns]=heat_all(body,R_BLUE).values
-    table(piv.style.format({c:"{:,.0f}" for c in piv.columns if c!="Item"})
-             .apply(lambda _:sty,axis=None))
+    _pcols=[c for c in piv.columns if c!="Item"]
+    table(piv.style.format({c:"{:,.0f}" for c in _pcols})
+             .apply(lambda _:sty,axis=None)
+             .apply(lambda d: neg_red(d,_pcols),axis=None))
+    _neg=int((pd.to_numeric(piv[_pcols].stack(),errors="coerce")<0).sum())
+    legend("Boxes in store:", R_BLUE, "fewer", "more",
+           extra=(f'<b style="color:{RED}">{_neg} negative</b> - more went out than '
+                  f'was received, check MOVES' if _neg else ""))
 
     st.subheader("What needs action")
     if len(open_exc):
@@ -396,6 +426,7 @@ with T2:
     if len(ag):
         ag["Arrival"]=ag["Arrival"].dt.strftime("%d %b")
         table(ag.style.format({"Qty":"{:,.0f}"}).apply(lambda d: heat_cols(d,["Days"],R_HEAT),axis=None))
+        legend("Days since arrival:", R_HEAT, "newer", "older")
         st.altair_chart(dark(alt.Chart(ag).mark_bar(cornerRadiusEnd=3).encode(
             x=alt.X("Qty:Q",title="Boxes"), y=alt.Y("Item:N",title=None,sort="-x"),
             color=alt.Color("Days:Q",scale=alt.Scale(range=["#B4D2F1","#E9A13B","#C0392B"]),title="Days"),
@@ -420,6 +451,7 @@ with T3:
         ["Received","Scrap","Delivered","Returned","Outstanding","DaysOpen","Span",
          "OrdersAssigned","OrdersHanded","OrdersOutstanding","OrdersVsAssigned"]}, na_rep="—")
         .apply(lambda x: heat_cols(x,["Outstanding"],R_HEAT),axis=None))
+    legend("Boxes still outstanding:", R_HEAT, "few", "many")
 
     st.subheader("Clearance curve")
     st.markdown(f'<span style="color:{MUT};font-size:.78rem">Cumulative % of received delivered, by day '
@@ -474,6 +506,7 @@ with T4:
             "OrdersReturned":"{:,.0f}","OrdersOutstanding":"{:,.0f}","QtyOut":"{:,.0f}",
             "QtyHeld":"{:,.0f}","MaxDays":"{:,.0f}","Return %":"{:.1f}%"}, na_rep="—")
             .apply(lambda d: heat_cols(d,["Return %"],R_RED),axis=None))
+        legend("Return rate:", R_RED, "low", "high")
 
         c1,c2=st.columns(2)
         with c1:
@@ -542,6 +575,7 @@ with T5:
     table(li.style.format({c:"{:,.0f}" for c in
         ["Received","Customs","Scrap","ReturnScrap","Total loss"]} | {"Loss %":"{:.1f}%"})
         .apply(lambda d: heat_cols(d,["Loss %"],R_RED),axis=None))
+    legend("Loss as a share of received:", R_RED, "low", "high")
 
 # =========================== 6 · DATA CHECK ===========================
 with T6:
@@ -617,6 +651,7 @@ with T6:
         table(v.style.format({c:"{:,.0f}" for c in ["System","Physical","Var"]})
               .apply(lambda d: heat_cols(d.assign(AbsVar=d["Var"].abs()).drop(columns="AbsVar"),
                                          ["Var"],R_RED),axis=None))
+        legend("Variance against the system figure:", R_RED, "small", "large")
         st.markdown(f'<div class="note">To correct a variance, post a Count Adjustment row in MOVES '
                     f'with a reason. A count never changes stock by itself.</div>',unsafe_allow_html=True)
     else:
@@ -929,6 +964,7 @@ with TD:
                               .apply(lambda d: heat_cols(d, ["Short to buy"], R_RED),
                                      axis=None),
                               scroll=True, height=320)
+                        legend("Boxes you would need to buy:", R_RED, "few", "many")
                         bad = int((rec["Stock check"] != "OK").sum()
                                   + (rec["Demand check"] != "OK").sum())
                         if bad:
