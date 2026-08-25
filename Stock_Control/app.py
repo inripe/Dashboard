@@ -66,6 +66,16 @@ st.markdown(f'<div class="band"><div class="hdr">{LOGO}<h1>Inripe · Inventory C
 def get_local(path, _mtime):
     return engine.load(path)
 
+@st.cache_data(ttl=120, show_spinner=False)
+def dispatch_run(_orders, _stock, _codes, strategy, cap_days, key):
+    """Cached so switching strategy or reopening the tab is instant."""
+    d, sh, xx, pool = dsp.allocate(_orders, _stock, _codes, strategy, cap_days)
+    return d, sh, xx, pool, dsp.passed_over(), dsp.dead_stage2(_orders)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def dispatch_compare(_orders, _stock, _codes, cap_days, key):
+    return dsp.compare_strategies(_orders, _stock, _codes, cap_days)
+
 @st.cache_data(ttl=30, show_spinner=False)
 def sp_meta(_bust):
     """Cheap check: has the file been saved since we last read it?"""
@@ -670,18 +680,34 @@ tells you which fields it needs.<br>
 
 # ============================= 6 · DISPATCH =============================
 with TD:
-    if not shopify.is_configured():
-        st.warning("Shopify is not connected yet. Add SHOP_DOMAIN, SHOP_CLIENT_ID, "
-                   "SHOP_CLIENT_SECRET and SHOP_MARKET to the app secrets. Missing: "
-                   + ", ".join(shopify.missing_keys()))
+    cfg_markets = shopify.configured_markets()
+    if not cfg_markets:
+        st.warning("No Shopify store is connected yet. Add SHOP_<MARKET>_DOMAIN, "
+                   "SHOP_<MARKET>_CLIENT_ID and SHOP_<MARKET>_CLIENT_SECRET to the "
+                   "app secrets - for example SHOP_QATAR_DOMAIN.")
         st.markdown('<div class="note">Until then this tab stays empty. '
                     'Nothing else on the dashboard is affected.</div>',
                     unsafe_allow_html=True)
     else:
-        smkt = shopify.market()
-        d_stock = stock[stock["Market"] == smkt] if smkt in set(stock["Market"]) else stock.iloc[0:0]
+        sheet_markets = set(stock["Market"].dropna().unique())
+        usable = [m for m in cfg_markets if m in sheet_markets]
+        missing_stock = [m for m in cfg_markets if m not in sheet_markets]
+        if not usable:
+            st.warning("Connected to " + ", ".join(cfg_markets) +
+                       ", but the entry sheet has no stock for "
+                       + ("either" if len(cfg_markets) == 2 else "any") + " of them.")
+            usable = []
+        m1, m2 = st.columns([1, 3])
+        with m1:
+            smkt = st.selectbox("Market", usable, index=0) if usable else None
+        if missing_stock:
+            m2.markdown(f'<div class="note" style="padding-top:1.9rem">Also connected: '
+                        f'{", ".join(missing_stock)} \u2014 no stock in the sheet yet.'
+                        f'</div>', unsafe_allow_html=True)
+        d_stock = stock[stock["Market"] == smkt] if smkt else stock.iloc[0:0]
         if d_stock.empty:
-            st.warning(f"No stock in the sheet for market '{smkt}'.")
+            if smkt:
+                st.warning(f"No stock in the sheet for {smkt}.")
         else:
             cA, cB = st.columns([3, 1])
             with cB:
@@ -692,7 +718,7 @@ with TD:
             truncated = False
             try:
                 with st.spinner("Reading orders from Shopify…"):
-                    orders, truncated = shopify.fetch_orders(days=win or None)
+                    orders, truncated = shopify.fetch_orders(smkt, days=win or None)
                 shop_read_at = pd.Timestamp.now()
             except Exception as e:
                 orders = None
@@ -721,9 +747,11 @@ with TD:
                                        format_func=lambda d: "no cap" if d == 0
                                        else f"{d} day" + ("" if d == 1 else "s"))
                 cap_days = None if cap == 0 else cap
+                run_key = (len(orders), int(d_stock["Store"].sum()),
+                           shop_read_at.isoformat() if shop_read_at is not None else "",
+                           stock_stamp)
                 with st.spinner("Working out the best combinations…"):
-                    cmpdf = dsp.compare_strategies(orders, d_stock, codes,
-                                                   cap_days, as_of_orders)
+                    cmpdf = dispatch_compare(orders, d_stock, codes, cap_days, run_key)
                 names = cmpdf["Strategy"].tolist()
                 same = {}
                 for a in names:
@@ -752,11 +780,10 @@ with TD:
                             f'pick. {int(d_stock["Store"].sum()):,} boxes in stock.</div>',
                             unsafe_allow_html=True)
 
-                dd, sh_, xx, pool_after = dsp.allocate(orders, d_stock, codes,
-                                                       strat, cap_days, as_of_orders)
-                nchosen = dsp.passed_over()
+                dd, sh_, xx, pool_after, nchosen, dead = dispatch_run(
+                    orders, d_stock, codes, strat, cap_days, run_key)
                 chk = dsp.checks(dd, sh_, xx, orders, d_stock, pool_after,
-                                 cap_days, as_of_orders, codes)
+                                 cap_days, None, codes)
                 shipno = dsp.ship_no_per_order(dd)
                 xg = dsp.group_excluded(xx)
                 rec = dsp.reconcile(dd, sh_, orders, d_stock, codes, cfg.get("item_names"))
@@ -935,7 +962,6 @@ with TD:
                     summ = " \u00b7 " + ", ".join(
                         f"{int(r.Orders)} {str(r.Reason).lower()}"
                         for r in xg.head(2).itertuples())
-                dead = dsp.dead_stage2(orders)
                 with st.expander(f"6 \u00b7 Excluded \u00b7 {len(xx)} of "
                                  f"{ex['scope']} stage 2 orders{summ}"
                                  + (f"  \u00b7  plus {len(dead)} cancelled or voided"

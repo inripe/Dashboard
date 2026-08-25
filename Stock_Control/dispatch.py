@@ -108,62 +108,80 @@ STRATEGIES = {
 }
 
 
-def _optimise(pool, left, w, iters=45000, seed=0):
+def _optimise(pool, left, w, iters=None, seed=0):
     """Pick the best combination of orders that fits the stock left.
 
     Greedy picking leaves stock unused, because it never reconsiders an early
     choice. This anneals: it keeps trying swaps and keeps whatever scores best.
     w weights orders against boxes - high w favours more orders, w=0 favours
     moving the most boxes.
+
+    Usage is tracked incrementally. Recomputing it from scratch each iteration
+    made the tab take the best part of a minute.
     """
     import random, math
     M = len(pool)
     if not M:
         return []
+    if iters is None:
+        iters = min(20000, max(3000, M * 120))
     rnd = random.Random(seed)
+    needs = [p["_need"] for p in pool]
+    boxes = [p["_boxes"] for p in pool]
 
-    def feasible(sel):
-        u = {}
-        for i in sel:
-            for k, v in pool[i]["_need"].items():
-                u[k] = u.get(k, 0) + v
-        return all(u.get(k, 0) <= left.get(k, 0) for k in u)
+    use = {}
+    sel = set()
 
-    def score(sel):
-        return w * len(sel) + sum(pool[i]["_boxes"] for i in sel)
+    def can_add(i):
+        return all(use.get(k, 0) + v <= left.get(k, 0) for k, v in needs[i].items())
 
-    sel, cur = set(), {}
+    def add(i):
+        for k, v in needs[i].items():
+            use[k] = use.get(k, 0) + v
+        sel.add(i)
+
+    def drop(i):
+        for k, v in needs[i].items():
+            use[k] -= v
+        sel.discard(i)
+
     for i in sorted(range(M), key=lambda i: pool[i]["_placed"]):
-        if all(cur.get(k, 0) + v <= left.get(k, 0)
-               for k, v in pool[i]["_need"].items()):
-            sel.add(i)
-            for k, v in pool[i]["_need"].items():
-                cur[k] = cur.get(k, 0) + v
-    best, best_score, cur_score = set(sel), score(sel), score(sel)
+        if can_add(i):
+            add(i)
+
+    def score():
+        return w * len(sel) + sum(boxes[i] for i in sel)
+
+    cur = score()
+    best, best_score = set(sel), cur
     for it in range(iters):
         T = max(0.02, 3.0 * (1 - it / iters))
         i = rnd.randrange(M)
-        new = set(sel)
-        if i in new:
-            new.discard(i)
+        undo = []
+        if i in sel:
+            drop(i); undo.append(("add", i))
         else:
-            new.add(i)
             tries = 0
-            while not feasible(new) and tries < 6:
-                drops = [x for x in new if x != i]
-                if not drops:
+            while not can_add(i) and tries < 6:
+                pool_drop = [x for x in sel]
+                if not pool_drop:
                     break
-                new.discard(rnd.choice(drops))
-                tries += 1
-            if not feasible(new):
+                j = rnd.choice(pool_drop)
+                drop(j); undo.append(("add", j)); tries += 1
+            if not can_add(i):
+                for act, j in reversed(undo):
+                    add(j)
                 continue
-        if not feasible(new):
-            continue
-        ns = score(new)
-        if ns >= cur_score or rnd.random() < math.exp((ns - cur_score) / T):
-            sel, cur_score = new, ns
-            if ns > best_score:
-                best, best_score = set(new), ns
+            add(i); undo.append(("drop", i))
+        new = score()
+        if new >= cur or rnd.random() < math.exp((new - cur) / T):
+            cur = new
+            if new > best_score:
+                best, best_score = set(sel), new
+        else:
+            for act, j in reversed(undo):
+                (add if act == "add" else drop)(j)
+            cur = score()
     return [pool[i] for i in best]
 
 
@@ -220,16 +238,14 @@ def allocate(orders, stock, item_codes, strategy="Balanced", cap_days=3, as_of=N
     # anneal from several seeds, plus deterministic candidates, keep the best.
     # without the deterministic ones a strategy can lose to another strategy,
     # which would make its label untrue.
+    # every strategy also evaluates the other strategies' answers under its own
+    # objective, so it can never score worse than a rival at its own game
     runs = [_optimise(rest, left, w, seed=s_) for s_ in (0, 1, 2)]
+    runs += [_optimise(rest, left, w2, seed=0)
+             for w2 in {v["w"] for v in STRATEGIES.values()} - {w}]
     runs += [greedy(lambda o: o["_placed"]),
              greedy(lambda o: (o["_boxes"], o["_placed"])),
              greedy(lambda o: (-o["_boxes"], o["_placed"]))]
-    if w == 0:
-        runs += [_optimise(rest, left, 3, seed=s_) for s_ in (0, 1)]
-    elif w >= 12:
-        runs += [_optimise(rest, left, 3, seed=s_) for s_ in (0, 1)]
-    else:
-        runs += [_optimise(rest, left, 0, seed=0), _optimise(rest, left, 12, seed=0)]
     key = ((lambda g: (sum(x["_boxes"] for x in g), len(g))) if w == 0
            else ((lambda g: (len(g), sum(x["_boxes"] for x in g))) if w >= 12
                  else (lambda g: (w * len(g) + sum(x["_boxes"] for x in g), len(g)))))

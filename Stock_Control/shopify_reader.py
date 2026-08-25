@@ -6,11 +6,14 @@ apps use the client credentials grant: the Client ID and Secret are exchanged fo
 a token that lasts about 24 hours.  This module does that exchange itself and
 caches the token in memory.
 
-Secrets (Streamlit secrets or env):
-    SHOP_DOMAIN         e.g. ismailiamango-qa.myshopify.com   (the .myshopify.com one)
-    SHOP_CLIENT_ID      Client ID from the Dev Dashboard app
-    SHOP_CLIENT_SECRET  Secret from the same app
-    SHOP_MARKET         the market these orders belong to, e.g. Qatar
+One store per market. Secrets are named per market:
+
+    SHOP_QATAR_DOMAIN / SHOP_QATAR_CLIENT_ID / SHOP_QATAR_CLIENT_SECRET
+    SHOP_UAE_DOMAIN   / SHOP_UAE_CLIENT_ID   / SHOP_UAE_CLIENT_SECRET
+    ... and the same for KSA and EGYPT.
+
+The older single-market names (SHOP_DOMAIN, SHOP_CLIENT_ID, SHOP_CLIENT_SECRET,
+SHOP_MARKET) still work and are treated as one configured market.
 """
 from __future__ import annotations
 import os, requests
@@ -19,8 +22,8 @@ API = "2024-10"
 TIMEOUT = 30
 KEY_STAGE  = ("custom", "order_stage")
 KEY_URGENT = ("custom", "5_order_exceptions")
-_KEYS = ("SHOP_DOMAIN", "SHOP_CLIENT_ID", "SHOP_CLIENT_SECRET", "SHOP_MARKET")
-_token_cache = {"value": None, "expires": 0.0}
+MARKETS = ("Qatar", "UAE", "KSA", "Egypt")
+_token_cache = {}
 
 
 def _cfg(k):
@@ -34,32 +37,77 @@ def _cfg(k):
         return None
 
 
-def is_configured(): return all(_cfg(k) for k in _KEYS)
-def missing_keys():  return [k for k in _KEYS if not _cfg(k)]
-def market():        return _cfg("SHOP_MARKET")
+def _slug(market): return str(market).strip().upper()
 
 
-def _access_token() -> str:
-    """Client credentials grant. Cached until shortly before it expires."""
+def _keys(market):
+    s = _slug(market)
+    return (f"SHOP_{s}_DOMAIN", f"SHOP_{s}_CLIENT_ID", f"SHOP_{s}_CLIENT_SECRET")
+
+
+def _creds(market):
+    """Per-market secrets, falling back to the old single-market names."""
+    dom, cid, sec = (_cfg(k) for k in _keys(market))
+    if not (dom and cid and sec):
+        legacy_market = _cfg("SHOP_MARKET")
+        if legacy_market and _slug(legacy_market) == _slug(market):
+            dom = dom or _cfg("SHOP_DOMAIN")
+            cid = cid or _cfg("SHOP_CLIENT_ID")
+            sec = sec or _cfg("SHOP_CLIENT_SECRET")
+    return dom, cid, sec
+
+
+def configured_markets():
+    """Every market that has a full set of credentials."""
+    return [m for m in MARKETS if all(_creds(m))]
+
+
+def is_configured(market=None):
+    if market is None:
+        return bool(configured_markets())
+    return all(_creds(market))
+
+
+def missing_keys(market=None):
+    if market is None:
+        return [f"SHOP_<MARKET>_DOMAIN / _CLIENT_ID / _CLIENT_SECRET"] \
+            if not configured_markets() else []
+    dom, cid, sec = _creds(market)
+    ks = _keys(market)
+    return [k for k, v in zip(ks, (dom, cid, sec)) if not v]
+
+
+def market():
+    ms = configured_markets()
+    return ms[0] if ms else None
+
+
+def _access_token(market) -> str:
+    """Client credentials grant, per market. Cached until shortly before expiry."""
     import time
-    if _token_cache["value"] and time.time() < _token_cache["expires"]:
-        return _token_cache["value"]
-    dom = _cfg("SHOP_DOMAIN")
+    c = _token_cache.get(_slug(market))
+    if c and time.time() < c["expires"]:
+        return c["value"]
+    dom, cid, sec = _creds(market)
+    if not (dom and cid and sec):
+        raise RuntimeError(f"{market} is not configured. Missing: "
+                           + ", ".join(missing_keys(market)))
     r = requests.post(
         f"https://{dom}/admin/oauth/access_token", timeout=TIMEOUT,
-        json={"client_id": _cfg("SHOP_CLIENT_ID"),
-              "client_secret": _cfg("SHOP_CLIENT_SECRET"),
+        json={"client_id": cid, "client_secret": sec,
               "grant_type": "client_credentials"})
     if r.status_code != 200:
         raise RuntimeError(
             "Could not get a token from Shopify. Check the Client ID and Secret, and that "
-            f"the app is installed on {dom}. Shopify said: {r.status_code} {r.text[:200]}")
+            f"the app is installed on {dom}. Shopify said: {r.status_code} "
+            f"{r.text[:200]}")
     body = r.json()
     tok = body.get("access_token")
     if not tok:
         raise RuntimeError(f"Shopify returned no access token: {str(body)[:200]}")
-    _token_cache["value"] = tok
-    _token_cache["expires"] = time.time() + max(60, int(body.get("expires_in", 86400)) - 300)
+    _token_cache[_slug(market)] = {
+        "value": tok,
+        "expires": time.time() + max(60, int(body.get("expires_in", 86400)) - 300)}
     return tok
 
 
@@ -79,7 +127,7 @@ query($cursor: String, $filter: String) {
 """
 
 
-def fetch_orders(limit_pages: int = 40, days: int | None = 30):
+def fetch_orders(market=None, limit_pages: int = 40, days: int | None = 30):
     """Return (orders, truncated). Read-only.
 
     days=None reads every unfulfilled order, no date cutoff.
@@ -89,10 +137,12 @@ def fetch_orders(limit_pages: int = 40, days: int | None = 30):
     import datetime as _dt
     filt = "fulfillment_status:unfulfilled"
     if days:
-        since = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        since = (_dt.datetime.now(_dt.timezone.utc)
+                 - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
         filt += f" AND created_at:>={since}"
-    dom = _cfg("SHOP_DOMAIN")
-    tok = _access_token()
+    market = market or _default_market()
+    dom, _, _ = _creds(market)
+    tok = _access_token(market)
     url = f"https://{dom}/admin/api/{API}/graphql.json"
     hdr = {"X-Shopify-Access-Token": tok, "Content-Type": "application/json"}
     out, cursor, truncated = [], None, False
@@ -130,17 +180,34 @@ def fetch_orders(limit_pages: int = 40, days: int | None = 30):
     return out, truncated
 
 
+def _default_market():
+    ms = configured_markets()
+    if not ms:
+        raise RuntimeError("No market is configured.")
+    return ms[0]
+
+
 def selftest():
-    if not is_configured():
-        print("NOT CONFIGURED. Missing:", ", ".join(missing_keys())); return
-    try:
-        _access_token(); print("token obtained OK")
-        o, trunc = fetch_orders(limit_pages=1)
-        print(f"CONNECTED OK - {len(o)} unfulfilled orders read from {_cfg('SHOP_DOMAIN')}"
-              + (" (more pages available)" if trunc else ""))
-        if o: print("  newest:", o[0]["name"], "|", o[0]["stage"])
-    except Exception as e:
-        print("FAILED\n ", e)
+    ms = configured_markets()
+    if not ms:
+        print("NOT CONFIGURED. Add SHOP_<MARKET>_DOMAIN, SHOP_<MARKET>_CLIENT_ID "
+              "and SHOP_<MARKET>_CLIENT_SECRET - for example SHOP_QATAR_DOMAIN.")
+        return
+    print("configured markets:", ", ".join(ms))
+    for m in ms:
+        dom, _, _ = _creds(m)
+        try:
+            _access_token(m)
+            o, trunc = fetch_orders(m, limit_pages=1)
+            print(f"  {m:<7} OK   {len(o)} unfulfilled orders from {dom}"
+                  + ("  (more pages available)" if trunc else ""))
+            if o:
+                print(f"          newest {o[0]['name']} | {o[0]['stage']}")
+        except Exception as e:
+            print(f"  {m:<7} FAILED  {e}")
+    for m in MARKETS:
+        if m not in ms:
+            print(f"  {m:<7} not configured")
 
 
 if __name__ == "__main__":
