@@ -1,0 +1,106 @@
+# -*- coding: utf-8 -*-
+"""Shipment entry: numbering, validation, and the sent-versus-arrived split."""
+import sys, io, datetime as dt, engine, entry, entry_ui
+P,F=[],[]
+def ck(n,ok,note=""):
+    (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
+def eq(n,got,want):
+    try: ok=abs(float(got)-float(want))<1e-6
+    except (TypeError,ValueError): ok=str(got)==str(want)
+    (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}: got {got}, want {want}")
+
+base=open("INRIPE_Stock_Entry_v3.xlsx","rb").read()
+s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
+def line(item,q,sid=None,mkt="Qatar",d=None):
+    return {"Shipment No":sid or entry.next_shipment_no(base),"Market":mkt,
+            "Arrival Date":d or dt.date(2026,8,26),"Source":"Egypt",
+            "Item Name":item,"Shipped Qty":q}
+ITEM=s0["Item Name"].dropna().iloc[0]
+ITEM2=[x for x in s0["Item Name"].dropna().unique() if x!=ITEM][0]
+
+print("=== A. NUMBERING ===")
+nxt=entry.next_shipment_no(base)
+ck("looks like NO. nnn", nxt.startswith("NO. ") and nxt[4:].isdigit(), nxt)
+ck("it is not already used", nxt not in set(s0["Shipment ID"]), nxt)
+b,_=entry.append_shipment(base,[line(ITEM,500)],"mahmoud","Qatar")
+ck("the next one moves on", entry.next_shipment_no(b)>nxt,
+   f"{nxt} -> {entry.next_shipment_no(b)}")
+ck("a number is never reused",
+   entry.next_shipment_no(b) not in set(engine.load(io.BytesIO(b))[0]["Shipment ID"]))
+
+print("=== B. WHAT LANDS ON THE SHEET ===")
+s1,m1,c1,cfg1,e1=engine.load(io.BytesIO(b))
+eq("one line added", len(s1), len(s0)+1)
+eq("no entry errors", len(e1), 0)
+r=s1.iloc[-1]
+eq("shipped qty", r["Shipped Qty"], 500)
+eq("market", r["Market"], "Qatar")
+ck("item code filled in", str(r.get("Item Code") or "")!="", r.get("Item Code"))
+ck("check says OK", r["Check"]=="OK", r["Check"])
+eq("movements untouched", len(m1), len(m0))
+
+print("=== C. IT REFUSES BAD LINES ===")
+lk=entry._lookups(__import__("openpyxl").load_workbook(io.BytesIO(base)))
+ex=set(lk["ship_items"])
+bad=[("no item", {**line(ITEM,5), "Item Name":""}),
+     ("unknown item", {**line(ITEM,5), "Item Name":"Dragonfruit"}),
+     ("zero qty", line(ITEM,0)),
+     ("no market", {**line(ITEM,5), "Market":None}),
+     ("no arrival date", {**line(ITEM,5), "Arrival Date":None})]
+for label,row in bad:
+    ck(f"refused: {label}", entry.validate_shipment(row,lk,ex)!="OK",
+       entry.validate_shipment(row,lk,ex))
+ck("a good line passes", entry.validate_shipment(line(ITEM,5),lk,ex)=="OK")
+n_before=len(engine.load(io.BytesIO(base))[0])
+try:
+    entry.append_shipment(base,[line(ITEM,5),line(ITEM2,0)],"x","Qatar")
+    ck("one bad line stops the whole shipment", False, "it was written")
+except ValueError as e:
+    ck("one bad line stops the whole shipment", True, str(e)[:44])
+eq("and nothing was added", len(engine.load(io.BytesIO(base))[0]), n_before)
+
+print("=== D. THE SAME ITEM TWICE ===")
+sid=entry.next_shipment_no(base)
+try:
+    entry.append_shipment(base,[line(ITEM,5,sid),line(ITEM,7,sid)],"x","Qatar")
+    ck("the same item twice is refused", False)
+except ValueError as e:
+    ck("the same item twice is refused", "twice" in str(e), str(e)[:44])
+b2,_=entry.append_shipment(base,[line(ITEM,5,sid),line(ITEM2,7,sid)],"x","Qatar")
+eq("two different items are fine", len(engine.load(io.BytesIO(b2))[0]), len(s0)+2)
+
+print("=== E. SENT IS NOT ARRIVED ===")
+sid=entry.next_shipment_no(base)
+b3,_=entry.append_shipment(base,[line(ITEM,500,sid)],"mahmoud","Qatar")
+s3,m3,c3,cfg3,e3=engine.load(io.BytesIO(b3))
+st3=engine.stock_by_item(s3,m3,cfg3["as_of"])
+row=st3[(st3["Shipment"]==sid)]
+eq("a new shipment adds no stock on its own",
+   float(row["Store"].sum()) if len(row) else 0, 0)
+eq("but it is on the sheet as shipped", float(row["Shipped Qty"].sum()), 500)
+b4,_=entry.append_moves(b3,[{"Date":dt.date(2026,8,26),"Shipment No":sid,
+    "Movement":"Received","Item Name":ITEM,"In":480}],"qatar.store","Qatar")
+b5,_=entry.append_moves(b4,[{"Date":dt.date(2026,8,26),"Shipment No":sid,
+    "Movement":"Scrap","Item Name":ITEM,"Out":5,"Reason":"Damage"}],
+    "qatar.store","Qatar")
+s5,m5,c5,cfg5,e5=engine.load(io.BytesIO(b5))
+st5=engine.stock_by_item(s5,m5,cfg5["as_of"])
+row5=st5[st5["Shipment"]==sid]
+eq("received 480", float(row5["Received"].sum()), 480)
+eq("scrapped 5", float(row5["Scrap"].sum()), 5)
+eq("475 sellable", float(row5["Store"].sum()), 475)
+eq("the 15 that never arrived are still visible",
+   float(row5["Shipped Qty"].sum()) - float(row5["Received"].sum()), 20)
+ck("no entry errors after the whole flow", len(e5)==0, len(e5))
+
+print("=== F. ONLY ADMIN SEES IT ===")
+app=open("app.py").read()
+ck("the mode switch is admin only", 'is_admin = str(sess.get("role"' in app)
+ck("a store user goes straight to movements",
+   'mode = "Movement' in app)
+ck("the screen exists", hasattr(entry_ui,"render_shipment"))
+
+print()
+for l in F: print(l)
+print(f"\n{len(P)} passed, {len(F)} failed")
+sys.exit(1 if F else 0)

@@ -1,6 +1,7 @@
 import streamlit as st, pandas as pd, numpy as np, altair as alt, os
 import engine
 import sharepoint_loader as sp
+import entry, entry_ui, auth, labels as L
 import dispatch as dsp
 import shopify_reader as shopify
 
@@ -13,6 +14,7 @@ ACC="#2E75B6"; GRN="#1D8A5E"; RED="#C0392B"; AMB="#C77E1B"; VIO="#6C4FBF"
 
 st.markdown(f"""<style>
 .block-container{{padding-top:4.2rem;padding-bottom:3rem;max-width:1500px}}
+[lang="ar"],.ar{{font-family:"Noto Naskh Arabic","Geeza Pro",serif}}
 h2{{font-size:.78rem!important;font-weight:600!important;text-transform:uppercase;
    letter-spacing:.09em;color:{MUT}!important;margin:1.7rem 0 .6rem!important}}
 h3{{font-size:.95rem!important;font-weight:600!important;margin:1rem 0 .4rem!important;color:{INK}}}
@@ -319,8 +321,73 @@ def delta(df,col,unit=""):
     return f"{(now-prev)/abs(prev)*100:+.0f}%" if not unit else f"{now-prev:+.1f}{unit}"
 
 EMPTY = len(sf)==0
-TABS = st.tabs(["Overview","Stock","Shipments","Couriers","Losses","Dispatch","Data check","Guide"])
-T1,T2,T3,T4,T5,TD,T6,T7 = TABS
+_names = ["Overview","Stock","Shipments","Couriers","Losses","Dispatch","Data check","Guide"]
+ENTRY_ON = auth.is_enabled(cfg.get("users", {}))
+if ENTRY_ON:
+    _names.insert(0, "Entry")
+TABS = st.tabs(_names)
+if ENTRY_ON:
+    TE, T1,T2,T3,T4,T5,TD,T6,T7 = TABS
+else:
+    TE = None
+    T1,T2,T3,T4,T5,TD,T6,T7 = TABS
+
+
+def _gate(tab, title):
+      """Sign-in for one tab. The other seven stay open to everyone."""
+      sess = st.session_state.get("auth")
+      if sess and auth.can_open(sess, tab):
+          c1, c2 = st.columns([4, 1])
+          c1.markdown(f'<div class="note">Signed in as <b>{sess["user"]}</b> '
+                      f'&nbsp;&middot;&nbsp; {sess["role"]}'
+                      f'{" &middot; " + sess["market"] if sess.get("market") else ""}'
+                      f'</div>', unsafe_allow_html=True)
+          if c2.button("Sign out", key=f"out_{tab}"):
+              st.session_state.pop("auth", None)
+              st.rerun()
+          return sess
+      if sess:
+          st.warning(f"{sess['user']} is signed in as {sess['role']}, which does not "
+                     f"open {title}. Roles that do: "
+                     + ", ".join(auth.roles_for(tab)).title() + ".")
+          if st.button("Sign out", key=f"out2_{tab}"):
+              st.session_state.pop("auth", None)
+              st.rerun()
+          return None
+      st.markdown(f"**{title} — Sign in**"
+                + ("  ·  تسجيل الدخول" if tab == "entry" else ""))
+      names = sorted(un for un, r in cfg.get("users", {}).items()
+                     if auth.can_open({"role": r.get("role")}, tab))
+      c1, c2, c3 = st.columns([2, 2, 1])
+      if names:
+          u = c1.selectbox("User", names, index=None,
+                           placeholder="Choose your name", key=f"u_{tab}")
+      else:
+          u = c1.text_input("User", key=f"u_{tab}")
+          st.warning("No user on the MASTER sheet has a role that opens "
+                     + title + ". Add one with role "
+                     + " or ".join(auth.roles_for(tab)).title() + ".")
+      p = c2.text_input("Password", type="password", key=f"p_{tab}")
+      c3.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+      if c3.button("Sign in", type="primary", key=f"in_{tab}"):
+          ok, res = auth.check(u, p, cfg.get("users", {}))
+          if not ok:
+              st.error(res)
+          elif not auth.can_open(res, tab):
+              st.error(f"{res['user']} is a {res['role']} user, which does not open "
+                       f"{title}.")
+          else:
+              st.session_state["auth"] = res
+              for k in list(st.session_state):
+                  if k.startswith("e_"):
+                      st.session_state.pop(k, None)
+              st.rerun()
+      st.markdown('<div class="note">Users are listed on the MASTER sheet. Your market '
+                  'comes from there, so it cannot be picked by mistake.</div>',
+                  unsafe_allow_html=True)
+      return None
+
+
 if EMPTY:
     for T in TABS[:-1]:
         with T: st.info("No shipments match this filter. Choose another market or shipment.")
@@ -659,14 +726,57 @@ with T6:
 
 # ============================== 7 · GUIDE ==============================
 with T7:
-    st.subheader("How this works")
+    st.subheader("How a shipment flows  ·  كيف تسير الشحنة")
     st.markdown(f"""<div class="card">
-<b>You type three things in Excel.</b> Everything on this dashboard is calculated from them.<br><br>
-<span style="color:{MUT}">SHIPMENTS</span> — what Egypt sent, one row per shipment and item.<br>
-<span style="color:{MUT}">MOVES</span> — every physical event, one row each. The main log.<br>
-<span style="color:{MUT}">COUNT</span> — the physical stock check, weekly.<br><br>
-<b>Golden rule:</b> stock only ever changes through MOVES. A count never changes stock by itself.
-</div>""", unsafe_allow_html=True)
+<b>Two people, two jobs.</b> You record what was <b>sent</b>. The store records
+what <b>arrived</b>. The difference is your transit loss, and it only stays
+visible because they are entered separately.
+<div style="direction:rtl;text-align:right;margin-top:.5rem">
+<b>شخصان، مهمتان.</b> أنت تسجل ما تم <b>إرساله</b>. المخزن يسجل ما <b>وصل</b>.
+الفرق بينهما هو الفاقد أثناء النقل، ويظل ظاهراً لأن كلاً منهما يُسجَّل على حدة.
+</div></div>""", unsafe_allow_html=True)
+
+    flow = pd.DataFrame([
+        ["1", "Shipment created — 500 shipped", "You", "Entry → New shipment",
+         "\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0634\u062d\u0646\u0629 \u2014 500 \u0645\u0631\u0633\u0644"],
+        ["2", "480 arrive", "Store", "Entry → \u2193 IN Received",
+         "\u0648\u0635\u0644 480 \u2014 \u0627\u0633\u062a\u0644\u0627\u0645"],
+        ["3", "5 damaged", "Store", "Entry → \u2191 OUT Scrap, reason Damage",
+         "5 \u062a\u0627\u0644\u0641 \u2014 \u0625\u062a\u0644\u0627\u0641"],
+        ["4", "15 never arrived", "You", "Entry → \u2191 OUT Customs / Loss",
+         "15 \u0644\u0645 \u062a\u0635\u0644 \u2014 \u0641\u0642\u062f \u0641\u064a \u0627\u0644\u062c\u0645\u0627\u0631\u0643"],
+        ["5", "475 sold and handed over", "Store", "Entry → \u2191 OUT To Courier",
+         "\u062a\u0633\u0644\u064a\u0645 \u0644\u0644\u0645\u0646\u062f\u0648\u0628"],
+        ["6", "Courier delivers", "Store", "Entry → \u2191 OUT Delivered",
+         "\u062a\u0645 \u0627\u0644\u062a\u0648\u0635\u064a\u0644"],
+        ["7", "Customer refuses, it comes back", "Store", "Entry → \u2193 IN Returned",
+         "\u0645\u0631\u062a\u062c\u0639"],
+    ], columns=["", "What happened", "Who", "Where", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"])
+    def _fstyle(d):
+        o = pd.DataFrame("", index=d.index, columns=d.columns)
+        o["Who"] = [f"color:{ACC};font-weight:600" if v == "You"
+                    else f"color:{GRN};font-weight:600" for v in d["Who"]]
+        o["\u0627\u0644\u0639\u0631\u0628\u064a\u0629"] = "direction:rtl;text-align:right"
+        return o
+    table(flow.style.apply(_fstyle, axis=None))
+    st.markdown(f'<div class="note">Shipped 500, received 480, scrapped 5 → '
+                f'<b>15 lost in transit</b>, <b>475 sellable</b>. If the store '
+                f'had simply entered 480 as the shipment, those 15 would have '
+                f'disappeared without trace.</div>', unsafe_allow_html=True)
+
+    st.subheader("Where things are recorded")
+    st.markdown(f"""<div class="card">
+<b>Nobody types in the Excel any more.</b> Everything goes through the Entry tab,
+and the workbook is the record it writes to.<br><br>
+<span style="color:{MUT}">Entry → New shipment</span> — admin only. What was sent.<br>
+<span style="color:{MUT}">Entry → Movement</span> — the store. What physically happened.<br>
+<span style="color:{MUT}">SHIPMENTS, MOVES, COUNT</span> — written by the app, read by this dashboard.<br><br>
+<b>Golden rule:</b> stock only ever changes through a movement. A count never
+changes stock by itself — post a Count Adjustment instead.
+<div style="direction:rtl;text-align:right;margin-top:.6rem">
+<b>القاعدة الذهبية:</b> المخزون لا يتغير إلا بحركة. الجرد وحده لا يغيّر المخزون —
+سجّل تسوية جرد بدلاً من ذلك.
+</div></div>""", unsafe_allow_html=True)
 
     st.subheader("The numbers, and how each one is worked out")
     terms=pd.DataFrame([
@@ -740,358 +850,434 @@ tells you which fields it needs.<br>
 
 # ============================= 6 · DISPATCH =============================
 with TD:
-    cfg_markets = shopify.configured_markets()
-    if not cfg_markets:
-        st.warning("No Shopify store is connected yet. Add SHOP_<MARKET>_DOMAIN, "
-                   "SHOP_<MARKET>_CLIENT_ID and SHOP_<MARKET>_CLIENT_SECRET to the "
-                   "app secrets - for example SHOP_QATAR_DOMAIN.")
-        st.markdown('<div class="note">Until then this tab stays empty. '
-                    'Nothing else on the dashboard is affected.</div>',
-                    unsafe_allow_html=True)
-    else:
-        sheet_markets = set(stock["Market"].dropna().unique())
-        usable = [m for m in cfg_markets if m in sheet_markets]
-        missing_stock = [m for m in cfg_markets if m not in sheet_markets]
-        if not usable:
-            st.warning("Connected to " + ", ".join(cfg_markets) +
-                       ", but the entry sheet has no stock for "
-                       + ("either" if len(cfg_markets) == 2 else "any") + " of them.")
-            usable = []
-        m1, m2 = st.columns([1, 3])
-        with m1:
-            smkt = st.selectbox("Market", usable, index=0) if usable else None
-        if missing_stock:
-            m2.markdown(f'<div class="note" style="padding-top:1.9rem">Also connected: '
-                        f'{", ".join(missing_stock)} \u2014 no stock in the sheet yet.'
-                        f'</div>', unsafe_allow_html=True)
-        d_stock = stock[stock["Market"] == smkt] if smkt else stock.iloc[0:0]
-        if d_stock.empty:
-            if smkt:
-                st.warning(f"No stock in the sheet for {smkt}.")
-        else:
-            cA, cB = st.columns([3, 1])
-            with cB:
-                win = st.selectbox("Order window", [0, 7, 14, 30, 60], index=0,
-                                   format_func=lambda d: "All dates" if d == 0
-                                   else f"Last {d} days")
-            shop_read_at = None
-            truncated = False
+  _dsess = _gate("dispatch", "Dispatch") if ENTRY_ON else {"role": "open"}
+  if _dsess:
+      cfg_markets = shopify.configured_markets()
+      if not cfg_markets:
+          st.warning("No Shopify store is connected yet. Add SHOP_<MARKET>_DOMAIN, "
+                     "SHOP_<MARKET>_CLIENT_ID and SHOP_<MARKET>_CLIENT_SECRET to the "
+                     "app secrets - for example SHOP_QATAR_DOMAIN.")
+          st.markdown('<div class="note">Until then this tab stays empty. '
+                      'Nothing else on the dashboard is affected.</div>',
+                      unsafe_allow_html=True)
+      else:
+          sheet_markets = set(stock["Market"].dropna().unique())
+          usable = [m for m in cfg_markets if m in sheet_markets]
+          missing_stock = [m for m in cfg_markets if m not in sheet_markets]
+          if not usable:
+              st.warning("Connected to " + ", ".join(cfg_markets) +
+                         ", but the entry sheet has no stock for "
+                         + ("either" if len(cfg_markets) == 2 else "any") + " of them.")
+              usable = []
+          m1, m2 = st.columns([1, 3])
+          with m1:
+              smkt = st.selectbox("Market", usable, index=0) if usable else None
+          if missing_stock:
+              m2.markdown(f'<div class="note" style="padding-top:1.9rem">Also connected: '
+                          f'{", ".join(missing_stock)} \u2014 no stock in the sheet yet.'
+                          f'</div>', unsafe_allow_html=True)
+          d_stock = stock[stock["Market"] == smkt] if smkt else stock.iloc[0:0]
+          if d_stock.empty:
+              if smkt:
+                  st.warning(f"No stock in the sheet for {smkt}.")
+          else:
+              cA, cB = st.columns([3, 1])
+              with cB:
+                  win = st.selectbox("Order window", [0, 7, 14, 30, 60], index=0,
+                                     format_func=lambda d: "All dates" if d == 0
+                                     else f"Last {d} days")
+              shop_read_at = None
+              truncated = False
+              try:
+                  with st.spinner("Reading orders from Shopify…"):
+                      orders, truncated = shopify.fetch_orders(smkt, days=win or None)
+                  shop_read_at = pd.Timestamp.now()
+              except Exception as e:
+                  orders = None
+                  st.error(f"Could not read Shopify: {e}")
+
+              if orders is not None:
+                  codes = set(cfg.get("item_names", {}).keys())
+                  as_of_orders = pd.Timestamp.now().normalize()
+                  if SOURCE == "sharepoint" and SP_META:
+                      _w, _ = in_market_time(SP_META["modified"], smkt)
+                      stock_stamp = "saved " + _w.split(" · ")[0].rsplit(" ", 1)[0] \
+                          + " " + _w.split(" · ")[1]
+                  elif os.path.exists(DATA):
+                      _w, _ = in_market_time(
+                          pd.Timestamp.fromtimestamp(os.path.getmtime(DATA), tz="UTC"), smkt)
+                      stock_stamp = "saved " + _w.split(" · ")[0].rsplit(" ", 1)[0] \
+                          + " " + _w.split(" · ")[1]
+                  else:
+                      stock_stamp = "unknown"
+                  if shop_read_at is not None:
+                      _r, _ = in_market_time(shop_read_at.tz_localize("UTC")
+                                             if shop_read_at.tzinfo is None
+                                             else shop_read_at, smkt)
+                      shop_stamp = _r.split(" · ")[0].rsplit(" ", 1)[0] + " " + _r.split(" · ")[1]
+                  else:
+                      shop_stamp = "unknown"
+
+                  # ---------- 1 · strategy ----------
+                  st.subheader("1 \u00b7 How to allocate")
+                  g1, g2 = st.columns([1, 3])
+                  with g1:
+                      cap = st.selectbox("Nothing waits longer than", [1, 2, 3, 5, 7, 0],
+                                         index=2,
+                                         format_func=lambda d: "no cap" if d == 0
+                                         else f"{d} day" + ("" if d == 1 else "s"))
+                  cap_days = None if cap == 0 else cap
+                  run_key = (len(orders), int(d_stock["Store"].sum()),
+                             shop_read_at.isoformat() if shop_read_at is not None else "",
+                             stock_stamp)
+                  with st.spinner("Working out the best combinations…"):
+                      cmpdf = dispatch_compare(orders, d_stock, codes, cap_days, run_key)
+                  names = cmpdf["Strategy"].tolist()
+                  same = {}
+                  for a in names:
+                      for b in names:
+                          if a != b and cmpdf.loc[cmpdf.Strategy == a, "_sel"].iloc[0] == \
+                                        cmpdf.loc[cmpdf.Strategy == b, "_sel"].iloc[0]:
+                              same.setdefault(a, b)
+                  view = cmpdf.drop(columns="_sel").copy()
+                  view["Use it when"] = [
+                      f"Same as {same[n]} today" if n in same and names.index(same[n]) < names.index(n)
+                      else w for n, w in zip(view["Strategy"], view["Use it when"])]
+                  strat = st.radio("Strategy", names, index=1, horizontal=True,
+                                   label_visibility="collapsed")
+                  def _sstyle(dfx):
+                      o = pd.DataFrame("", index=dfx.index, columns=dfx.columns)
+                      for i2 in dfx.index:
+                          if dfx.loc[i2, "Strategy"] == strat:
+                              o.loc[i2, :] = f"background-color:#EAF2FB;color:{ACC};font-weight:600"
+                      return o
+                  table(view.style.format({"Orders": "{:,.0f}", "Boxes out": "{:,.0f}",
+                                           "Left in store": "{:,.0f}",
+                                           "Oldest waiting": "{:,.0f} days"})
+                        .apply(_sstyle, axis=None))
+                  n_cap = 0
+                  st.markdown(f'<div class="note">Urgent orders are always in, whatever you '
+                              f'pick. {int(d_stock["Store"].sum()):,} boxes in stock.</div>',
+                              unsafe_allow_html=True)
+
+                  dd, sh_, xx, pool_after, nchosen, dead = dispatch_run(
+                      orders, d_stock, codes, strat, cap_days, run_key)
+                  chk = dsp.checks(dd, sh_, xx, orders, d_stock, pool_after,
+                                   cap_days, None, codes)
+                  shipno = dsp.ship_no_per_order(dd)
+                  xg = dsp.group_excluded(xx)
+                  rec = dsp.reconcile(dd, sh_, orders, d_stock, codes, cfg.get("item_names"))
+                  o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
+                  allpass = bool(chk["Pass"].all())
+                  n_disp = dd["Order"].nunique() if len(dd) else 0
+                  if len(dd):
+                      n_cap = int((dd.drop_duplicates("Order")["Rule"] == "CAP").sum())
+
+                  # what changes if you switch
+                  cur = cmpdf.loc[cmpdf.Strategy == strat, "_sel"].iloc[0]
+                  bits = []
+                  for other in names:
+                      if other == strat:
+                          continue
+                      osel = cmpdf.loc[cmpdf.Strategy == other, "_sel"].iloc[0]
+                      add, drop = sorted(cur - osel), sorted(osel - cur)
+                      if not add and not drop:
+                          bits.append(f"<b>{strat} instead of {other}</b> "
+                                      f"<span style=\'color:{MUT}\'>&mdash; same orders</span>")
+                      else:
+                          bits.append(
+                              f"<b>{strat} instead of {other}</b> "
+                              f"<span style=\'color:{MUT}\'>&mdash; adds {len(add)}, "
+                              f"drops {len(drop)}</span><br>"
+                              + (f"adds: {', '.join(add[:4])}"
+                                 + (f" +{len(add)-4} more" if len(add) > 4 else "") + "<br>" if add else "")
+                              + (f"drops: {', '.join(drop[:4])}"
+                                 + (f" +{len(drop)-4} more" if len(drop) > 4 else "") if drop else ""))
+                  cc1, cc2 = st.columns(2)
+                  for col, b in zip((cc1, cc2), bits):
+                      col.markdown(f'<div class="card" style="font-size:.78rem;'
+                                   f'line-height:1.7">{b}</div>', unsafe_allow_html=True)
+                  st.write("")
+
+                  bar_c, bar_t = (GRN, "All checks pass") if allpass else (RED, "A check failed")
+                  st.markdown(
+                      f'<div class="card" style="border-left:3px solid {bar_c}">'
+                      f'<b style="color:{bar_c}">{bar_t}</b> &nbsp;&middot;&nbsp; '
+                      f'<b>{ex["allocated"]:,.0f}</b> boxes ready for <b>{n_disp}</b> orders'
+                      f' &nbsp;&middot;&nbsp; <span style="color:{MUT}">read-only, '
+                      f'nothing is written</span>'
+                      f'<div class="note">{strat}'
+                      f'{f" &middot; {cap_days} day cap &middot; {n_cap} orders forced out" if cap_days else " &middot; no age cap"}'
+                      f' &nbsp;&middot;&nbsp; stock from '
+                      f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"} '
+                      f'({stock_stamp}) &nbsp;&middot;&nbsp; Shopify read {shop_stamp}'
+                      f' &nbsp;&middot;&nbsp; {smkt} time'
+                      f'</div></div>', unsafe_allow_html=True)
+
+                  _wl = "all dates" if not win else f"last {win} days"
+                  st.subheader(f"2 \u00b7 Orders \u00b7 {smkt}, {_wl}")
+                  def _ostyle(d):
+                      out = pd.DataFrame("", index=d.index, columns=d.columns)
+                      for i in d.index:
+                          stg = str(d.loc[i, "Stage"])
+                          if stg.startswith("READY"):
+                              out.loc[i, :] = f"color:{GRN};font-weight:600"
+                          elif "short" in stg:
+                              out.loc[i, :] = f"color:{AMB}"
+                          elif stg.startswith("   "):
+                              out.loc[i, :] = f"color:{MUT}"
+                          else:
+                              out.loc[i, :] = "font-weight:600"
+                      return out
+                  table(o_fun.style.format({"Orders": "{:,.0f}", "Boxes": "{:,.0f}"},
+                                           na_rep="\u2014").apply(_ostyle, axis=None))
+
+                  st.subheader("3 \u00b7 Boxes")
+                  def _bstyle(d):
+                      out = pd.DataFrame("", index=d.index, columns=d.columns)
+                      for i in d.index:
+                          w = str(d.loc[i, "Where the boxes are"])
+                          if w.startswith("SHORT"):
+                              out.loc[i, :] = f"color:{RED};font-weight:600"
+                          elif "allocated" in w:
+                              out.loc[i, :] = f"color:{GRN};font-weight:600"
+                          elif "blocked" in w:
+                              out.loc[i, :] = f"color:{AMB}"
+                          elif w.startswith("   "):
+                              out.loc[i, :] = f"color:{MUT}"
+                          else:
+                              out.loc[i, :] = "font-weight:600"
+                      return out
+                  table(b_fun.style.format({"Qty": "{:,.0f}"}).apply(_bstyle, axis=None))
+                  st.markdown('<div class="note">Available = Allocated + Left'
+                              ' &nbsp;&middot;&nbsp; Wanted = Allocated + Blocked</div>',
+                              unsafe_allow_html=True)
+
+                  with st.expander("By item", expanded=True):
+                      if len(rec):
+                          r2 = rec.rename(columns={"Needed": "Wanted",
+                                                   "Not allocated": "Blocked"})
+                          icols = ["Available","Wanted","Allocated","Blocked",
+                                   "Short to buy","Left"]
+                          tot = {"Item": "Total"}
+                          for c in icols: tot[c] = r2[c].sum()
+                          r2 = pd.concat([r2, pd.DataFrame([tot])], ignore_index=True)
+                          def _istyle(d):
+                              out = pd.DataFrame("", index=d.index, columns=d.columns)
+                              for i in d.index:
+                                  if d.loc[i, "Item"] == "Total":
+                                      out.loc[i, :] = "font-weight:600"
+                                  elif float(d.loc[i, "Wanted"]) == 0:
+                                      out.loc[i, :] = f"color:{MUT}"
+                              return out
+                          table(r2[["Item"] + icols].style
+                                .format({c: "{:,.0f}" for c in icols})
+                                .apply(_istyle, axis=None)
+                                .apply(lambda d: heat_cols(d, ["Short to buy"], R_RED),
+                                       axis=None),
+                                scroll=True, height=320)
+                          legend("Boxes you would need to buy:", R_RED, "few", "many")
+                          bad = int((rec["Stock check"] != "OK").sum()
+                                    + (rec["Demand check"] != "OK").sum())
+                          if bad:
+                              st.markdown(f'<div class="note" style="color:{RED}">'
+                                          f'{bad} rows do not reconcile.</div>',
+                                          unsafe_allow_html=True)
+                          else:
+                              st.markdown('<div class="note">Every row reconciles. '
+                                          'Totals tie to the funnel above.</div>',
+                                          unsafe_allow_html=True)
+
+                  st.subheader(f"4 \u00b7 Dispatch list \u00b7 {n_disp} orders")
+                  if len(dd):
+                      lines = dd.assign(ItemName=dd["Item"].map(nm))
+                      items = (lines.groupby(["Order","ItemName"])["Qty"].sum()
+                                    .reset_index()
+                                    .assign(txt=lambda t: t["ItemName"] + " x" +
+                                            t["Qty"].astype(int).astype(str))
+                                    .groupby("Order")["txt"]
+                                    .apply(lambda v: ", ".join(v)))
+                      per = (lines.groupby("Order")
+                                  .agg(Placed=("Placed","first"), Rule=("Rule","first"),
+                                       Boxes=("Qty","sum"),
+                                       From=("Shipment", lambda v: ", ".join(sorted(set(v)))))
+                                  .reset_index())
+                      per["Items"] = per["Order"].map(items)
+                      per["Ship. No."] = per["Order"].map(shipno)
+                      per["_u"] = (per["Rule"] != "URG")
+                      per = per.sort_values(["_u","Placed"]).drop(columns="_u")
+                      dcols = ["Order","Placed","Rule","Items","Boxes","From","Ship. No."]
+                      table(per[dcols].style.format({"Boxes":"{:,.0f}"}), scroll=True)
+                      urg_txt = f" \u00b7 {ex['urgent']} urgent first" if ex["urgent"] else ""
+                      st.markdown(f'<div class="note">{len(per)} orders{urg_txt} '
+                                  f'\u00b7 scroll inside the table</div>',
+                                  unsafe_allow_html=True)
+                      st.download_button(
+                          "Download dispatch list",
+                          per[dcols].to_csv(index=False).encode("utf-8"),
+                          file_name=f"dispatch_{smkt}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                          mime="text/csv")
+                  else:
+                      st.markdown(f'<span style="color:{MUT}">Nothing can be dispatched '
+                                  f'from current stock.</span>', unsafe_allow_html=True)
+
+                  blockers = ""
+                  if len(sh_):
+                      top = (sh_.assign(Item=sh_["Item"].map(nm))
+                                .groupby("Item")["Short by"].sum()
+                                .sort_values(ascending=False).head(2).index.tolist())
+                      blockers = " \u00b7 blocked by " + " and ".join(top)
+                  with st.expander(f"5 \u00b7 Short \u00b7 {ex['short_orders']} orders, "
+                                   f"{ex['short_boxes']:,.0f} boxes{blockers}"):
+                      if len(sh_):
+                          table(sh_.assign(Item=sh_["Item"].map(nm))
+                                .style.format({"Short by":"{:,.0f}"}),
+                                scroll=True, height=300)
+                          st.markdown('<div class="note">Boxes to buy are in the By item '
+                                      'table above.</div>', unsafe_allow_html=True)
+                      else:
+                          st.markdown(f'<span style="color:{MUT}">Nothing short.</span>',
+                                      unsafe_allow_html=True)
+
+                  summ = ""
+                  if len(xg):
+                      summ = " \u00b7 " + ", ".join(
+                          f"{int(r.Orders)} {str(r.Reason).lower()}"
+                          for r in xg.head(2).itertuples())
+                  with st.expander(f"6 \u00b7 Excluded \u00b7 {len(xx)} of "
+                                   f"{ex['scope']} stage 2 orders{summ}"
+                                   + (f"  \u00b7  plus {len(dead)} cancelled or voided"
+                                      if len(dead) else "")):
+                      if len(xx):
+                          st.markdown('<div class="note">These are stage 2 orders the engine '
+                                      'cannot allocate. Each one is listed with its reason.'
+                                      '</div>', unsafe_allow_html=True)
+                          xd = xx.copy()
+                          if len(xd) > 15:
+                              table(xg.style.format({"Orders": "{:,.0f}"}))
+                              st.write("")
+                          table(xd.style, scroll=True, height=280)
+                          st.markdown(f'<div class="note">{n_disp} ready + '
+                                      f'{ex["short_orders"]} short + {len(xx)} excluded '
+                                      f'= {ex["scope"]} orders at stage 2.</div>',
+                                      unsafe_allow_html=True)
+                      else:
+                          st.markdown(f'<span style="color:{MUT}">Nothing excluded \u2014 '
+                                      f'every stage 2 order could be allocated.</span>',
+                                      unsafe_allow_html=True)
+                      if len(dead):
+                          st.write("")
+                          st.markdown('<div class="note">Cancelled or voided, so not '
+                                      'counted anywhere above. Shopify hides these too, '
+                                      'which is why the stage 2 count matches your '
+                                      'Shopify view.</div>', unsafe_allow_html=True)
+                          table(dead.style)
+
+                  with st.expander(f"7 \u00b7 All stage 2 orders \u00b7 {ex['scope']} "
+                                   f"\u00b7 for checking against Shopify"):
+                      sl = dsp.scope_list(orders, dd, sh_, xx)
+                      if len(sl):
+                          table(sl.style.format({"Boxes": "{:,.0f}"}), scroll=True, height=340)
+                          st.download_button(
+                              "Download this list as CSV",
+                              sl.to_csv(index=False).encode("utf-8"),
+                              file_name=f"stage2_orders_{smkt}_"
+                                        f"{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
+                              mime="text/csv")
+                          st.markdown('<div class="note">Export the same view from Shopify '
+                                      'and compare the order numbers. Any order here but '
+                                      'not there, or the reverse, is the one to look at.'
+                                      '</div>', unsafe_allow_html=True)
+                      else:
+                          st.markdown(f'<span style="color:{MUT}">No stage 2 orders.</span>',
+                                      unsafe_allow_html=True)
+
+                  ctxt = f"all {len(chk)} pass" if allpass else "FAILED"
+                  with st.expander(f"8 \u00b7 Checks \u00b7 {ctxt}"):
+                      cc = st.columns(2)
+                      for i, r in enumerate(chk.itertuples()):
+                          mark, colr = ("PASS", GRN) if r.Pass else ("FAIL", RED)
+                          cc[i % 2].markdown(
+                              f'<div style="font-size:.8rem;color:{colr}">{mark} \u2014 '
+                              f'{r.Check} <span style="color:{MUT}">\u2014 {r.Result}'
+                              f'</span></div>', unsafe_allow_html=True)
+
+                  st.markdown(f'<div class="card" style="border-left:3px solid {MUT}">'
+                              f'<b>Confirm is not available in this build.</b>'
+                              f'<div class="note">Writing to Shopify and Excel is added '
+                              f'only after this list has been checked against your own '
+                              f'judgement.</div></div>', unsafe_allow_html=True)
+
+
+  # ============================= 0 · ENTRY =============================
+if TE is not None:
+    with TE:
+        sess = _gate("entry", "Entry")
+        if sess:
+            def _write(make, tries=4):
+                """Read, change, write. Retries a clash, a lock, or a busy
+                SharePoint - each of those is temporary and worth waiting for."""
+                import time
+                if SOURCE != "sharepoint":
+                    raise RuntimeError(
+                        "Entry writes to the SharePoint copy. This session is "
+                        "reading a local file, so saving is switched off.")
+                last = None
+                for attempt in range(1, tries + 1):
+                    buf, meta = sp.fetch_workbook()
+                    out, result = make(buf.getvalue())
+                    try:
+                        sp.upload_workbook(out, etag=meta.get("etag"))
+                        st.cache_data.clear()
+                        return result
+                    except (sp.ConflictError, sp.LockedError, sp.BusyError) as ex:
+                        last = ex
+                        if attempt == tries:
+                            break
+                        time.sleep(2 * attempt)
+                raise last
+
+            def _save(rows, market):
+                def make(data):
+                    out, ids = entry.append_moves(data, rows, sess["user"], market)
+                    return out, ids
+                return _write(make)
+
+            def _void(entry_id, market):
+                def make(data):
+                    return entry.void_entry(data, entry_id, sess["user"], market), None
+                return _write(make)
+
+            if SOURCE != "sharepoint":
+                st.warning("Reading a local file, so entry is read-only here. "
+                           "On the deployed app it writes to SharePoint.")
+
+            def _new_shipment(rows, market):
+                def make(data):
+                    return entry.append_shipment(data, rows, sess["user"], market)
+                return _write(make)
+
+            is_admin = str(sess.get("role", "")).lower() == "admin"
+            if is_admin:
+                mode = st.radio("What are you recording?",
+                                ["Movement  ·  حركة", "New shipment  ·  شحنة جديدة"],
+                                horizontal=True, label_visibility="collapsed",
+                                key="e_mode")
+            else:
+                mode = "Movement  ·  حركة"
+
             try:
-                with st.spinner("Reading orders from Shopify…"):
-                    orders, truncated = shopify.fetch_orders(smkt, days=win or None)
-                shop_read_at = pd.Timestamp.now()
-            except Exception as e:
-                orders = None
-                st.error(f"Could not read Shopify: {e}")
-
-            if orders is not None:
-                codes = set(cfg.get("item_names", {}).keys())
-                as_of_orders = pd.Timestamp.now().normalize()
-                if SOURCE == "sharepoint" and SP_META:
-                    _w, _ = in_market_time(SP_META["modified"], smkt)
-                    stock_stamp = "saved " + _w.split(" · ")[0].rsplit(" ", 1)[0] \
-                        + " " + _w.split(" · ")[1]
-                elif os.path.exists(DATA):
-                    _w, _ = in_market_time(
-                        pd.Timestamp.fromtimestamp(os.path.getmtime(DATA), tz="UTC"), smkt)
-                    stock_stamp = "saved " + _w.split(" · ")[0].rsplit(" ", 1)[0] \
-                        + " " + _w.split(" · ")[1]
+                if mode.startswith("New shipment"):
+                    if SOURCE == "sharepoint" and not st.session_state.get("s_no"):
+                        try:
+                            buf, _m = sp.fetch_workbook()
+                            st.session_state["s_no"] = entry.next_shipment_no(
+                                buf.getvalue())
+                        except Exception:
+                            pass
+                    entry_ui.render_shipment(ship, cfg, sess, _new_shipment)
                 else:
-                    stock_stamp = "unknown"
-                if shop_read_at is not None:
-                    _r, _ = in_market_time(shop_read_at.tz_localize("UTC")
-                                           if shop_read_at.tzinfo is None
-                                           else shop_read_at, smkt)
-                    shop_stamp = _r.split(" · ")[0].rsplit(" ", 1)[0] + " " + _r.split(" · ")[1]
-                else:
-                    shop_stamp = "unknown"
-
-                # ---------- 1 · strategy ----------
-                st.subheader("1 \u00b7 How to allocate")
-                g1, g2 = st.columns([1, 3])
-                with g1:
-                    cap = st.selectbox("Nothing waits longer than", [1, 2, 3, 5, 7, 0],
-                                       index=2,
-                                       format_func=lambda d: "no cap" if d == 0
-                                       else f"{d} day" + ("" if d == 1 else "s"))
-                cap_days = None if cap == 0 else cap
-                run_key = (len(orders), int(d_stock["Store"].sum()),
-                           shop_read_at.isoformat() if shop_read_at is not None else "",
-                           stock_stamp)
-                with st.spinner("Working out the best combinations…"):
-                    cmpdf = dispatch_compare(orders, d_stock, codes, cap_days, run_key)
-                names = cmpdf["Strategy"].tolist()
-                same = {}
-                for a in names:
-                    for b in names:
-                        if a != b and cmpdf.loc[cmpdf.Strategy == a, "_sel"].iloc[0] == \
-                                      cmpdf.loc[cmpdf.Strategy == b, "_sel"].iloc[0]:
-                            same.setdefault(a, b)
-                view = cmpdf.drop(columns="_sel").copy()
-                view["Use it when"] = [
-                    f"Same as {same[n]} today" if n in same and names.index(same[n]) < names.index(n)
-                    else w for n, w in zip(view["Strategy"], view["Use it when"])]
-                strat = st.radio("Strategy", names, index=1, horizontal=True,
-                                 label_visibility="collapsed")
-                def _sstyle(dfx):
-                    o = pd.DataFrame("", index=dfx.index, columns=dfx.columns)
-                    for i2 in dfx.index:
-                        if dfx.loc[i2, "Strategy"] == strat:
-                            o.loc[i2, :] = f"background-color:#EAF2FB;color:{ACC};font-weight:600"
-                    return o
-                table(view.style.format({"Orders": "{:,.0f}", "Boxes out": "{:,.0f}",
-                                         "Left in store": "{:,.0f}",
-                                         "Oldest waiting": "{:,.0f} days"})
-                      .apply(_sstyle, axis=None))
-                n_cap = 0
-                st.markdown(f'<div class="note">Urgent orders are always in, whatever you '
-                            f'pick. {int(d_stock["Store"].sum()):,} boxes in stock.</div>',
-                            unsafe_allow_html=True)
-
-                dd, sh_, xx, pool_after, nchosen, dead = dispatch_run(
-                    orders, d_stock, codes, strat, cap_days, run_key)
-                chk = dsp.checks(dd, sh_, xx, orders, d_stock, pool_after,
-                                 cap_days, None, codes)
-                shipno = dsp.ship_no_per_order(dd)
-                xg = dsp.group_excluded(xx)
-                rec = dsp.reconcile(dd, sh_, orders, d_stock, codes, cfg.get("item_names"))
-                o_fun, b_fun, ex = dsp.funnel(orders, dd, sh_, d_stock, codes)
-                allpass = bool(chk["Pass"].all())
-                n_disp = dd["Order"].nunique() if len(dd) else 0
-                if len(dd):
-                    n_cap = int((dd.drop_duplicates("Order")["Rule"] == "CAP").sum())
-
-                # what changes if you switch
-                cur = cmpdf.loc[cmpdf.Strategy == strat, "_sel"].iloc[0]
-                bits = []
-                for other in names:
-                    if other == strat:
-                        continue
-                    osel = cmpdf.loc[cmpdf.Strategy == other, "_sel"].iloc[0]
-                    add, drop = sorted(cur - osel), sorted(osel - cur)
-                    if not add and not drop:
-                        bits.append(f"<b>{strat} instead of {other}</b> "
-                                    f"<span style=\'color:{MUT}\'>&mdash; same orders</span>")
-                    else:
-                        bits.append(
-                            f"<b>{strat} instead of {other}</b> "
-                            f"<span style=\'color:{MUT}\'>&mdash; adds {len(add)}, "
-                            f"drops {len(drop)}</span><br>"
-                            + (f"adds: {', '.join(add[:4])}"
-                               + (f" +{len(add)-4} more" if len(add) > 4 else "") + "<br>" if add else "")
-                            + (f"drops: {', '.join(drop[:4])}"
-                               + (f" +{len(drop)-4} more" if len(drop) > 4 else "") if drop else ""))
-                cc1, cc2 = st.columns(2)
-                for col, b in zip((cc1, cc2), bits):
-                    col.markdown(f'<div class="card" style="font-size:.78rem;'
-                                 f'line-height:1.7">{b}</div>', unsafe_allow_html=True)
-                st.write("")
-
-                bar_c, bar_t = (GRN, "All checks pass") if allpass else (RED, "A check failed")
-                st.markdown(
-                    f'<div class="card" style="border-left:3px solid {bar_c}">'
-                    f'<b style="color:{bar_c}">{bar_t}</b> &nbsp;&middot;&nbsp; '
-                    f'<b>{ex["allocated"]:,.0f}</b> boxes ready for <b>{n_disp}</b> orders'
-                    f' &nbsp;&middot;&nbsp; <span style="color:{MUT}">read-only, '
-                    f'nothing is written</span>'
-                    f'<div class="note">{strat}'
-                    f'{f" &middot; {cap_days} day cap &middot; {n_cap} orders forced out" if cap_days else " &middot; no age cap"}'
-                    f' &nbsp;&middot;&nbsp; stock from '
-                    f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"} '
-                    f'({stock_stamp}) &nbsp;&middot;&nbsp; Shopify read {shop_stamp}'
-                    f' &nbsp;&middot;&nbsp; {smkt} time'
-                    f'</div></div>', unsafe_allow_html=True)
-
-                _wl = "all dates" if not win else f"last {win} days"
-                st.subheader(f"2 \u00b7 Orders \u00b7 {smkt}, {_wl}")
-                def _ostyle(d):
-                    out = pd.DataFrame("", index=d.index, columns=d.columns)
-                    for i in d.index:
-                        stg = str(d.loc[i, "Stage"])
-                        if stg.startswith("READY"):
-                            out.loc[i, :] = f"color:{GRN};font-weight:600"
-                        elif "short" in stg:
-                            out.loc[i, :] = f"color:{AMB}"
-                        elif stg.startswith("   "):
-                            out.loc[i, :] = f"color:{MUT}"
-                        else:
-                            out.loc[i, :] = "font-weight:600"
-                    return out
-                table(o_fun.style.format({"Orders": "{:,.0f}", "Boxes": "{:,.0f}"},
-                                         na_rep="\u2014").apply(_ostyle, axis=None))
-
-                st.subheader("3 \u00b7 Boxes")
-                def _bstyle(d):
-                    out = pd.DataFrame("", index=d.index, columns=d.columns)
-                    for i in d.index:
-                        w = str(d.loc[i, "Where the boxes are"])
-                        if w.startswith("SHORT"):
-                            out.loc[i, :] = f"color:{RED};font-weight:600"
-                        elif "allocated" in w:
-                            out.loc[i, :] = f"color:{GRN};font-weight:600"
-                        elif "blocked" in w:
-                            out.loc[i, :] = f"color:{AMB}"
-                        elif w.startswith("   "):
-                            out.loc[i, :] = f"color:{MUT}"
-                        else:
-                            out.loc[i, :] = "font-weight:600"
-                    return out
-                table(b_fun.style.format({"Qty": "{:,.0f}"}).apply(_bstyle, axis=None))
-                st.markdown('<div class="note">Available = Allocated + Left'
-                            ' &nbsp;&middot;&nbsp; Wanted = Allocated + Blocked</div>',
-                            unsafe_allow_html=True)
-
-                with st.expander("By item", expanded=True):
-                    if len(rec):
-                        r2 = rec.rename(columns={"Needed": "Wanted",
-                                                 "Not allocated": "Blocked"})
-                        icols = ["Available","Wanted","Allocated","Blocked",
-                                 "Short to buy","Left"]
-                        tot = {"Item": "Total"}
-                        for c in icols: tot[c] = r2[c].sum()
-                        r2 = pd.concat([r2, pd.DataFrame([tot])], ignore_index=True)
-                        def _istyle(d):
-                            out = pd.DataFrame("", index=d.index, columns=d.columns)
-                            for i in d.index:
-                                if d.loc[i, "Item"] == "Total":
-                                    out.loc[i, :] = "font-weight:600"
-                                elif float(d.loc[i, "Wanted"]) == 0:
-                                    out.loc[i, :] = f"color:{MUT}"
-                            return out
-                        table(r2[["Item"] + icols].style
-                              .format({c: "{:,.0f}" for c in icols})
-                              .apply(_istyle, axis=None)
-                              .apply(lambda d: heat_cols(d, ["Short to buy"], R_RED),
-                                     axis=None),
-                              scroll=True, height=320)
-                        legend("Boxes you would need to buy:", R_RED, "few", "many")
-                        bad = int((rec["Stock check"] != "OK").sum()
-                                  + (rec["Demand check"] != "OK").sum())
-                        if bad:
-                            st.markdown(f'<div class="note" style="color:{RED}">'
-                                        f'{bad} rows do not reconcile.</div>',
-                                        unsafe_allow_html=True)
-                        else:
-                            st.markdown('<div class="note">Every row reconciles. '
-                                        'Totals tie to the funnel above.</div>',
-                                        unsafe_allow_html=True)
-
-                st.subheader(f"4 \u00b7 Dispatch list \u00b7 {n_disp} orders")
-                if len(dd):
-                    lines = dd.assign(ItemName=dd["Item"].map(nm))
-                    items = (lines.groupby(["Order","ItemName"])["Qty"].sum()
-                                  .reset_index()
-                                  .assign(txt=lambda t: t["ItemName"] + " x" +
-                                          t["Qty"].astype(int).astype(str))
-                                  .groupby("Order")["txt"]
-                                  .apply(lambda v: ", ".join(v)))
-                    per = (lines.groupby("Order")
-                                .agg(Placed=("Placed","first"), Rule=("Rule","first"),
-                                     Boxes=("Qty","sum"),
-                                     From=("Shipment", lambda v: ", ".join(sorted(set(v)))))
-                                .reset_index())
-                    per["Items"] = per["Order"].map(items)
-                    per["Ship. No."] = per["Order"].map(shipno)
-                    per["_u"] = (per["Rule"] != "URG")
-                    per = per.sort_values(["_u","Placed"]).drop(columns="_u")
-                    dcols = ["Order","Placed","Rule","Items","Boxes","From","Ship. No."]
-                    table(per[dcols].style.format({"Boxes":"{:,.0f}"}), scroll=True)
-                    urg_txt = f" \u00b7 {ex['urgent']} urgent first" if ex["urgent"] else ""
-                    st.markdown(f'<div class="note">{len(per)} orders{urg_txt} '
-                                f'\u00b7 scroll inside the table</div>',
-                                unsafe_allow_html=True)
-                    st.download_button(
-                        "Download dispatch list",
-                        per[dcols].to_csv(index=False).encode("utf-8"),
-                        file_name=f"dispatch_{smkt}_{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
-                        mime="text/csv")
-                else:
-                    st.markdown(f'<span style="color:{MUT}">Nothing can be dispatched '
-                                f'from current stock.</span>', unsafe_allow_html=True)
-
-                blockers = ""
-                if len(sh_):
-                    top = (sh_.assign(Item=sh_["Item"].map(nm))
-                              .groupby("Item")["Short by"].sum()
-                              .sort_values(ascending=False).head(2).index.tolist())
-                    blockers = " \u00b7 blocked by " + " and ".join(top)
-                with st.expander(f"5 \u00b7 Short \u00b7 {ex['short_orders']} orders, "
-                                 f"{ex['short_boxes']:,.0f} boxes{blockers}"):
-                    if len(sh_):
-                        table(sh_.assign(Item=sh_["Item"].map(nm))
-                              .style.format({"Short by":"{:,.0f}"}),
-                              scroll=True, height=300)
-                        st.markdown('<div class="note">Boxes to buy are in the By item '
-                                    'table above.</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<span style="color:{MUT}">Nothing short.</span>',
-                                    unsafe_allow_html=True)
-
-                summ = ""
-                if len(xg):
-                    summ = " \u00b7 " + ", ".join(
-                        f"{int(r.Orders)} {str(r.Reason).lower()}"
-                        for r in xg.head(2).itertuples())
-                with st.expander(f"6 \u00b7 Excluded \u00b7 {len(xx)} of "
-                                 f"{ex['scope']} stage 2 orders{summ}"
-                                 + (f"  \u00b7  plus {len(dead)} cancelled or voided"
-                                    if len(dead) else "")):
-                    if len(xx):
-                        st.markdown('<div class="note">These are stage 2 orders the engine '
-                                    'cannot allocate. Each one is listed with its reason.'
-                                    '</div>', unsafe_allow_html=True)
-                        xd = xx.copy()
-                        if len(xd) > 15:
-                            table(xg.style.format({"Orders": "{:,.0f}"}))
-                            st.write("")
-                        table(xd.style, scroll=True, height=280)
-                        st.markdown(f'<div class="note">{n_disp} ready + '
-                                    f'{ex["short_orders"]} short + {len(xx)} excluded '
-                                    f'= {ex["scope"]} orders at stage 2.</div>',
-                                    unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<span style="color:{MUT}">Nothing excluded \u2014 '
-                                    f'every stage 2 order could be allocated.</span>',
-                                    unsafe_allow_html=True)
-                    if len(dead):
-                        st.write("")
-                        st.markdown('<div class="note">Cancelled or voided, so not '
-                                    'counted anywhere above. Shopify hides these too, '
-                                    'which is why the stage 2 count matches your '
-                                    'Shopify view.</div>', unsafe_allow_html=True)
-                        table(dead.style)
-
-                with st.expander(f"7 \u00b7 All stage 2 orders \u00b7 {ex['scope']} "
-                                 f"\u00b7 for checking against Shopify"):
-                    sl = dsp.scope_list(orders, dd, sh_, xx)
-                    if len(sl):
-                        table(sl.style.format({"Boxes": "{:,.0f}"}), scroll=True, height=340)
-                        st.download_button(
-                            "Download this list as CSV",
-                            sl.to_csv(index=False).encode("utf-8"),
-                            file_name=f"stage2_orders_{smkt}_"
-                                      f"{pd.Timestamp.now():%Y%m%d_%H%M}.csv",
-                            mime="text/csv")
-                        st.markdown('<div class="note">Export the same view from Shopify '
-                                    'and compare the order numbers. Any order here but '
-                                    'not there, or the reverse, is the one to look at.'
-                                    '</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown(f'<span style="color:{MUT}">No stage 2 orders.</span>',
-                                    unsafe_allow_html=True)
-
-                ctxt = f"all {len(chk)} pass" if allpass else "FAILED"
-                with st.expander(f"8 \u00b7 Checks \u00b7 {ctxt}"):
-                    cc = st.columns(2)
-                    for i, r in enumerate(chk.itertuples()):
-                        mark, colr = ("PASS", GRN) if r.Pass else ("FAIL", RED)
-                        cc[i % 2].markdown(
-                            f'<div style="font-size:.8rem;color:{colr}">{mark} \u2014 '
-                            f'{r.Check} <span style="color:{MUT}">\u2014 {r.Result}'
-                            f'</span></div>', unsafe_allow_html=True)
-
-                st.markdown(f'<div class="card" style="border-left:3px solid {MUT}">'
-                            f'<b>Confirm is not available in this build.</b>'
-                            f'<div class="note">Writing to Shopify and Excel is added '
-                            f'only after this list has been checked against your own '
-                            f'judgement.</div></div>', unsafe_allow_html=True)
+                    entry_ui.render(ship, moves, clear, stock, cfg, sess,
+                                    _save, _void, cfg.get("item_names"))
+            except Exception as ex:
+                st.error(f"Entry could not be shown: {ex}")

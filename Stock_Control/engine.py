@@ -23,7 +23,7 @@ def _tbl(xl, sheet, header_row, ncols):
 def load(path_or_buf):
     xl = pd.ExcelFile(path_or_buf)
     ship  = _tbl(xl,"SHIPMENTS",5,9)
-    moves = _tbl(xl,"MOVES",5,16)
+    moves = _tbl(xl,"MOVES",5,19)
     count = _tbl(xl,"COUNT",5,8)
     if "Shipment No" not in ship.columns and "Shipment ID" not in ship.columns:
         raise ValueError(
@@ -87,6 +87,33 @@ def load(path_or_buf):
     except Exception:
         market_list = []
     try:
+        rs = xl.parse("MASTER", header=14, usecols=[12,13])
+        rs.columns = ["Reason","Type"]
+        reasons = rs["Reason"].dropna().astype(str).str.strip().tolist()
+    except Exception:
+        reasons = []
+    try:
+        cu = xl.parse("MASTER", header=14, usecols=[8,9,10])
+        cu.columns = ["Courier","Market","Active"]
+        cu = cu[cu["Courier"].notna()
+                & (cu["Active"].astype(str).str.strip().str.lower()=="yes")]
+        couriers_by_market = {}
+        for _, r in cu.iterrows():
+            couriers_by_market.setdefault(str(r["Market"]).strip(), []) \
+                .append(str(r["Courier"]).strip())
+    except Exception:
+        couriers_by_market = {}
+    try:
+        us = xl.parse("MASTER", header=14, usecols=[24,25,26,27])
+        us.columns = ["User","Market","Role","Active"]
+        us = us[us["User"].notna()
+                & (us["Active"].astype(str).str.strip().str.lower()=="yes")]
+        users = {str(r["User"]).strip().lower():
+                 {"market": str(r["Market"]).strip(), "role": str(r["Role"]).strip()}
+                 for _, r in us.iterrows()}
+    except Exception:
+        users = {}
+    try:
         it = xl.parse("MASTER", header=14, usecols=[1,2])
         it.columns = ["Item Name","Item Code"]
         item_names = dict(zip(it["Item Code"].dropna().astype(str),
@@ -101,6 +128,9 @@ def load(path_or_buf):
         "var_tol": float(cfg.get("Count variance tolerance", 0.02)),
         "markets": market_list,
         "item_names": item_names,
+        "users": users,
+        "reasons": reasons,
+        "couriers_by_market": couriers_by_market,
     }
     errors = pd.concat([_err(ship,"SHIPMENTS"), _err(moves,"MOVES"), _err(count,"COUNT")],
                        ignore_index=True)

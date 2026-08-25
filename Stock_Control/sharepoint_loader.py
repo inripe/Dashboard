@@ -126,12 +126,73 @@ def fetch_meta() -> dict:
     else:
         item = r.json()
     return {"id": item.get("id"),
+            "etag": item.get("eTag"),
             "name": item.get("name"),
             "modified": item.get("lastModifiedDateTime"),
             "modified_by": (item.get("lastModifiedBy", {})
                             .get("user", {}).get("displayName")),
             "size_kb": round(item.get("size", 0) / 1024),
             "web_url": item.get("webUrl")}
+
+
+class ConflictError(RuntimeError):
+    """Someone else saved first."""
+
+
+class LockedError(RuntimeError):
+    """Somebody has the workbook open in Excel."""
+
+
+class BusyError(RuntimeError):
+    """SharePoint asked us to slow down."""
+
+
+
+def upload_workbook(data: bytes, etag: str | None = None) -> dict:
+    """Replace the workbook on SharePoint.
+
+    etag guards against two people saving at once: if the file changed since it
+    was read, SharePoint refuses with 412 and the caller re-reads and retries.
+    Passing no etag disables that guard, so callers should always pass one.
+    """
+    hdr = {"Authorization": f"Bearer {_token()}"}
+    if not _item_cache["site"]:
+        _item_cache["site"] = _site_id(hdr)
+    site_id = _item_cache["site"]
+    if not _item_cache["id"]:
+        _item_cache["id"] = _file_item(hdr, site_id)["id"]
+    item_id = _item_cache["id"]
+    put = dict(hdr)
+    put["Content-Type"] = ("application/vnd.openxmlformats-officedocument"
+                           ".spreadsheetml.sheet")
+    if etag:
+        put["If-Match"] = etag
+    r = requests.put(f"{GRAPH}/sites/{site_id}/drive/items/{item_id}/content",
+                     headers=put, data=data, timeout=max(TIMEOUT, 120))
+    if r.status_code == 412:
+        raise ConflictError("The file changed while you were working. "
+                            "Your entry has not been saved - it will be retried.")
+    if r.status_code == 423:
+        raise LockedError(
+            "The file is open in Excel, so SharePoint will not let the app save.\n\n"
+            "Close INRIPE_Stock_Entry_v1.xlsx in Excel and in the browser, then "
+            "press Save again. A lock left behind by a closed window clears on "
+            "its own after a few minutes.")
+    if r.status_code in (401, 403):
+        raise RuntimeError(
+            "SharePoint refused the save (" + str(r.status_code) + "). The app "
+            "can read the file but not write to it, which usually means the "
+            "Azure app is missing Sites.ReadWrite.All, or consent has not been "
+            "granted.")
+    if r.status_code in (429, 503, 504):
+        raise BusyError(
+            "SharePoint is busy and asked us to wait. Nothing was saved - "
+            "press Save again in a moment.")
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Could not save to SharePoint: {r.status_code} "
+                           f"{r.text[:200]}")
+    j = r.json()
+    return {"etag": j.get("eTag"), "modified": j.get("lastModifiedDateTime")}
 
 
 def fetch_workbook() -> tuple[io.BytesIO, dict]:
@@ -145,6 +206,7 @@ def fetch_workbook() -> tuple[io.BytesIO, dict]:
         raise RuntimeError(f"Could not download the file: {r.status_code} {r.text[:200]}")
     meta = {
         "name": item.get("name"),
+        "etag": item.get("eTag"),
         "modified": item.get("lastModifiedDateTime"),
         "modified_by": (item.get("lastModifiedBy", {})
                         .get("user", {}).get("displayName")),
