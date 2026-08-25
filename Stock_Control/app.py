@@ -12,7 +12,7 @@ NAVY="#13233B"; PANEL="#FFFFFF"; LINE="#E2E8F2"; INK="#1E2A3D"; MUT="#6B7A91"
 ACC="#2E75B6"; GRN="#1D8A5E"; RED="#C0392B"; AMB="#C77E1B"; VIO="#6C4FBF"
 
 st.markdown(f"""<style>
-.block-container{{padding-top:0rem;padding-bottom:3rem;max-width:1500px}}
+.block-container{{padding-top:4.2rem;padding-bottom:3rem;max-width:1500px}}
 h2{{font-size:.78rem!important;font-weight:600!important;text-transform:uppercase;
    letter-spacing:.09em;color:{MUT}!important;margin:1.7rem 0 .6rem!important}}
 h3{{font-size:.95rem!important;font-weight:600!important;margin:1rem 0 .4rem!important;color:{INK}}}
@@ -23,8 +23,8 @@ div[data-baseweb="tab-list"]{{gap:.3rem;border-bottom:1px solid {LINE}}}
 .stButton>button:hover{{border-color:{ACC};color:{ACC}}}
 hr{{border-color:{LINE}}}
 [data-testid="stHeaderActionElements"]{{display:none}}
-.band{{background:{NAVY};margin:0 -5rem 1.1rem;padding:1.6rem 5rem 1.25rem;
-       overflow:visible}}
+.band{{background:{NAVY};margin:0 -5rem 1.1rem;padding:1.5rem 5rem 1.3rem;
+       overflow:visible;border-radius:0}}
 .hdr{{display:flex;align-items:center;gap:14px;line-height:1.25}}
 .hdr h1{{font-size:1.55rem;font-weight:600;margin:0;padding:.12em 0;color:#FFFFFF;
         letter-spacing:-.01em;line-height:1.3}}
