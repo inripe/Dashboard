@@ -23,9 +23,11 @@ div[data-baseweb="tab-list"]{{gap:.3rem;border-bottom:1px solid {LINE}}}
 .stButton>button:hover{{border-color:{ACC};color:{ACC}}}
 hr{{border-color:{LINE}}}
 [data-testid="stHeaderActionElements"]{{display:none}}
-.band{{background:{NAVY};margin:0 -5rem 1.1rem;padding:1.15rem 5rem .95rem}}
-.hdr{{display:flex;align-items:center;gap:14px}}
-.hdr h1{{font-size:1.55rem;font-weight:600;margin:0;color:#FFFFFF;letter-spacing:-.01em}}
+.band{{background:{NAVY};margin:0 -5rem 1.1rem;padding:1.6rem 5rem 1.25rem;
+       overflow:visible}}
+.hdr{{display:flex;align-items:center;gap:14px;line-height:1.25}}
+.hdr h1{{font-size:1.55rem;font-weight:600;margin:0;padding:.12em 0;color:#FFFFFF;
+        letter-spacing:-.01em;line-height:1.3}}
 .band .sub{{color:#9BB0CC;font-size:.79rem;margin:.25rem 0 0 58px}}
 .kpi{{background:{PANEL};border:1px solid {LINE};border-left:3px solid {ACC};
    border-radius:10px;padding:.7rem .85rem}}
@@ -61,6 +63,25 @@ LOGO = f"""<svg width="44" height="44" viewBox="0 0 48 48" fill="none">
 st.markdown(f'<div class="band"><div class="hdr">{LOGO}<h1>Inripe · Inventory Control</h1></div>'
             f'<div class="sub">Shipments, stock, couriers and losses across all markets</div></div>',
             unsafe_allow_html=True)
+
+MARKET_TZ = {"Qatar": "Asia/Qatar", "UAE": "Asia/Dubai",
+             "KSA": "Asia/Riyadh", "Egypt": "Africa/Cairo"}
+
+
+def in_market_time(ts, market):
+    """Show a moment in the market's own clock, so a Cairo user is not reading
+    Gulf time. Returns (formatted, short tz label)."""
+    if ts is None:
+        return "unknown", ""
+    tz = MARKET_TZ.get(market)
+    t = pd.to_datetime(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    if tz:
+        t = t.tz_convert(tz)
+        return t.strftime("%d %b %Y · %H:%M"), f"{market} time"
+    return t.tz_convert(None).strftime("%d %b %Y · %H:%M"), "UTC"
+
 
 @st.cache_data(ttl=300, show_spinner="Loading data…")
 def get_local(path, _mtime):
@@ -111,8 +132,12 @@ shp = f2.selectbox("Shipment", shipments, label_visibility="collapsed")
 as_of = pd.Timestamp(f3.date_input("As of", cfg["as_of"].date(), label_visibility="collapsed"))
 with f4:
     if SOURCE == "sharepoint":
-        when = pd.to_datetime(SP_META["modified"]).tz_convert(None)
-        st.caption(f"SharePoint · edited {when:%d %b %Y · %H:%M} by {SP_META.get('modified_by') or 'unknown'}")
+        _tzm = mkt if mkt in MARKET_TZ else (
+            shopify.configured_markets()[0] if shopify.configured_markets() else None)
+        _when, _lbl = in_market_time(SP_META["modified"], _tzm)
+        st.caption(f"SharePoint · edited {_when}"
+                   + (f" ({_lbl})" if _lbl else "")
+                   + f" by {SP_META.get('modified_by') or 'unknown'}")
     else:
         st.caption(f"Local file · {pd.Timestamp.fromtimestamp(os.path.getmtime(DATA)):%d %b %Y · %H:%M}")
     if st.button("Refresh"):
@@ -728,15 +753,23 @@ with TD:
                 codes = set(cfg.get("item_names", {}).keys())
                 as_of_orders = pd.Timestamp.now().normalize()
                 if SOURCE == "sharepoint" and SP_META:
-                    _w = pd.to_datetime(SP_META["modified"]).tz_convert(None)
-                    stock_stamp = f"saved {_w:%d %b %H:%M}"
+                    _w, _ = in_market_time(SP_META["modified"], smkt)
+                    stock_stamp = "saved " + _w.split(" · ")[0].rsplit(" ", 1)[0] \
+                        + " " + _w.split(" · ")[1]
                 elif os.path.exists(DATA):
-                    stock_stamp = ("saved " + pd.Timestamp.fromtimestamp(
-                        os.path.getmtime(DATA)).strftime("%d %b %H:%M"))
+                    _w, _ = in_market_time(
+                        pd.Timestamp.fromtimestamp(os.path.getmtime(DATA), tz="UTC"), smkt)
+                    stock_stamp = "saved " + _w.split(" · ")[0].rsplit(" ", 1)[0] \
+                        + " " + _w.split(" · ")[1]
                 else:
                     stock_stamp = "unknown"
-                shop_stamp = (shop_read_at.strftime("%d %b %H:%M")
-                              if shop_read_at is not None else "unknown")
+                if shop_read_at is not None:
+                    _r, _ = in_market_time(shop_read_at.tz_localize("UTC")
+                                           if shop_read_at.tzinfo is None
+                                           else shop_read_at, smkt)
+                    shop_stamp = _r.split(" · ")[0].rsplit(" ", 1)[0] + " " + _r.split(" · ")[1]
+                else:
+                    shop_stamp = "unknown"
 
                 # ---------- 1 · strategy ----------
                 st.subheader("1 \u00b7 How to allocate")
@@ -831,6 +864,7 @@ with TD:
                     f' &nbsp;&middot;&nbsp; stock from '
                     f'{"SharePoint" if SOURCE=="sharepoint" else "the local file"} '
                     f'({stock_stamp}) &nbsp;&middot;&nbsp; Shopify read {shop_stamp}'
+                    f' &nbsp;&middot;&nbsp; {smkt} time'
                     f'</div></div>', unsafe_allow_html=True)
 
                 _wl = "all dates" if not win else f"last {win} days"

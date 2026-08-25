@@ -81,6 +81,34 @@ for m in mk:
 ck("a market with no stock gives an empty frame",
    len(stock[stock["Market"]=="Mars"])==0)
 
+print("=== G. MARKET TIME ZONES ===")
+import importlib.util as _iu, types as _t
+src=open("app.py").read()
+i=src.index("MARKET_TZ = {"); j=src.index("@st.cache_data(ttl=300, show_spinner=\"Loading data\u2026\")")
+mod=_t.ModuleType("tzbit"); mod.pd=pd
+exec(compile(src[i:j],"tzbit","exec"), mod.__dict__)
+U="2026-08-25T14:28:00Z"
+ck("every market has a zone", set(mod.MARKET_TZ)=={"Qatar","UAE","KSA","Egypt"},
+   sorted(mod.MARKET_TZ))
+q,_=mod.in_market_time(U,"Qatar"); u,_=mod.in_market_time(U,"UAE")
+e,_=mod.in_market_time(U,"Egypt"); k,_=mod.in_market_time(U,"KSA")
+ck("Qatar is UTC+3", q.endswith("17:28"), q)
+ck("UAE is UTC+4", u.endswith("18:28"), u)
+ck("KSA is UTC+3", k.endswith("17:28"), k)
+ck("Egypt is UTC+3 in summer", e.endswith("17:28"), e)
+ck("UAE reads an hour later than Qatar", u!=q, f"{u} vs {q}")
+lbl=mod.in_market_time(U,"Qatar")[1]
+ck("the label names the market", lbl=="Qatar time", lbl)
+x,xl=mod.in_market_time(U,"Mars")
+ck("an unknown market falls back to UTC", xl=="UTC" and x.endswith("14:28"), f"{x} {xl}")
+ck("None does not crash", mod.in_market_time(None,"Qatar")[0]=="unknown")
+naive,_=mod.in_market_time(pd.Timestamp("2026-08-25 14:28:00"),"UAE")
+ck("a naive timestamp is treated as UTC", naive.endswith("18:28"), naive)
+aware,_=mod.in_market_time(pd.Timestamp("2026-08-25 14:28:00", tz="UTC"),"UAE")
+ck("an aware timestamp converts the same way", aware==naive, f"{aware} vs {naive}")
+winter,_=mod.in_market_time("2026-01-15T14:28:00Z","Egypt")
+ck("Egypt shifts with daylight saving", winter.endswith("16:28"), winter)
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")
