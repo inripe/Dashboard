@@ -108,9 +108,12 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
            item_names=None):
     """save_fn(rows, market) -> list of entry ids.  void_fn(entry_id, market)."""
     n = _nonce()
+    # every active market, not only those that already have a shipment, so a
+    # new market is visible and the reason it cannot be used is explained
+    all_markets = sorted(cfg.get("markets") or []) or \
+        sorted(ship["Market"].dropna().unique())
     market = session["market"] if str(session.get("market", "")).lower() != "all" \
-        else st.selectbox("Market", sorted(ship["Market"].dropna().unique()),
-                          key=f"e_market_{n}")
+        else st.selectbox("Market", all_markets, key=f"e_market_{n}")
     now = entry.market_now(market)
     st.markdown(f'<div class="card" style="border-left:3px solid {"#2E75B6"}">'
                 f'<b>{market}</b> &nbsp;&middot;&nbsp; {session["user"]}'
@@ -131,8 +134,15 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
 
     opens = open_shipments(ship, clear, market)
     if not opens:
-        st.warning(f"No open shipment for {market}. A shipment has to be added "
-                   f"before movements can be recorded against it.")
+        has_any = market in set(ship["Market"].dropna())
+        st.warning(
+            (f"Every {market} shipment is fully cleared, so there is nothing to "
+             f"record against. Add the new shipment first."
+             if has_any else
+             f"{market} has no shipment yet. Switch to New shipment above and "
+             f"create one - movements are always recorded against a shipment.")
+            + f"\n\n{market}: لا توجد شحنة مفتوحة")
+        _today_list(moves, session, market, now, void_fn, item_names)
         return
 
     moves_allowed = (WORKER_MOVES if str(session.get("role", "")).lower() != "admin"
@@ -360,7 +370,15 @@ def render_shipment(ship, cfg, session, save_fn):
     """Admin only. A shipment is what was SENT - what arrives is recorded
     separately by the store, so the difference stays visible."""
     import datetime as dt
-    markets = sorted(cfg.get("markets") or ship["Market"].dropna().unique())
+    # from the MASTER markets table, not from shipments already on the sheet -
+    # otherwise a market can never receive its first shipment
+    markets = sorted(cfg.get("markets") or [])
+    if not markets:
+        markets = sorted(ship["Market"].dropna().unique())
+    if not markets:
+        st.warning("No active market on the MASTER sheet. Add one to the "
+                   "Markets table with Active = Yes.")
+        return
     n = _nonce()
     st.markdown("**New shipment  ·  شحنة جديدة**")
     st.markdown('<div class="note">This records what was <b>sent</b>. The store '

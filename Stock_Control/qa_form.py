@@ -15,14 +15,17 @@ mock.MARKETS=("Qatar","UAE","KSA","Egypt")
 sys.modules["shopify_reader"]=mock
 from streamlit.testing.v1 import AppTest
 
+import engine as _eng, qa_book as _qb
+_ADMIN = _qb.admin_user(_eng.load(_qb.book())[3]) or "admin"
+
 def fresh():
     at=AppTest.from_file("app.py",default_timeout=600).run()
     users=[s for s in at.selectbox if s.label=="User"]
     if users:
-        users[0].set_value("mahmoud").run()
+        users[0].set_value(_ADMIN).run()
         at.text_input[0].set_value("a").run()
     else:
-        at.text_input[0].set_value("mahmoud").run()
+        at.text_input[0].set_value(_ADMIN).run()
         at.text_input[1].set_value("a").run()
     [b for b in at.button if "Sign in" in str(b.label)][0].click().run()
     return at
@@ -36,6 +39,11 @@ def card(at):
 print("=== A. THE CARD FOLLOWS THE FORM ===")
 at=fresh()
 movs=[r for r in at.radio if len(r.options)>=5]
+if not movs:
+    print("  (no open shipment in this workbook - the form cannot be shown)")
+    ck("the entry tab still renders without crashing", not at.exception)
+    print(f"\n{len(P)} passed, {len(F)} failed")
+    sys.exit(1 if F else 0)
 ck("the movement list is on screen", bool(movs), [r.options for r in at.radio][:1])
 ck("nothing is chosen for you", movs[0].value is None if movs else False)
 ck("it asks you to pick first",

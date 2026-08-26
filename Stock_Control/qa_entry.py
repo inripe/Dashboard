@@ -1,5 +1,5 @@
 """The writer is the only thing that can damage the ledger. Test it hard."""
-import sys, io, shutil, datetime as dt, pandas as pd, openpyxl, engine, entry
+import sys, qa_book, io, shutil, datetime as dt, pandas as pd, openpyxl, engine, entry
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
@@ -7,12 +7,15 @@ def eq(n,got,want,tol=1e-6):
     ok=abs(float(got)-float(want))<=tol
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}: got {got}, want {want}")
 
-SRC="INRIPE_Stock_Entry_v3.xlsx"
+SRC=qa_book.book()
 base=open(SRC,"rb").read()
 s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
 st0=engine.stock_by_item(s0,m0,cfg0["as_of"])
 SHIP=s0[s0.Market=="Qatar"]["Shipment ID"].iloc[0]
 ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
+# an item that is genuinely NOT on this shipment, whatever the workbook holds
+NOT_IN=next((x for x in (cfg0.get("item_names") or {}).values()
+             if x not in set(s0[s0["Shipment ID"]==SHIP]["Item Name"])), None)
 def row(mv="Received", qty=5, item=None, **kw):
     d={"Date":entry.market_now("Qatar").date(),"Shipment No":SHIP,"Movement":mv,
        "Item Name":item if item is not None else ITEM}
@@ -127,18 +130,20 @@ print("=== I. SHEET STAYS VALID ===")
 open("/tmp/after.xlsx","wb").write(b3)
 s5,m5,c5,cfg5,e5=engine.load("/tmp/after.xlsx")
 eq("still no entry errors", len(e5), 0)
+if len(e5): print("   errors:", e5.head(4).to_dict("records"))
 ck("users still readable", len(cfg5["users"])>0, list(cfg5["users"]))
 ck("settings still readable", cfg5["clear_target"]>0)
 
 print("=== J. A BAD ROW IS REFUSED, NOT WRITTEN ===")
 bads=[("unknown movement", row(mv="Teleport")),
       ("unknown shipment", dict(row(), **{"Shipment No":"NO. 999"})),
-      ("item not in shipment", row(item="Mango Naomi")),
+      ("item not in shipment", row(item=NOT_IN)),
       ("zero quantity", row(qty=0)),
       ("wrong direction", {"Date":entry.market_now("Qatar").date(),
                            "Shipment No":SHIP,"Movement":"Received",
                            "Item Name":ITEM,"Out":5}),
       ("missing reason", row(mv="Scrap",qty=1))]
+bads=[(l,b) for l,b in bads if not (l=="item not in shipment" and NOT_IN is None)]
 for label,bad in bads:
     try:
         entry.append_moves(base,[bad],"qatar.store","Qatar")

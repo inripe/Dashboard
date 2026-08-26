@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """Direction prefix and Arabic on every movement a worker can pick."""
-import sys, labels as L, entry_ui, engine
+import sys, qa_book, labels as L, entry_ui, engine
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
 
 print("=== A. EVERY MOVEMENT IS COVERED ===")
-s,m,c,cfg,e=engine.load("INRIPE_Stock_Entry_v3.xlsx")
+s,m,c,cfg,e=engine.load(qa_book.book())
 import openpyxl
-ws=openpyxl.load_workbook("INRIPE_Stock_Entry_v3.xlsx")["MASTER"]
+ws=openpyxl.load_workbook(qa_book.book())["MASTER"]
 sheet_moves=[]
 r=16
 while ws.cell(r,16).value not in (None,""):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Shipment entry: numbering, validation, and the sent-versus-arrived split."""
-import sys, io, datetime as dt, engine, entry, entry_ui
+import sys, qa_book, io, datetime as dt, engine, entry, entry_ui
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
@@ -9,7 +9,7 @@ def eq(n,got,want):
     except (TypeError,ValueError): ok=str(got)==str(want)
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}: got {got}, want {want}")
 
-base=open("INRIPE_Stock_Entry_v3.xlsx","rb").read()
+base=open(qa_book.book(),"rb").read()
 s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
 def line(item,q,sid=None,mkt="Qatar",d=None):
     return {"Shipment No":sid or entry.next_shipment_no(base),"Market":mkt,
@@ -99,6 +99,34 @@ ck("the mode switch is admin only", 'is_admin = str(sess.get("role"' in app)
 ck("a store user goes straight to movements",
    'mode = "Movement' in app)
 ck("the screen exists", hasattr(entry_ui,"render_shipment"))
+
+print("=== G. A NEW MARKET CAN RECEIVE ITS FIRST SHIPMENT ===")
+import openpyxl as _ox, shutil as _sh
+_sh.copy(qa_book.book(),"/tmp/qa_m4.xlsx")
+_wb=_ox.load_workbook("/tmp/qa_m4.xlsx"); _ms=_wb["MASTER"]
+for _i,_mk in enumerate(["Qatar","UAE","KSA","Egypt"]):
+    _ms.cell(16+_i,6).value=_mk; _ms.cell(16+_i,7).value="Yes"
+_wb.save("/tmp/qa_m4.xlsx")
+_s,_m,_c,_cfg,_e=engine.load("/tmp/qa_m4.xlsx")
+eq("MASTER lists four markets", len(_cfg.get("markets") or []), 4)
+ck("shipments only cover one so far",
+   set(_s["Market"].dropna())=={"Qatar"}, sorted(set(_s["Market"].dropna())))
+_offer=sorted(_cfg.get("markets") or [])
+ck("the form still offers all four", set(_offer)=={"Qatar","UAE","KSA","Egypt"}, _offer)
+ck("a market with no shipment is offered", "UAE" in _offer)
+ui=open("entry_ui.py").read()
+ck("the list comes from MASTER, not from shipments",
+   'cfg.get("markets")' in ui and "otherwise a market can never receive" in ui)
+_b=open("/tmp/qa_m4.xlsx","rb").read()
+_row={"Shipment No":entry.next_shipment_no(_b),"Market":"UAE",
+      "Arrival Date":dt.date(2026,8,26),"Source":"Egypt",
+      "Item Name":ITEM,"Shipped Qty":300}
+_out,_sid=entry.append_shipment(_b,[_row],"admin","UAE")
+_s2,_m2,_c2,_cfg2,_e2=engine.load(io.BytesIO(_out))
+ck("and the shipment saves", _sid in set(_s2["Shipment ID"]), _sid)
+eq("against the right market",
+   _s2[_s2["Shipment ID"]==_sid]["Market"].iloc[0], "UAE")
+eq("with no errors", len(_e2), 0)
 
 print()
 for l in F: print(l)

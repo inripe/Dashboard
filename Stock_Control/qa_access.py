@@ -4,8 +4,11 @@ import sys, os, importlib, entry_ui, labels as L
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
-for k in ("ENTRY_PASSWORD","DISPATCH_PASSWORD","ADMIN_PASSWORD"): os.environ.pop(k,None)
-import auth; importlib.reload(auth)
+import auth
+# a controlled set of passwords, so the suite tests the rules and not whatever
+# happens to be in your secrets file
+PW = {}
+auth._secret = lambda k: PW.get(k)
 
 U={"mahmoud":{"market":"All","role":"Admin"},
    "q.store":{"market":"Qatar","role":"Entry"},
@@ -14,8 +17,7 @@ U={"mahmoud":{"market":"All","role":"Admin"},
 
 print("=== A. NO PASSWORDS, NO SIGN-IN ===")
 ck("sign-in is off", not auth.is_enabled(U))
-os.environ.update({"ENTRY_PASSWORD":"e","DISPATCH_PASSWORD":"d","ADMIN_PASSWORD":"a"})
-importlib.reload(auth)
+PW.update({"ENTRY_PASSWORD":"e","DISPATCH_PASSWORD":"d","ADMIN_PASSWORD":"a"})
 ck("sign-in comes on once a password exists", auth.is_enabled(U))
 ck("still off with no users", not auth.is_enabled({}))
 

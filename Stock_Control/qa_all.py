@@ -1,0 +1,100 @@
+# -*- coding: utf-8 -*-
+"""
+Run every check in one go.
+
+    python3 qa_all.py                  against the workbook the app uses
+    python3 qa_all.py --live           against the live SharePoint copy
+    python3 qa_all.py --book FILE      against a particular file
+
+Each suite runs on its own so one failure never hides another.
+"""
+import subprocess, sys, os, time, io
+
+SUITES = [
+    ("sheet",      "qa.py",           "the workbook adds up"),
+    ("dispatch",   "qa_dispatch.py",  "allocation, strategies, the age cap"),
+    ("markets",    "qa_markets.py",   "four stores, four time zones"),
+    ("legends",    "qa_legend.py",    "no colour without a key"),
+    ("writer",     "qa_entry.py",     "append only, never edit or delete"),
+    ("write path", "qa_write.py",     "two people saving at once"),
+    ("entry rules","qa_entry_ui.py",  "what a store user may pick"),
+    ("form",       "qa_form.py",      "the form never lies about what it saves"),
+    ("labels",     "qa_labels.py",    "in / out and arabic on every movement"),
+    ("access",     "qa_access.py",    "three roles, two protected tabs"),
+    ("shipments",  "qa_shipment.py",  "sent is not the same as arrived"),
+    ("upgrade",    "qa_upgrade.py",   "upgrading adds, never removes"),
+    ("integrity",  "qa_integrity.py", "the seams between all of it"),
+    ("cleaner",    "qa_clean.py",     "removes only lines with no movements"),
+]
+
+
+def fetch_live():
+    import sharepoint_loader as sp
+    buf, meta = sp.fetch_workbook()
+    path = "/tmp/qa_live.xlsx"
+    open(path, "wb").write(buf.getvalue())
+    print(f"live workbook: {meta['name']} · saved {meta['modified']} · "
+          f"{meta['size_kb']} KB\n")
+    return path
+
+
+def main():
+    args = sys.argv[1:]
+    book = None
+    if "--live" in args:
+        book = fetch_live()
+    elif "--book" in args:
+        book = args[args.index("--book") + 1]
+    env = dict(os.environ)
+    env.setdefault("ENTRY_PASSWORD", "qa")
+    env.setdefault("DISPATCH_PASSWORD", "qa")
+    env.setdefault("ADMIN_PASSWORD", "qa")
+    if book:
+        env["QA_BOOK"] = book
+        import shutil
+        shutil.copy(book, "INRIPE_Stock_Entry_v1.xlsx")
+        print(f"testing against {book}\n")
+
+    width = max(len(n) for n, _, _ in SUITES) + 2
+    total_p = total_f = 0
+    failed = []
+    t0 = time.time()
+    for name, script, what in SUITES:
+        if not os.path.exists(script):
+            print(f"  {name:<{width}} not found - skipped")
+            continue
+        t = time.time()
+        r = subprocess.run([sys.executable, script], capture_output=True,
+                           text=True, env=env)
+        out = (r.stdout or "") + (r.stderr or "")
+        last = [l for l in out.strip().splitlines() if "passed," in l]
+        p = f = 0
+        if last:
+            try:
+                p = int(last[-1].split()[0]); f = int(last[-1].split()[2])
+            except (ValueError, IndexError):
+                pass
+        total_p += p; total_f += f
+        mark = "ok  " if f == 0 and r.returncode == 0 else "FAIL"
+        print(f"  {mark}  {name:<{width}} {p:>4} checks   "
+              f"{time.time()-t:>5.1f}s   {what}")
+        if f or r.returncode:
+            failed.append((name, out))
+    print()
+    print(f"  {total_p} checks passed, {total_f} failed, "
+          f"{time.time()-t0:.0f}s")
+    if failed:
+        print("\n" + "=" * 62)
+        for name, out in failed:
+            print(f"\n{name}")
+            for line in out.splitlines():
+                if line.startswith("FAIL") or "Error" in line:
+                    print("   ", line)
+        print("=" * 62)
+        return 1
+    print("\n  Nothing is broken.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

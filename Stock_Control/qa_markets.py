@@ -4,19 +4,19 @@ P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
 
-for k in list(os.environ):
-    if k.startswith("SHOP_"): del os.environ[k]
 import importlib, shopify_reader as sr
-importlib.reload(sr)
+# these suites must not see the real secrets file, or they would be testing
+# your live configuration instead of the rules
+FAKE = {}
+sr._cfg = lambda k: FAKE.get(k)
 
 print("=== A. NOTHING CONFIGURED ===")
 ck("no markets configured", sr.configured_markets()==[], sr.configured_markets())
 ck("is_configured is False", not sr.is_configured())
 
 print("=== B. ONE MARKET, PER-MARKET NAMES ===")
-os.environ.update({"SHOP_QATAR_DOMAIN":"q.myshopify.com",
-                   "SHOP_QATAR_CLIENT_ID":"qid","SHOP_QATAR_CLIENT_SECRET":"qsec"})
-importlib.reload(sr)
+FAKE.update({"SHOP_QATAR_DOMAIN":"q.myshopify.com",
+             "SHOP_QATAR_CLIENT_ID":"qid","SHOP_QATAR_CLIENT_SECRET":"qsec"})
 ck("Qatar is found", sr.configured_markets()==["Qatar"], sr.configured_markets())
 ck("UAE is not", not sr.is_configured("UAE"))
 ck("UAE reports what is missing",
@@ -24,9 +24,8 @@ ck("UAE reports what is missing",
    sr.missing_keys("UAE"))
 
 print("=== C. TWO MARKETS ===")
-os.environ.update({"SHOP_UAE_DOMAIN":"u.myshopify.com",
-                   "SHOP_UAE_CLIENT_ID":"uid","SHOP_UAE_CLIENT_SECRET":"usec"})
-importlib.reload(sr)
+FAKE.update({"SHOP_UAE_DOMAIN":"u.myshopify.com",
+             "SHOP_UAE_CLIENT_ID":"uid","SHOP_UAE_CLIENT_SECRET":"usec"})
 ck("both are found", sr.configured_markets()==["Qatar","UAE"], sr.configured_markets())
 ck("Qatar keeps its own credentials", sr._creds("Qatar")==("q.myshopify.com","qid","qsec"))
 ck("UAE keeps its own", sr._creds("UAE")==("u.myshopify.com","uid","usec"))
@@ -35,23 +34,19 @@ ck("credentials never bleed across markets",
 ck("KSA still unconfigured", "KSA" not in sr.configured_markets())
 
 print("=== D. OLD SINGLE-MARKET NAMES STILL WORK ===")
-for k in list(os.environ):
-    if k.startswith("SHOP_"): del os.environ[k]
-os.environ.update({"SHOP_DOMAIN":"legacy.myshopify.com","SHOP_CLIENT_ID":"lid",
-                   "SHOP_CLIENT_SECRET":"lsec","SHOP_MARKET":"Qatar"})
-importlib.reload(sr)
+FAKE.clear()
+FAKE.update({"SHOP_DOMAIN":"legacy.myshopify.com","SHOP_CLIENT_ID":"lid",
+             "SHOP_CLIENT_SECRET":"lsec","SHOP_MARKET":"Qatar"})
 ck("legacy secrets resolve to their market", sr.configured_markets()==["Qatar"],
    sr.configured_markets())
 ck("and carry the right domain", sr._creds("Qatar")[0]=="legacy.myshopify.com")
 ck("legacy does not leak into another market", not sr.is_configured("UAE"))
 
 print("=== E. TOKENS ARE CACHED PER MARKET ===")
-for k in list(os.environ):
-    if k.startswith("SHOP_"): del os.environ[k]
-os.environ.update({"SHOP_QATAR_DOMAIN":"q.myshopify.com","SHOP_QATAR_CLIENT_ID":"qid",
-                   "SHOP_QATAR_CLIENT_SECRET":"qsec","SHOP_UAE_DOMAIN":"u.myshopify.com",
-                   "SHOP_UAE_CLIENT_ID":"uid","SHOP_UAE_CLIENT_SECRET":"usec"})
-importlib.reload(sr)
+FAKE.clear()
+FAKE.update({"SHOP_QATAR_DOMAIN":"q.myshopify.com","SHOP_QATAR_CLIENT_ID":"qid",
+             "SHOP_QATAR_CLIENT_SECRET":"qsec","SHOP_UAE_DOMAIN":"u.myshopify.com",
+             "SHOP_UAE_CLIENT_ID":"uid","SHOP_UAE_CLIENT_SECRET":"usec"})
 calls=[]
 class R:
     status_code=200
