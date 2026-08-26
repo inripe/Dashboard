@@ -83,6 +83,17 @@ def _site_id(hdr) -> str:
     return r.json()["id"]
 
 
+def _item_details(hdr, site_id, item_id) -> dict:
+    """Fetch the item itself. Search results do not carry an eTag, and without
+    one every save goes out unguarded - two people could overwrite each other."""
+    r = requests.get(f"{GRAPH}/sites/{site_id}/drive/items/{item_id}",
+                     headers=hdr, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"Could not read the file details: {r.status_code} "
+                           f"{r.text[:160]}")
+    return r.json()
+
+
 def _file_item(hdr, site_id) -> dict:
     """Find the workbook by name anywhere in the site's default document library."""
     name = _cfg("SP_FILE_NAME")
@@ -94,10 +105,10 @@ def _file_item(hdr, site_id) -> dict:
     items = r.json().get("value", [])
     exact = [i for i in items if i.get("name") == name]
     if exact:
-        return exact[0]
+        return _item_details(hdr, site_id, exact[0]["id"])
     xlsx = [i for i in items if i.get("name", "").endswith(".xlsx")]
     if xlsx:
-        return xlsx[0]
+        return _item_details(hdr, site_id, xlsx[0]["id"])
     found = ", ".join(i.get("name", "?") for i in items[:8]) or "nothing"
     raise FileNotFoundError(
         f"'{name}' was not found in that SharePoint site. Search returned: {found}. "
@@ -153,7 +164,8 @@ def upload_workbook(data: bytes, etag: str | None = None) -> dict:
 
     etag guards against two people saving at once: if the file changed since it
     was read, SharePoint refuses with 412 and the caller re-reads and retries.
-    Passing no etag disables that guard, so callers should always pass one.
+    A save without one is refused outright - unguarded writes are how two
+    people quietly lose each other's entries.
     """
     hdr = {"Authorization": f"Bearer {_token()}"}
     if not _item_cache["site"]:
@@ -165,8 +177,12 @@ def upload_workbook(data: bytes, etag: str | None = None) -> dict:
     put = dict(hdr)
     put["Content-Type"] = ("application/vnd.openxmlformats-officedocument"
                            ".spreadsheetml.sheet")
-    if etag:
-        put["If-Match"] = etag
+    if not etag:
+        raise RuntimeError(
+            "Refusing to save without a version tag. Without one, a save can "
+            "silently overwrite somebody else's work. Re-read the file and "
+            "try again.")
+    put["If-Match"] = etag
     r = requests.put(f"{GRAPH}/sites/{site_id}/drive/items/{item_id}/content",
                      headers=put, data=data, timeout=max(TIMEOUT, 120))
     if r.status_code == 412:

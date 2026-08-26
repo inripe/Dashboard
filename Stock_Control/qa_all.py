@@ -31,6 +31,7 @@ SUITES = [
     ("duplicates", "qa_dupes.py",     "the same entry twice is caught and voided"),
     ("names",      "qa_names.py",     "no retired movement name survives anywhere"),
     ("balance",    "qa_balance.py",   "shipped always equals received plus missing"),
+    ("versioning", "qa_versioning.py","no save goes out without a version tag"),
 ]
 
 

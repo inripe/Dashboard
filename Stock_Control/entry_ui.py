@@ -141,9 +141,14 @@ def limits(moves, ship, shipment, item, movement):
 def render_today(moves, session, cfg, void_fn):
     """What this person entered today. Its own tab, so nobody has to scroll
     past the whole form to check that a save landed."""
+    # a market with entries today comes first, so an admin does not land on a
+    # quiet one and think nothing was recorded
+    mkts = sorted(cfg.get("markets") or [])
+    if "Market" in moves.columns and len(moves):
+        busy = set(moves["Market"].dropna())
+        mkts = sorted(mkts, key=lambda m: (m not in busy, m))
     market = session["market"] if str(session.get("market","")).lower() != "all" \
-        else st.selectbox("Market", sorted(cfg.get("markets") or []),
-                          key="t_market")
+        else st.selectbox("Market", mkts, key="t_market")
     now = entry.market_now(market)
     _today_list(moves, session, market, now, void_fn, cfg.get("item_names"))
 
