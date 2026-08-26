@@ -67,17 +67,17 @@ app=open("app.py").read()
 ck("no bilingual helper anywhere in the dashboard", app.count("L.t(")==0, app.count("L.t("))
 import re
 # arabic is allowed on the entry sign-in, in the entry tab, and in the guide
-guide_from = app.index("7 \u00b7 GUIDE")
-guide_to = app.index("# ============================", guide_from) \
-    if "# ============================" in app[guide_from:] else len(app)
-entry_from = app.index("# ============================= 0 \u00b7 ENTRY")
+guide_from = app.index("How a shipment flows")
+guide_to = guide_from + 4000
+entry_from = app.index("# ============================= RECORD")
 outside=[]
 for m in re.finditer(r"[\u0600-\u06FF]+", app):
     i=m.start(); line=app[:i].count("\n")+1
     ctx=app[max(0,i-260):i+80]
     in_guide = guide_from <= i < guide_to
     in_entry = i >= entry_from
-    if not (in_guide or in_entry or 'tab == "entry"' in ctx):
+    in_modes = "MODE ==" in ctx or "What are you doing" in ctx
+    if not (in_guide or in_entry or in_modes or 'tab == "entry"' in ctx):
         outside.append(line)
 ck("arabic only on the sign-in, the entry tab and the guide", not outside, outside)
 ck("the guide explains the flow in both languages",
@@ -88,8 +88,11 @@ ui=open("entry_ui.py").read()
 ck("the entry screen does use the translations", ui.count("L.t(")>5, ui.count("L.t("))
 ck("and the movement labels", "L.move" in ui)
 ck("the tiles are english", 'kpi(k[0],"Available to sell"' in app)
-ck("labels.py is still complete", len(L.MOVES)>=11 and len(L.UI)>20,
+ck("labels.py covers every movement", len(L.MOVES)==9 and len(L.UI)>20,
    f"{len(L.MOVES)} moves, {len(L.UI)} strings")
+ck("the retired movements are gone from the labels",
+   not ({"Delivered","Orders Assigned","Courier Handover"} & set(L.MOVES)),
+   sorted(L.MOVES))
 
 print()
 for l in F: print(l)

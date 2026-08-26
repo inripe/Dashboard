@@ -47,11 +47,14 @@ N=entry_ui.NEEDS
 ck("received asks for an item and an In", N["Received"]["item"] and N["Received"]["dir"]=="In")
 ck("scrap asks for a reason", N["Scrap"].get("reason") is True)
 ck("to courier asks for a courier", N["To Courier"].get("courier") is True)
-ck("delivered does not ask for an item", N["Delivered"]["item"] is False)
-ck("delivered asks for orders", N["Delivered"].get("orders") is True)
-ck("returned asks for courier, orders and reason",
-   all(N["Returned"].get(k) for k in ("courier","orders","reason")))
-ck("a worker sees five movements", len(entry_ui.WORKER_MOVES)==5, entry_ui.WORKER_MOVES)
+ck("returned names the item now", N["Returned"]["item"] is True)
+ck("returned asks for courier and reason",
+   all(N["Returned"].get(k) for k in ("courier","reason")))
+ck("not received asks for a reason", N["Not received"].get("reason") is True)
+ck("a worker sees four movements", len(entry_ui.WORKER_MOVES)==4,
+   entry_ui.WORKER_MOVES)
+ck("the retired ones are gone",
+   not ({"Delivered","Orders Assigned","Courier Handover"} & set(N)), sorted(N))
 ck("count adjustments are admin only",
    not any("Count Adjustment" in x for x in entry_ui.WORKER_MOVES))
 

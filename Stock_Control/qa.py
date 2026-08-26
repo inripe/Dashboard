@@ -40,7 +40,7 @@ ck0("no move dated before its shipment arrived",
         ship.groupby("Shipment ID")["Arrival Date"].min())).sum())
 
 print("B. SHIPPED = CUSTOMS + RECEIVED")
-ck("customs + received equals shipped", q("Customs / Loss") + q("Received"),
+ck("customs + received equals shipped", q("Not received") + q("Received"),
    st["Shipped Qty"].sum())
 ck0("no shipment line with an unexplained gap", (st["ShipDiff"].round(6) != 0).sum())
 
@@ -61,16 +61,6 @@ ck0("negative courier holding", (cp["Held"] < 0).sum() if len(cp) else 0)
 print("E. RETURN LOOP")
 ck("returned = back to stock + scrapped", q("Returned"),
    q("Return to Saleable") + q("Return to Scrap"))
-
-print("F. ORDER COUNTS")
-ck("orders assigned", cl.OrdersAssigned.sum(), o("Orders Assigned"))
-ck("orders handed", cl.OrdersHanded.sum(), o("Courier Handover"))
-ck("orders handed tie to courier view", cp.OrdersHanded.sum() if len(cp) else 0,
-   cl.OrdersHanded.sum())
-ck("orders outstanding = handed - delivered - returned", cl.OrdersOutstanding.sum(),
-   o("Courier Handover") - o("Delivered") - o("Returned"))
-ck0("negative orders outstanding",
-    (cp["OrdersOutstanding"] < 0).sum() if len(cp) else 0)
 
 print("G. CLEARANCE")
 ck("received per shipment ties to the log", cl.Received.sum(), q("Received"))

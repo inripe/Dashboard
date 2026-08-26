@@ -2,8 +2,12 @@
 import pandas as pd, numpy as np
 
 SHEETS = {"MASTER": None, "SHIPMENTS": 5, "MOVES": 5, "COUNT": 5}
-MV = ["Received","Customs / Loss","Scrap","To Courier","Orders Assigned","Courier Handover",
-      "Delivered","Returned","Return to Saleable","Return to Scrap","Count Adjustment"]
+# every movement the sheet may contain. Delivered, Orders Assigned and Courier
+# Handover were retired: the store cannot observe a delivery, and order counts
+# come from Shopify.
+MV = ["Received", "Not received", "Scrap", "To Courier", "Returned",
+      "Return to Saleable", "Return to Scrap",
+      "Count Adjustment", "Count Adjustment - Add", "Count Adjustment - Remove"]
 
 def _tbl(xl, sheet, header_row, ncols):
     """Read a sheet's table. Tolerates a file with fewer columns than expected."""
@@ -163,7 +167,7 @@ def stock_by_item(ship, moves, as_of):
     base = base.rename(columns={"Shipment ID":"Shipment","Item Code":"Item"})
     k = ["Shipment","Item"]
     m = moves.rename(columns={"Shipment":"Shipment","Item":"Item"})
-    for label, mt in [("Received","Received"),("Customs","Customs / Loss"),("Scrap","Scrap"),
+    for label, mt in [("Received","Received"),("Customs","Not received"),("Scrap","Scrap"),
                       ("ToSaleable","Return to Saleable"),("ReturnScrap","Return to Scrap"),
                       ("CountAdj","Count Adjustment"),("ToCourier","To Courier")]:
         base[label] = base.set_index(k).index.map(_q(m, mt, k)).fillna(0) if len(m) else 0
@@ -183,24 +187,28 @@ def clearance_by_shipment(ship, moves, as_of, settings):
     g = lambda mt, col: hdr[k].map(_q(moves, mt, k) if col=="Qty" else _o(moves, mt, k)).fillna(0)
     hdr["Received"]  = g("Received","Qty")
     hdr["Scrap"]     = g("Scrap","Qty") + g("Return to Scrap","Qty")
-    hdr["Delivered"] = g("Delivered","Qty")
+    hdr["ToCourier"] = g("To Courier","Qty")
     hdr["Returned"]  = g("Returned","Qty")
-    hdr["CountAdj"] = g("Count Adjustment","Qty")
-    hdr["Outstanding"] = (hdr["Received"] - hdr["Delivered"] - hdr["Scrap"] + hdr["CountAdj"])
+    # nobody records a delivery: the store never sees the customer. What the
+    # courier took and did not bring back is delivered, by definition.
+    hdr["Delivered"] = (hdr["ToCourier"] - hdr["Returned"]).clip(lower=0)
+    hdr["CountAdj"] = (g("Count Adjustment","Qty")
+                       + g("Count Adjustment - Add","Qty")
+                       - g("Count Adjustment - Remove","Qty"))
+    hdr["NotReceived"] = g("Not received","Qty")
+    hdr["Outstanding"] = (hdr["Received"] - hdr["ToCourier"] - hdr["Scrap"]
+                          + hdr["Returned"] + hdr["CountAdj"])
     hdr["DaysOpen"] = (as_of - hdr["Arrival"]).dt.days
-    dl = moves[moves["Movement"]=="Delivered"]
+    dl = moves[moves["Movement"]=="To Courier"]
     if len(dl):
         last = dl.groupby("Shipment")["Date"].max()
         hdr["Span"] = (hdr["Shipment"].map(last) - hdr["Arrival"]).dt.days
     else:
         hdr["Span"] = np.nan
     hdr["Cleared"] = np.where(hdr["Outstanding"] <= 0, "Yes", "No")
-    hdr["OrdersAssigned"] = g("Orders Assigned","Orders")
-    hdr["OrdersHanded"]   = g("Courier Handover","Orders")
-    hdr["OrdersDelivered"]= g("Delivered","Orders")
-    hdr["OrdersReturned"] = g("Returned","Orders")
-    hdr["OrdersOutstanding"] = hdr["OrdersHanded"] - hdr["OrdersDelivered"] - hdr["OrdersReturned"]
-    hdr["OrdersVsAssigned"]  = hdr["OrdersHanded"] - hdr["OrdersAssigned"]
+    for c_ in ("OrdersAssigned","OrdersHanded","OrdersDelivered","OrdersReturned",
+               "OrdersOutstanding","OrdersVsAssigned"):
+        hdr[c_] = 0
     hdr["Overdue"] = (hdr["Outstanding"] > 0) & (hdr["DaysOpen"] > settings["clear_target"])
     return hdr
 
@@ -215,12 +223,15 @@ def courier_positions(ship, moves, as_of, settings):
     mp = lambda mt, col: idx.set_index(k).index.map(
         (_q(d, mt, k) if col=="Qty" else _o(d, mt, k))).fillna(0)
     idx["ToCourier"] = mp("To Courier","Qty")
-    idx["Delivered"] = mp("Delivered","Qty")
     idx["Returned"]  = mp("Returned","Qty")
-    idx["Held"] = idx["ToCourier"] - idx["Delivered"] - idx["Returned"]
-    idx["OrdersHanded"]    = mp("Courier Handover","Orders")
-    idx["OrdersDelivered"] = mp("Delivered","Orders")
-    idx["OrdersReturned"]  = mp("Returned","Orders")
+    # Nobody records a delivery - the store never meets the customer. So what
+    # the courier is accountable for is what it took less what it brought back.
+    # Anything not returned was delivered, which is why there is no separate
+    # Delivered figure here.
+    idx["Held"] = idx["ToCourier"] - idx["Returned"]
+    idx["Delivered"] = 0
+    for c_ in ("OrdersHanded", "OrdersDelivered", "OrdersReturned"):
+        idx[c_] = 0
     idx["OrdersOutstanding"] = idx["OrdersHanded"] - idx["OrdersDelivered"] - idx["OrdersReturned"]
     tc = d[d["Movement"]=="To Courier"].groupby(k)["Date"].min()
     idx["DaysSince"] = (as_of - idx.set_index(k).index.map(tc)).days if len(tc) else np.nan

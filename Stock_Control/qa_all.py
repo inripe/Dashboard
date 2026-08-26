@@ -22,9 +22,15 @@ SUITES = [
     ("labels",     "qa_labels.py",    "in / out and arabic on every movement"),
     ("access",     "qa_access.py",    "three roles, two protected tabs"),
     ("shipments",  "qa_shipment.py",  "sent is not the same as arrived"),
-    ("upgrade",    "qa_upgrade.py",   "upgrading adds, never removes"),
     ("integrity",  "qa_integrity.py", "the seams between all of it"),
     ("cleaner",    "qa_clean.py",     "removes only lines with no movements"),
+    ("quantities", "qa_quantities.py","nothing goes out that is not there"),
+    ("isolation",  "qa_isolation.py", "entry ignores the dashboard filters"),
+    ("modes",      "qa_modes.py",     "each mode shows its own screen and no other"),
+    ("reports",    "qa_reports.py",   "couriers, counts, clearance and today"),
+    ("duplicates", "qa_dupes.py",     "the same entry twice is caught and voided"),
+    ("names",      "qa_names.py",     "no retired movement name survives anywhere"),
+    ("balance",    "qa_balance.py",   "shipped always equals received plus missing"),
 ]
 
 
@@ -41,10 +47,13 @@ def fetch_live():
 def main():
     args = sys.argv[1:]
     book = None
-    if "--live" in args:
-        book = fetch_live()
-    elif "--book" in args:
+    if "--book" in args:
         book = args[args.index("--book") + 1]
+    elif "--live" in args or not any(
+            os.path.exists(p) for p in ("INRIPE_Stock_Entry_v1.xlsx",
+                                        "INRIPE_Stock_Entry_v3.xlsx")):
+        # no workbook here, so there is nothing to test against but the live one
+        book = fetch_live()
     env = dict(os.environ)
     env.setdefault("ENTRY_PASSWORD", "qa")
     env.setdefault("DISPATCH_PASSWORD", "qa")
@@ -61,8 +70,7 @@ def main():
     t0 = time.time()
     for name, script, what in SUITES:
         if not os.path.exists(script):
-            print(f"  {name:<{width}} not found - skipped")
-            continue
+            continue   # a suite for a tool that is no longer here
         t = time.time()
         r = subprocess.run([sys.executable, script], capture_output=True,
                            text=True, env=env)

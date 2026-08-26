@@ -16,10 +16,14 @@ ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
 # an item that is genuinely NOT on this shipment, whatever the workbook holds
 NOT_IN=next((x for x in (cfg0.get("item_names") or {}).values()
              if x not in set(s0[s0["Shipment ID"]==SHIP]["Item Name"])), None)
-def row(mv="Received", qty=5, item=None, **kw):
+# a count adjustment is used as the everyday movement here: this suite is about
+# the writer, and a count adjustment is not limited by what was shipped
+def row(mv="Count Adjustment - Add", qty=5, item=None, **kw):
     d={"Date":entry.market_now("Qatar").date(),"Shipment No":SHIP,"Movement":mv,
        "Item Name":item if item is not None else ITEM}
-    d["In" if mv in ("Received","Return to Saleable","Returned") else "Out"]=qty
+    d["In" if mv in ("Received","Return to Saleable","Returned",
+                     "Count Adjustment - Add") else "Out"]=qty
+    if mv.startswith("Count Adjustment"): d["Reason"]="Count Adjustment"
     d.update(kw); return d
 
 print("=== A. A ROW LANDS, AND NOTHING ELSE MOVES ===")
@@ -89,7 +93,7 @@ ck("a different quantity is not a duplicate",
                         row(qty=99),"Qatar") is None)
 ck("a different movement is not a duplicate",
    entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],
-                        row(mv="Scrap",qty=5),"Qatar") is None)
+                        row(mv="Scrap",qty=5,Reason="Damage"),"Qatar") is None)
 ck("nothing matches in an empty window",
    entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],
                         row(),"Qatar",within_minutes=0) is None)

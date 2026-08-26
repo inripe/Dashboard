@@ -9,7 +9,7 @@ Rules it will not break:
     formulas and dropdowns would stop applying to new rows
 """
 from __future__ import annotations
-import io, datetime as dt
+import io, re, datetime as dt
 import pandas as pd
 import openpyxl
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -115,6 +115,150 @@ def _lookups(wb):
             "couriers": couriers}
 
 
+def stock_now(wb, shipment, item_name=None):
+    """What this shipment holds right now, per item and with the courier.
+    Read from MOVES, so it reflects everything recorded so far."""
+    ws = wb["MOVES"]
+    c = {ws.cell(HEADER_ROW, i).value: i for i in range(1, ws.max_column + 1)
+         if ws.cell(HEADER_ROW, i).value}
+    IN = {"Received", "Return to Saleable", "Count Adjustment - Add"}
+    OUT = {"Scrap", "To Courier", "Return to Scrap", "Count Adjustment - Remove",
+           "Not received"}
+    store, with_courier, received = {}, 0.0, {}
+    for r in range(FIRST_DATA, ws.max_row + 1):
+        if ws.cell(r, c["Date"]).value in (None, ""):
+            continue
+        if str(ws.cell(r, c["Void"]).value or "").strip().lower() == "yes":
+            continue
+        if str(ws.cell(r, c["Shipment No"]).value).strip() != str(shipment).strip():
+            continue
+        mv = str(ws.cell(r, c["Movement"]).value or "").strip()
+        it = str(ws.cell(r, c["Item Name"]).value or "").strip()
+        q = float(ws.cell(r, c["In"]).value or 0) + float(ws.cell(r, c["Out"]).value or 0)
+        if mv in IN and it:
+            store[it] = store.get(it, 0) + q
+            if mv == "Received":
+                received[it] = received.get(it, 0) + q
+        elif mv in OUT and it:
+            store[it] = store.get(it, 0) - q
+        if mv == "To Courier":
+            with_courier += q
+        elif mv == "Returned":
+            with_courier -= q
+    if item_name is not None:
+        return store.get(str(item_name).strip(), 0.0)
+    return store, with_courier, received
+
+
+def _not_received(wb, shipment):
+    """How many boxes are already recorded as never having arrived, per item.
+    Without this a missing box can be claimed twice."""
+    ws = wb["MOVES"]
+    c = {ws.cell(HEADER_ROW, i).value: i for i in range(1, ws.max_column + 1)
+         if ws.cell(HEADER_ROW, i).value}
+    out = {}
+    for r in range(FIRST_DATA, ws.max_row + 1):
+        if ws.cell(r, c["Date"]).value in (None, ""):
+            continue
+        if str(ws.cell(r, c["Void"]).value or "").strip().lower() == "yes":
+            continue
+        if str(ws.cell(r, c["Movement"]).value or "").strip() != "Not received":
+            continue
+        if str(ws.cell(r, c["Shipment No"]).value).strip() != str(shipment).strip():
+            continue
+        it = str(ws.cell(r, c["Item Name"]).value or "").strip()
+        out[it] = out.get(it, 0.0) + float(ws.cell(r, c["Out"]).value or 0)
+    return out
+
+
+def shipped_qty(lk_or_wb, shipment, item_name):
+    """How many boxes the shipment says were sent for this item."""
+    wb = lk_or_wb
+    ws = wb["SHIPMENTS"]
+    c = {ws.cell(HEADER_ROW, i).value: i for i in range(1, ws.max_column + 1)
+         if ws.cell(HEADER_ROW, i).value}
+    total = 0.0
+    for r in range(FIRST_DATA, ws.max_row + 1):
+        if str(ws.cell(r, c["Shipment No"]).value or "").strip() == str(shipment).strip() \
+                and str(ws.cell(r, c["Item Name"]).value or "").strip() == str(item_name).strip():
+            total += float(ws.cell(r, c["Shipped Qty"]).value or 0)
+    return total
+
+
+def check_quantities(row, wb):
+    """Stops the mistakes a tired person makes at six in the morning.
+    Returns "OK" or a sentence saying what is wrong and what the figure is."""
+    mv = str(row.get("Movement") or "").strip()
+    sid = str(row.get("Shipment No") or "").strip()
+    item = str(row.get("Item Name") or "").strip()
+    qty = float(row.get("In") or 0) + float(row.get("Out") or 0)
+    if not sid or qty <= 0:
+        return "OK"
+    store, with_courier, received = stock_now(wb, sid)
+    not_recv = _not_received(wb, sid)
+
+    OUT_OF_STORE = {"Scrap", "To Courier", "Return to Scrap",
+                    "Count Adjustment - Remove"}
+    if mv in OUT_OF_STORE and item:
+        have = store.get(item, 0.0)
+        if qty > have:
+            return (f"Only {have:,.0f} boxes of {item} are in the store for "
+                    f"{sid}. You cannot take out {qty:,.0f}.")
+
+    if mv == "Received" and item:
+        sent = shipped_qty(wb, sid, item)
+        already = received.get(item, 0.0)
+        if sent and already + qty > sent:
+            room = sent - already
+            return (f"{sid} was sent {sent:,.0f} boxes of {item} and "
+                    f"{already:,.0f} are already recorded. "
+                    f"{'No more can be received' if room <= 0 else f'Only {room:,.0f} left to receive'}.")
+
+    if mv == "Not received" and item:
+        sent = shipped_qty(wb, sid, item)
+        arrived = received.get(item, 0.0)
+        claimed = not_recv.get(item, 0.0)
+        room = sent - arrived - claimed
+        if sent and qty > room:
+            return (f"{sid} was sent {sent:,.0f} boxes of {item}, "
+                    f"{arrived:,.0f} arrived"
+                    + (f" and {claimed:,.0f} are already recorded as not received"
+                       if claimed else "")
+                    + ". "
+                    + ("Everything is accounted for." if room <= 0
+                       else f"At most {room:,.0f} can still be missing."))
+
+    if mv == "Returned":
+        if qty > with_courier:
+            return (f"The courier is holding {with_courier:,.0f} boxes from "
+                    f"{sid}. You cannot record {qty:,.0f}.")
+
+    if mv == "Return to Saleable" or mv == "Return to Scrap":
+        back = 0.0
+        ws = wb["MOVES"]
+        c = {ws.cell(HEADER_ROW, i).value: i for i in range(1, ws.max_column + 1)
+             if ws.cell(HEADER_ROW, i).value}
+        returned = split = 0.0
+        for r in range(FIRST_DATA, ws.max_row + 1):
+            if str(ws.cell(r, c["Shipment No"]).value or "").strip() != sid:
+                continue
+            if str(ws.cell(r, c["Void"]).value or "").strip().lower() == "yes":
+                continue
+            m2 = str(ws.cell(r, c["Movement"]).value or "").strip()
+            q2 = float(ws.cell(r, c["In"]).value or 0) + float(ws.cell(r, c["Out"]).value or 0)
+            if m2 == "Returned":
+                returned += q2
+            elif m2 in ("Return to Saleable", "Return to Scrap"):
+                split += q2
+        if split + qty > returned:
+            return (f"{returned:,.0f} boxes came back on {sid} and "
+                    f"{split:,.0f} have already been sorted. "
+                    + ("Record the Returned movement first."
+                       if returned <= 0 else
+                       f"Only {max(returned-split,0):,.0f} are left to sort."))
+    return "OK"
+
+
 def validate(row, lk):
     """The same rules the sheet's Check column applies, run before writing.
     Returns "OK" or the reason. A row that fails is never written."""
@@ -198,8 +342,13 @@ def append_moves(buf, rows, user, market):
     ws = wb["MOVES"]
     c = _cols(ws)
     lk = _lookups(wb)
-    bad = [(i, validate(r, lk)) for i, r in enumerate(rows)
-           if validate(r, lk) != "OK"]
+    bad = []
+    for i, r in enumerate(rows):
+        why = validate(r, lk)
+        if why == "OK":
+            why = check_quantities(r, wb)
+        if why != "OK":
+            bad.append((i, why))
     if bad:
         raise ValueError("Refused: " + "; ".join(f"row {i+1} - {w}" for i, w in bad))
     when = market_now(market)
@@ -372,20 +521,28 @@ def migrate_to_values(buf):
     return out.getvalue(), changed
 
 
-def next_shipment_no(buf, market=None):
-    """NO. 053 - the next free number, shared across markets so a number is
-    never reused."""
+SHIPMENT_CODE = re.compile(r"^[A-Z]-\d{2}-\d{3,}$")
+MARKET_LETTER = {"Qatar": "Q", "UAE": "U", "KSA": "K", "Egypt": "E"}
+
+
+def next_shipment_no(buf, market=None, when=None):
+    """Q-26-001 - market letter, two-digit year, serial within that pair.
+    The market and year are in the code, so two markets can both have 001."""
+    letter = MARKET_LETTER.get(str(market or "").strip(), "X")
+    when = when or (market_now(market) if market else pd.Timestamp.now())
+    yy = when.year % 100
+    prefix = f"{letter}-{yy:02d}-"
     wb = openpyxl.load_workbook(io.BytesIO(buf) if isinstance(buf, bytes) else buf)
     ws = wb["SHIPMENTS"]
     top = 0
     for r in range(FIRST_DATA, ws.max_row + 1):
         v = ws.cell(r, 1).value
-        if isinstance(v, str) and v.upper().startswith("NO."):
+        if isinstance(v, str) and v.strip().startswith(prefix):
             try:
-                top = max(top, int(v.split(".")[1].strip()))
+                top = max(top, int(v.strip().rsplit("-", 1)[1]))
             except (ValueError, IndexError):
                 pass
-    return f"NO. {top + 1:03d}"
+    return f"{prefix}{top + 1:03d}"
 
 
 def validate_shipment(row, lk, existing):
@@ -394,6 +551,13 @@ def validate_shipment(row, lk, existing):
     item = str(row.get("Item Name") or "").strip()
     if not sid:
         return "Shipment number needed"
+    if not SHIPMENT_CODE.match(sid):
+        return (f"'{sid}' is not a shipment number. They look like Q-26-001: "
+                f"market letter, year, then three digits.")
+    want = MARKET_LETTER.get(str(row.get("Market") or "").strip())
+    if want and not sid.startswith(want + "-"):
+        return (f"{sid} does not belong to {row.get('Market')}. "
+                f"A {row.get('Market')} shipment starts with {want}-.")
     if not row.get("Market"):
         return "Market needed"
     if not row.get("Arrival Date"):

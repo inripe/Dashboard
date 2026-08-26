@@ -20,6 +20,9 @@ _ADMIN = _qb.admin_user(_eng.load(_qb.book())[3]) or "admin"
 
 def fresh():
     at=AppTest.from_file("app.py",default_timeout=600).run()
+    md=[r for r in at.radio if "Review" in r.options]
+    if md and "Record" in md[0].options:
+        md[0].set_value("Record").run()
     users=[s for s in at.selectbox if s.label=="User"]
     if users:
         users[0].set_value(_ADMIN).run()
@@ -143,27 +146,29 @@ ck("no movement, nothing else matters", m(None,None,None,None,{})==["what happen
 ck("received wants shipment, item and boxes",
    len(m("Received",None,None,None,{}))==3, m("Received",None,None,None,{}))
 ck("shipment alone is not enough",
-   len(m("Received","NO. 1",None,None,{}))==2)
+   len(m("Received","Q-26-001",None,None,{}))==2)
 ck("item alone is not enough",
-   len(m("Received","NO. 1","Fig",None,{}))==1)
+   len(m("Received","Q-26-001","Fig",None,{}))==1)
 ck("zero boxes is still missing",
-   len(m("Received","NO. 1","Fig",0,{}))==1, m("Received","NO. 1","Fig",0,{}))
-ck("complete means nothing missing", m("Received","NO. 1","Fig",48,{})==[])
+   len(m("Received","Q-26-001","Fig",0,{}))==1, m("Received","Q-26-001","Fig",0,{}))
+ck("complete means nothing missing", m("Received","Q-26-001","Fig",48,{})==[])
 ck("scrap also wants a reason",
-   any("reason" in x for x in m("Scrap","NO. 1","Fig",2,{})))
+   any("reason" in x for x in m("Scrap","Q-26-001","Fig",2,{})))
 ck("scrap with a reason is complete",
-   m("Scrap","NO. 1","Fig",2,{"Reason":"Quality"})==[])
+   m("Scrap","Q-26-001","Fig",2,{"Reason":"Quality"})==[])
 ck("to courier wants a courier",
-   any("courier" in x for x in m("To Courier","NO. 1","Fig",5,{})))
-ck("delivered wants courier and orders, not an item",
-   set(len(x) for x in [m("Delivered","NO. 1",None,5,{})])=={2},
-   m("Delivered","NO. 1",None,5,{}))
-ck("delivered complete",
-   m("Delivered","NO. 1",None,5,{"Courier":"WareOne","Orders":3})==[])
-ck("returned wants all three",
-   len(m("Returned","NO. 1",None,2,{}))==3, m("Returned","NO. 1",None,2,{}))
+   any("courier" in x for x in m("To Courier","Q-26-001","Fig",5,{})))
+ck("returned wants an item, a courier and a reason",
+   len(m("Returned","Q-26-001",None,5,{}))==3,
+   m("Returned","Q-26-001",None,5,{}))
+ck("returned complete",
+   m("Returned","Q-26-001","Fig",5,{"Courier":"WareOne","Reason":"Cancelled"})==[])
+ck("delivered no longer exists", "Delivered" not in E.NEEDS, sorted(E.NEEDS))
+ck("not received wants a reason",
+   any("reason" in x for x in m("Not received","Q-26-001","Fig",2,{})),
+   m("Not received","Q-26-001","Fig",2,{}))
 ck("every message is bilingual",
-   all("\u00b7" in x for x in m("Returned","NO. 1",None,None,{})))
+   all("\u00b7" in x for x in m("Returned","Q-26-001",None,None,{})))
 
 print("=== H. THE FORM STARTS BLANK ===")
 ui=open("entry_ui.py").read()

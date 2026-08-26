@@ -9,12 +9,9 @@ means they never have to remember whether "Returned" adds or removes stock.
 # movement -> (direction, arabic)
 MOVES = {
     "Received":                  ("IN",  "استلام"),
-    "Customs / Loss":            ("OUT", "فقد في الجمارك"),
+    "Not received":              ("OUT", "لم تصل"),
     "Scrap":                     ("OUT", "إتلاف"),
     "To Courier":                ("OUT", "تسليم للمندوب"),
-    "Orders Assigned":           ("",    "طلبات مخصصة"),
-    "Courier Handover":          ("",    "تسليم الطلبات للمندوب"),
-    "Delivered":                 ("OUT", "تم التوصيل"),
     "Returned":                  ("IN",  "مرتجع"),
     "Return to Saleable":        ("IN",  "إرجاع للمخزون"),
     "Return to Scrap":           ("OUT", "إرجاع للإتلاف"),

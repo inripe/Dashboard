@@ -5,18 +5,16 @@ import streamlit as st
 import entry, auth, labels as L
 
 # what a store worker may record. Anything else is admin work.
-WORKER_MOVES = ["Received", "Scrap", "To Courier", "Delivered", "Returned"]
+WORKER_MOVES = ["Received", "Returned", "Scrap", "To Courier"]
 NEEDS = {  # movement -> which extra fields the form must ask for
     "Received":            {"item": True,  "dir": "In"},
-    "Scrap":               {"item": True,  "dir": "Out", "reason": True},
-    "To Courier":          {"item": True,  "dir": "Out", "courier": True},
-    "Delivered":           {"item": False, "dir": "Out", "courier": True, "orders": True},
-    "Returned":            {"item": False, "dir": "In",  "courier": True, "orders": True,
+    "Returned":            {"item": True,  "dir": "In",  "courier": True,
                             "reason": True},
     "Return to Saleable":  {"item": True,  "dir": "In"},
+    "Not received":        {"item": True,  "dir": "Out", "reason": True},
+    "Scrap":               {"item": True,  "dir": "Out", "reason": True},
+    "To Courier":          {"item": True,  "dir": "Out", "courier": True},
     "Return to Scrap":     {"item": True,  "dir": "Out", "reason": True},
-    "Orders Assigned":     {"item": False, "dir": None,  "orders": True},
-    "Courier Handover":    {"item": False, "dir": None,  "courier": True, "orders": True},
     "Count Adjustment - Add":    {"item": True, "dir": "In",  "reason": True},
     "Count Adjustment - Remove": {"item": True, "dir": "Out", "reason": True},
 }
@@ -104,16 +102,67 @@ def available(stock, shipment, item):
     return float(r["Store"].sum()) if len(r) else 0.0
 
 
+def limits(moves, ship, shipment, item, movement):
+    """What is available for this movement right now, so the form can say so
+    before anybody types a number."""
+    m = moves[moves["Shipment"] == shipment] if len(moves) else moves
+    if "Void" in m.columns:
+        m = m[m["Void"].astype(str).str.strip().str.lower() != "yes"]
+    q = lambda mv, it=None: float(
+        m[(m["Movement"] == mv) &
+          ((m["Item Name"] == it) if it else True)]["Qty"].sum()) if len(m) else 0.0
+    IN = ["Received", "Return to Saleable", "Count Adjustment - Add"]
+    OUT = ["Scrap", "To Courier", "Return to Scrap", "Count Adjustment - Remove",
+           "Not received"]
+    in_store = sum(q(x, item) for x in IN) - sum(q(x, item) for x in OUT) if item else 0
+    with_courier = q("To Courier") - q("Returned")
+    sent = float(ship[(ship["Shipment ID"] == shipment) &
+                      (ship["Item Name"] == item)]["Shipped Qty"].sum()) if item else 0
+    unsorted_returns = q("Returned") - q("Return to Saleable") - q("Return to Scrap")
+    if movement in OUT and movement != "Not received":
+        return in_store, f"{in_store:,.0f} in store for this item"
+    if movement == "Received":
+        room = sent - q("Received", item)
+        return max(room, 0), (f"{sent:,.0f} shipped, {q('Received', item):,.0f} "
+                              f"already received, {max(room,0):,.0f} left")
+    if movement == "Not received":
+        room = sent - q("Received", item) - q("Not received", item)
+        return max(room, 0), (f"{sent:,.0f} shipped, {q('Received', item):,.0f} "
+                              f"arrived, {q('Not received', item):,.0f} already "
+                              f"recorded as missing")
+    if movement == "Returned":
+        return max(with_courier, 0), f"{with_courier:,.0f} with the courier"
+    if movement in ("Return to Saleable", "Return to Scrap"):
+        return max(unsorted_returns, 0), \
+            f"{unsorted_returns:,.0f} came back and are not yet sorted"
+    return None, ""
+
+
+def render_today(moves, session, cfg, void_fn):
+    """What this person entered today. Its own tab, so nobody has to scroll
+    past the whole form to check that a save landed."""
+    market = session["market"] if str(session.get("market","")).lower() != "all" \
+        else st.selectbox("Market", sorted(cfg.get("markets") or []),
+                          key="t_market")
+    now = entry.market_now(market)
+    _today_list(moves, session, market, now, void_fn, cfg.get("item_names"))
+
+
 def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
-           item_names=None):
+           item_names=None, show_today=True):
     """save_fn(rows, market) -> list of entry ids.  void_fn(entry_id, market)."""
     n = _nonce()
     # every active market, not only those that already have a shipment, so a
     # new market is visible and the reason it cannot be used is explained
     all_markets = sorted(cfg.get("markets") or []) or \
         sorted(ship["Market"].dropna().unique())
+    # markets that actually have something open come first, so an admin does not
+    # land on an empty one just because it sorts first alphabetically
+    live = set(clear[clear["Cleared"] == "No"]["Market"]) if len(clear) else set()
+    all_markets = sorted(all_markets, key=lambda m: (m not in live, m))
     market = session["market"] if str(session.get("market", "")).lower() != "all" \
-        else st.selectbox("Market", all_markets, key=f"e_market_{n}")
+        else st.selectbox("Market", all_markets, key=f"e_market_{n}",
+                          help="Markets with an open shipment are listed first")
     now = entry.market_now(market)
     st.markdown(f'<div class="card" style="border-left:3px solid {"#2E75B6"}">'
                 f'<b>{market}</b> &nbsp;&middot;&nbsp; {session["user"]}'
@@ -142,7 +191,8 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
              f"{market} has no shipment yet. Switch to New shipment above and "
              f"create one - movements are always recorded against a shipment.")
             + f"\n\n{market}: لا توجد شحنة مفتوحة")
-        _today_list(moves, session, market, now, void_fn, item_names)
+        if show_today:
+            _today_list(moves, session, market, now, void_fn, item_names)
         return
 
     moves_allowed = (WORKER_MOVES if str(session.get("role", "")).lower() != "admin"
@@ -163,7 +213,8 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
         st.markdown('<div class="note">Pick what happened to see the rest of '
                     'the form.  &nbsp;·&nbsp;  اختر ماذا حدث</div>',
                     unsafe_allow_html=True)
-        _today_list(moves, session, market, now, void_fn, item_names)
+        if show_today:
+            _today_list(moves, session, market, now, void_fn, item_names)
         return
     spec = NEEDS.get(mv, {})
 
@@ -200,14 +251,22 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
         st.markdown(f"**{_n} · {L.t('How many boxes?')}**")
         st.markdown(f'<div class="note" style="margin-top:-.4rem">{_word}</div>',
                     unsafe_allow_html=True)
-        qty = st.number_input("Boxes", min_value=0, max_value=100000, step=1,
+        cap, why = limits(moves, ship, sid, item, mv) if sid else (None, "")
+        top = int(cap) if cap is not None else 100000
+        qty = st.number_input("Boxes", min_value=0,
+                              max_value=max(top, 0) or 1, step=1,
                               value=0, key=f"e_qty_{n}",
                               label_visibility="collapsed")
         qty = st.session_state.get(f"e_qty_{n}", qty)
-        if spec["dir"] == "Out" and item:
-            have = available(stock, sid, item)
-            st.markdown(f'<div class="note">{have:,.0f} in store for this shipment '
-                        f'and item.</div>', unsafe_allow_html=True)
+        if why:
+            if cap is not None and cap <= 0:
+                st.markdown(f'<div class="note" style="color:#C00000">'
+                            f'Nothing available &mdash; {why}. Record the step '
+                            f'before this one first.</div>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="note">{why}. The box will not let you '
+                            f'go above it.</div>', unsafe_allow_html=True)
 
     extras = {}
     if spec.get("courier"):
@@ -254,7 +313,8 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
         if c2.button(L.t("Start again"), key=f"e_clear_{n}"):
             _reset(keep_shipment=False)
             st.rerun()
-        _today_list(moves, session, market, now, void_fn, item_names)
+        if show_today:
+            _today_list(moves, session, market, now, void_fn, item_names)
         return
     st.markdown(f'<div class="card" style="border-left:3px solid #2E75B6;'
                 f'font-size:1.02rem;line-height:1.65">{words}</div>',
@@ -277,7 +337,8 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
         _reset(keep_shipment=False)
         st.rerun()
 
-    _today_list(moves, session, market, now, void_fn, item_names)
+    if show_today:
+        _today_list(moves, session, market, now, void_fn, item_names)
 
 
 def _sentence(row, mv, market, user):
@@ -387,18 +448,37 @@ def render_shipment(ship, cfg, session, save_fn):
                 'not enter the arrived figure here.</div>',
                 unsafe_allow_html=True)
 
+    # market first: the shipment number is built from it, so asking the other
+    # way round leaves the first field unanswerable
     c1, c2, c3 = st.columns(3)
-    nxt = st.session_state.get("s_no") or "…"
-    sid = c1.text_input("Shipment number  ·  رقم الشحنة", value=nxt, key=f"s_no_{n}")
-    mkt = c2.selectbox("Market  ·  السوق", markets, index=None,
-                       placeholder="Choose", key=f"s_mkt_{n}")
-    arr = c3.date_input("Arrival date  ·  تاريخ الوصول",
-                        value=dt.date.today(), key=f"s_arr_{n}")
-    src = st.selectbox("Source  ·  المصدر", ["Egypt", "Local"], index=None,
-                       placeholder="Choose", key=f"s_src_{n}")
+    mkt = c1.selectbox("1 · Market  ·  السوق", markets, index=None,
+                       placeholder="Choose the market", key=f"s_mkt_{n}",
+                       help="The shipment number is built from this")
+    nxt = st.session_state.get("s_next", {}).get(mkt, "") if mkt else ""
+    sid = c2.text_input(
+        "2 · Shipment number  ·  رقم الشحنة", value=nxt,
+        placeholder="choose a market first" if not mkt else nxt,
+        key=f"s_no_{n}",
+        help="Market letter, year, then three digits - Q-26-001. "
+             "The next free number is filled in for you; change it only if "
+             "this shipment already has one.")
+    arr = c3.date_input("3 · Arrival date  ·  تاريخ الوصول",
+                        value=dt.date.today(), key=f"s_arr_{n}",
+                        help="The day it lands, not the day it was sent")
+    if mkt and nxt:
+        st.markdown(f'<div class="note" style="margin-top:-.6rem">'
+                    f'<b>{nxt}</b> is the next free number for {mkt} this year.'
+                    f'</div>', unsafe_allow_html=True)
+    src = st.selectbox("4 · Source  ·  المصدر", ["Egypt", "Local"], index=None,
+                       placeholder="Where it came from", key=f"s_src_{n}",
+                       help="Egypt for an air shipment, Local for something "
+                            "bought in the market")
 
     items = sorted((cfg.get("item_names") or {}).values())
-    st.markdown("**Items and quantities  ·  الأصناف والكميات**")
+    st.markdown("**5 · Items and quantities  ·  الأصناف والكميات**")
+    st.markdown('<div class="note" style="margin-top:-.5rem">The quantity '
+                '<b>sent</b>, not what arrived. Add one line per item.</div>',
+                unsafe_allow_html=True)
     lines = st.session_state.setdefault("s_lines", [])
     a, b, c = st.columns([3, 1, 1])
     it = a.selectbox("Item", items, index=None, placeholder="Choose an item",

@@ -61,7 +61,7 @@ ck("every market with stock has a courier",
    sorted(set(st0.loc[st0["Store"]>0,"Market"]) - set(cb)))
 
 print("=== C. A FULL SHIPMENT LIFE, END TO END ===")
-sid = entry.next_shipment_no(base)
+sid = entry.next_shipment_no(base, MKT)
 b,_ = entry.append_shipment(base, [{"Shipment No":sid,"Market":MKT,
     "Arrival Date":dt.date(2026,8,26),"Source":"Egypt",
     "Item Name":ITEM,"Shipped Qty":500}], "admin", MKT)
@@ -77,7 +77,8 @@ eq("no stock yet", v["Store"], 0); eq("no errors", errs, 0)
 cour = (cfg0.get("couriers_by_market") or {}).get(MKT, [None])[0]
 steps = [("Received",  {"Item Name":ITEM,"In":480},  "received 480"),
          ("Scrap",     {"Item Name":ITEM,"Out":5,"Reason":"Damage"}, "scrapped 5"),
-         ("Customs / Loss", {"Item Name":ITEM,"Out":15}, "15 lost in transit")]
+         ("Not received", {"Item Name":ITEM,"Out":20,"Reason":"Customs"},
+          "20 never arrived")]
 for name, kw, label in steps:
     row = mv(name, **kw); row["Shipment No"] = sid
     b,_ = entry.append_moves(b, [row], "admin", MKT)
@@ -96,8 +97,8 @@ if cour:
 
 print("=== D. IT REFUSES WHAT IT SHOULD ===")
 lk = entry._lookups(openpyxl.load_workbook(io.BytesIO(b)))
+wb_now = openpyxl.load_workbook(io.BytesIO(b))
 refuse = [
-  ("more than exists is still recorded, but flagged elsewhere", None),
   ("unknown movement", mv("Teleport", **{"Item Name":ITEM,"In":1})),
   ("unknown shipment", {**mv("Received", **{"Item Name":ITEM,"In":1}),
                         "Shipment No":"NO. 999"}),
@@ -111,6 +112,21 @@ refuse = [
   ("a date before the shipment arrived",
    {**mv("Received", **{"Item Name":ITEM,"In":1}), "Date":dt.date(2000,1,1)}),
 ]
+# and the quantity guards, against the shipment built in section C
+qty_refuse = [
+  ("more received than was shipped",
+   {**mv("Received", **{"Item Name":ITEM,"In":9999}), "Shipment No":sid}),
+  ("more scrapped than is in the store",
+   {**mv("Scrap", **{"Item Name":ITEM,"Out":9999,"Reason":"Damage"}),
+    "Shipment No":sid}),
+  ("returning what no courier holds",
+   {**mv("Returned", **{"Item Name":ITEM,"In":9999,"Courier":cour or "x",
+                        "Reason":"Cancelled"}), "Shipment No":sid}),
+]
+for label,row in qty_refuse:
+    ck("refused: "+label,
+       entry.check_quantities(row, wb_now)!="OK",
+       entry.check_quantities(row, wb_now)[:50])
 for label,row in refuse:
     if row is None: continue
     ck("refused: "+label, entry.validate(row, lk)!="OK", entry.validate(row, lk))
@@ -124,7 +140,10 @@ except ValueError:
 eq("and the file is unchanged", len(engine.load(io.BytesIO(b))[1]), before)
 
 print("=== E. VOID PUTS IT BACK ===")
-row = mv("Received", **{"Item Name":ITEM,"In":40}); row["Shipment No"] = sid
+# a count adjustment, since this shipment is now fully received
+row = mv("Count Adjustment - Add",
+         **{"Item Name":ITEM,"In":40,"Reason":"Count Adjustment"})
+row["Shipment No"] = sid
 before_v,_ = stock_of(b, sid)
 b2, ids = entry.append_moves(b, [row], "admin", MKT)
 after_add,_ = stock_of(b2, sid)

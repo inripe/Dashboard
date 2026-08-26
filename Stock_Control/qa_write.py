@@ -46,8 +46,10 @@ base=open(qa_book.book(),"rb").read()
 s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
 SHIP=s0[s0.Market=="Qatar"]["Shipment ID"].iloc[0]
 ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
+# scrap is used here rather than received: this suite is about two people
+# saving at once, not about quantity limits
 mk=lambda q: {"Date":entry.market_now("Qatar").date(),"Shipment No":SHIP,
-              "Movement":"Received","Item Name":ITEM,"In":q}
+              "Movement":"Scrap","Item Name":ITEM,"Out":q,"Reason":"Damage"}
 # person A and person B both start from the same file
 a,_=entry.append_moves(base,[mk(3)],"qatar.store","Qatar")
 b,_=entry.append_moves(base,[mk(7)],"uae.store","Qatar")
