@@ -615,3 +615,33 @@ def append_shipment(buf, rows, user, market):
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue(), str(rows[0]["Shipment No"])
+
+
+def expected_lines(buf, shipment):
+    """Every item on a shipment, with what was sent, what has already been
+    received, and what is still to come. This is what the Received checklist
+    is built from - the store checks against it instead of typing it."""
+    wb = openpyxl.load_workbook(io.BytesIO(buf) if isinstance(buf, bytes) else buf)
+    sh = wb["SHIPMENTS"]
+    sc = {sh.cell(HEADER_ROW, i).value: i for i in range(1, sh.max_column + 1)
+          if sh.cell(HEADER_ROW, i).value}
+    sent = {}
+    for r in range(FIRST_DATA, sh.max_row + 1):
+        if str(sh.cell(r, sc["Shipment No"]).value or "").strip() != str(shipment).strip():
+            continue
+        item = str(sh.cell(r, sc["Item Name"]).value or "").strip()
+        if item:
+            sent[item] = sent.get(item, 0) + float(sh.cell(r, sc["Shipped Qty"]).value or 0)
+    _, _, received = stock_now(wb, shipment)
+    missing = _not_received(wb, shipment)
+    out = []
+    for item in sorted(sent):
+        got = float(received.get(item, 0))
+        gone = float(missing.get(item, 0))
+        out.append({"item": item,
+                    "sent": sent[item],
+                    "received": got,
+                    "not_received": gone,
+                    "left": max(sent[item] - got - gone, 0),
+                    "done": sent[item] - got - gone <= 0.001})
+    return out

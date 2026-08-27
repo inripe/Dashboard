@@ -32,6 +32,7 @@ SUITES = [
     ("names",      "qa_names.py",     "no retired movement name survives anywhere"),
     ("balance",    "qa_balance.py",   "shipped always equals received plus missing"),
     ("versioning", "qa_versioning.py","no save goes out without a version tag"),
+    ("received",   "qa_received.py",  "sixteen items checked in one pass"),
 ]
 
 

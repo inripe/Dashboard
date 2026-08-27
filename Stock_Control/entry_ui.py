@@ -86,9 +86,11 @@ def open_shipments(ship, clear, market):
     """Only shipments still open in this market, newest first."""
     live = clear[(clear["Market"] == market) & (clear["Cleared"] == "No")]["Shipment"]
     s = ship[ship["Shipment ID"].isin(set(live)) & (ship["Market"] == market)]
-    order = (s.groupby("Shipment ID")["Arrival Date"].min()
-              .sort_values(ascending=False))
-    return [(sid, d) for sid, d in order.items()]
+    order = s.groupby("Shipment ID")["Arrival Date"].min()
+    # newest arrival first, and where two landed the same day the higher
+    # shipment number wins, so the order never wobbles
+    pairs = sorted(order.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
+    return pairs
 
 
 def items_in(ship, shipment):
@@ -100,6 +102,29 @@ def available(stock, shipment, item):
         if "ItemName" in stock.columns else \
         stock[(stock["Shipment"] == shipment)]
     return float(r["Store"].sum()) if len(r) else 0.0
+
+
+def expected(ship, moves, shipment):
+    """What a shipment was sent, and what is still to arrive. Built from the
+    frames the app already holds, so the checklist needs no extra read."""
+    sub = ship[ship["Shipment ID"] == shipment]
+    m = moves[moves["Shipment"] == shipment] if len(moves) else moves
+    if "Void" in m.columns:
+        m = m[m["Void"].astype(str).str.strip().str.lower() != "yes"]
+    def q(mv, it):
+        if not len(m):
+            return 0.0
+        return float(m[(m["Movement"] == mv) & (m["Item Name"] == it)]["Qty"].sum())
+    out = []
+    for it in sorted(sub["Item Name"].dropna().unique()):
+        sent = float(sub[sub["Item Name"] == it]["Shipped Qty"].sum())
+        got  = q("Received", it)
+        gone = q("Not received", it)
+        left = max(sent - got - gone, 0)
+        out.append({"item": it, "sent": sent, "received": got,
+                    "not_received": gone, "left": left,
+                    "done": left <= 0.001})
+    return out
 
 
 def limits(moves, ship, shipment, item, movement):
@@ -136,6 +161,116 @@ def limits(moves, ship, shipment, item, movement):
         return max(unsorted_returns, 0), \
             f"{unsorted_returns:,.0f} came back and are not yet sorted"
     return None, ""
+
+
+def render_received(ship, moves, cfg, session, sid, market, now, save_fn,
+                    lines, n):
+    """Received, as a checklist rather than sixteen separate entries.
+
+    The shipment already says what was sent, so the store checks against it.
+    Everything else - the guards, the confirmation, the audit trail - is
+    unchanged; only the typing goes away.
+    """
+    todo = [r for r in lines if not r["done"]]
+    done = [r for r in lines if r["done"]]
+
+    if not todo:
+        st.success(f"Every item on {sid} is accounted for.")
+        st.markdown(f'<div class="note">{len(done)} items, '
+                    f'{sum(r["sent"] for r in done):,.0f} boxes sent and all '
+                    f'either received or recorded as never arrived.</div>',
+                    unsafe_allow_html=True)
+        return
+
+    st.markdown(f"**3 · {L.t('How many boxes?')}**")
+    st.markdown(f'<div class="note" style="margin-top:-.4rem">'
+                f'{len(todo)} item{"s" if len(todo) != 1 else ""} still to check. '
+                f'Tick the ones that match, change the ones that do not.'
+                f'  &nbsp;·&nbsp;  علّم المطابق وعدّل المختلف</div>',
+                unsafe_allow_html=True)
+
+    b1, b2, b3 = st.columns([1, 1, 3])
+    if b1.button("All match", key=f"r_all_{n}"):
+        for r in todo:
+            st.session_state[f"r_ok_{n}_{r['item']}"] = True
+            st.session_state[f"r_qty_{n}_{r['item']}"] = int(r["left"])
+        st.rerun()
+    if b2.button("Clear", key=f"r_none_{n}"):
+        for r in todo:
+            st.session_state.pop(f"r_ok_{n}_{r['item']}", None)
+            st.session_state.pop(f"r_qty_{n}_{r['item']}", None)
+        st.rerun()
+
+    rows, checked, short = [], 0, []
+    for r in todo:
+        c1, c2, c3, c4 = st.columns([0.5, 3, 1.1, 1.2])
+        ok = c1.checkbox(" ", key=f"r_ok_{n}_{r['item']}",
+                         label_visibility="collapsed")
+        c2.markdown(f'<div style="padding-top:.45rem">{r["item"]}</div>',
+                    unsafe_allow_html=True)
+        qty = c3.number_input(
+            "boxes", min_value=0, max_value=int(r["left"]),
+            value=int(r["left"]) if ok else 0,
+            key=f"r_qty_{n}_{r['item']}", label_visibility="collapsed",
+            disabled=not ok)
+        gap = int(r["left"]) - int(qty or 0)
+        c4.markdown(
+            f'<div class="note" style="padding-top:.5rem;text-align:right">'
+            + (f'<span style="color:{"#B45309" if gap else "#8A94A6"}">'
+               f'{"" if not gap else str(gap) + " short · "}of '
+               f'{r["left"]:,.0f}</span>')
+            + '</div>', unsafe_allow_html=True)
+        if ok:
+            checked += 1
+            if qty:
+                rows.append({"Date": now.date(), "Shipment No": sid,
+                             "Movement": "Received", "Item Name": r["item"],
+                             "In": int(qty)})
+            if gap:
+                short.append((r["item"], gap))
+
+    st.markdown(f'<div class="note">{checked} of {len(todo)} checked</div>',
+                unsafe_allow_html=True)
+
+    st.markdown(f"**{L.t('Check before saving')}**")
+    if not rows:
+        st.markdown('<div class="card" style="border-left:3px solid #C08A28;'
+                    'background:#FFFBF2">Nothing ticked yet. Tick an item to '
+                    'record what arrived.</div>', unsafe_allow_html=True)
+        st.button(L.t("Save"), disabled=True, key=f"r_save_{n}")
+        return
+
+    total = sum(r["In"] for r in rows)
+    words = (f'<b>{total:,.0f} boxes</b> received into <b>{sid}</b>, '
+             f'across <b>{len(rows)}</b> item{"s" if len(rows) != 1 else ""}')
+    if short:
+        words += ('<div class="note" style="color:#B45309">'
+                  + ", ".join(f"{g} short on {i}" for i, g in short)
+                  + " — you will be asked why after saving</div>")
+    st.markdown(f'<div class="card" style="border-left:3px solid #2E75B6">{words}'
+                f'<div class="note">{market} · today · by {session["user"]} '
+                f'· writes {len(rows)} rows</div></div>', unsafe_allow_html=True)
+
+    s1, s2 = st.columns([1, 1])
+    if s1.button(L.t("Save"), type="primary", key=f"r_save_{n}"):
+        try:
+            with st.spinner("Saving…"):
+                ids = save_fn(rows, market)
+            st.session_state["e_saved"] = {
+                "id": f"{len(ids)} rows" if ids else "",
+                "words": words, "at": now.strftime("%H:%M")}
+            for r in todo:
+                st.session_state.pop(f"r_ok_{n}_{r['item']}", None)
+                st.session_state.pop(f"r_qty_{n}_{r['item']}", None)
+            _reset()
+            st.rerun()
+        except Exception as ex:
+            st.error(str(ex))
+    if s2.button(L.t("Start again"), key=f"r_clear_{n}"):
+        for r in todo:
+            st.session_state.pop(f"r_ok_{n}_{r['item']}", None)
+            st.session_state.pop(f"r_qty_{n}_{r['item']}", None)
+        st.rerun()
 
 
 def render_today(moves, session, cfg, void_fn):
@@ -233,6 +368,21 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
                        format_func=lambda s: labels[s], key=f"e_ship_{n}",
                        placeholder="Choose a shipment  ·  اختر الشحنة",
                        label_visibility="collapsed")
+
+    # Received is the one movement where the shipment already says what to
+    # expect, so it is checked rather than typed, sixteen items at a time
+    if mv == "Received" and sid:
+        try:
+            lines = expected(ship, moves, sid)
+        except Exception as ex:
+            lines = None
+            st.error(f"Could not read what {sid} was sent: {ex}")
+        if lines is not None:
+            render_received(ship, moves, cfg, session, sid, market, now,
+                            save_fn, lines, n)
+            if show_today:
+                _today_list(moves, session, market, now, void_fn, item_names)
+            return
 
     item = None
     if spec.get("item"):
@@ -432,7 +582,7 @@ def _today_list(moves, session, market, now, void_fn, item_names=None):
                     st.error(str(ex))
 
 
-def render_shipment(ship, cfg, session, save_fn):
+def render_shipment(ship, cfg, session, save_fn, now=None):
     """Admin only. A shipment is what was SENT - what arrives is recorded
     separately by the store, so the difference stays visible."""
     import datetime as dt
@@ -459,21 +609,74 @@ def render_shipment(ship, cfg, session, save_fn):
     mkt = c1.selectbox("1 · Market  ·  السوق", markets, index=None,
                        placeholder="Choose the market", key=f"s_mkt_{n}",
                        help="The shipment number is built from this")
-    nxt = st.session_state.get("s_next", {}).get(mkt, "") if mkt else ""
-    sid = c2.text_input(
-        "2 · Shipment number  ·  رقم الشحنة", value=nxt,
-        placeholder="choose a market first" if not mkt else nxt,
-        key=f"s_no_{n}",
-        help="Market letter, year, then three digits - Q-26-001. "
-             "The next free number is filled in for you; change it only if "
-             "this shipment already has one.")
-    arr = c3.date_input("3 · Arrival date  ·  تاريخ الوصول",
-                        value=dt.date.today(), key=f"s_arr_{n}",
-                        help="The day it lands, not the day it was sent")
-    if mkt and nxt:
+
+    # the number is picked, never typed. A typo in a shipment code is silent
+    # and expensive, so the only options are a new number or one that exists.
+    # the next free number, worked out from the shipments already on the sheet
+    # so it is right whether the app is reading SharePoint or a local file
+    nxt = ""
+    if mkt:
+        letter = {"Qatar": "Q", "UAE": "U", "KSA": "K", "Egypt": "E"}.get(mkt, "X")
+        yy = now.year % 100
+        prefix = f"{letter}-{yy:02d}-"
+        top = 0
+        for x in ship["Shipment ID"].dropna().astype(str):
+            if x.strip().startswith(prefix):
+                try:
+                    top = max(top, int(x.strip().rsplit("-", 1)[1]))
+                except (ValueError, IndexError):
+                    pass
+        nxt = f"{prefix}{top + 1:03d}"
+    existing = []
+    if mkt:
+        sub = ship[ship["Market"] == mkt]
+        arr = sub.groupby("Shipment ID")["Arrival Date"].min()
+        cnt = sub.groupby("Shipment ID")["Item Name"].nunique()
+        existing = [(sid, arr[sid], int(cnt[sid]))
+                    for sid in sorted(arr.index, reverse=True)]
+    opts = ([nxt] if nxt else []) + [x[0] for x in existing]
+    label = {nxt: f"{nxt}  —  new"} if nxt else {}
+    for sid_, d, k in existing:
+        label[sid_] = (f"{sid_}  —  arrived {pd.Timestamp(d):%d %b}, "
+                       f"{k} item{'s' if k != 1 else ''}")
+    sid = c2.selectbox(
+        "2 · Shipment number  ·  رقم الشحنة", opts,
+        index=0 if opts else None,
+        format_func=lambda x: label.get(x, x),
+        placeholder="choose a market first" if not mkt else "Choose",
+        key=f"s_no_{n}", disabled=not mkt,
+        help="A new number is offered first. Pick an existing one only to "
+             "correct or add to a shipment already created.")
+
+    adding_to = sid in [x[0] for x in existing] if sid else False
+    if adding_to:
+        old_arr = [d for x, d, _ in existing if x == sid][0]
+        arr = pd.Timestamp(old_arr).date()
+        c3.markdown(
+            f'<div style="font-size:.78rem;color:#8A94A6;padding-top:.35rem">'
+            f'3 · Arrival date  ·  تاريخ الوصول</div>'
+            f'<div style="padding-top:.55rem">{arr:%d %b %Y}</div>',
+            unsafe_allow_html=True)
+    else:
+        arr = c3.date_input("3 · Arrival date  ·  تاريخ الوصول",
+                            value=dt.date.today(), key=f"s_arr_{n}",
+                            help="The day it lands, not the day it was sent")
+
+    if adding_to:
+        st.markdown(
+            f'<div class="card" style="border-left:3px solid #C08A28;'
+            f'background:#FFFBF2"><b>{sid} already exists.</b> '
+            f'{mkt}, arrived {arr:%d %b}, '
+            f'{[k for x,_,k in existing if x==sid][0]} items. '
+            f'You are adding to it, not creating a new shipment.'
+            f'<div class="note">The arrival date stays as it was. Only use '
+            f'this to correct a shipment already created.</div></div>',
+            unsafe_allow_html=True)
+    elif mkt and nxt:
         st.markdown(f'<div class="note" style="margin-top:-.6rem">'
                     f'<b>{nxt}</b> is the next free number for {mkt} this year.'
                     f'</div>', unsafe_allow_html=True)
+
     src = st.selectbox("4 · Source  ·  المصدر", ["Egypt", "Local"], index=None,
                        placeholder="Where it came from", key=f"s_src_{n}",
                        help="Egypt for an air shipment, Local for something "
@@ -486,8 +689,15 @@ def render_shipment(ship, cfg, session, save_fn):
                 unsafe_allow_html=True)
     lines = st.session_state.setdefault("s_lines", [])
     a, b, c = st.columns([3, 1, 1])
-    it = a.selectbox("Item", items, index=None, placeholder="Choose an item",
-                     key=f"s_item_{n}", label_visibility="collapsed")
+    on_it = set()
+    if sid:
+        on_it = set(ship[ship["Shipment ID"] == sid]["Item Name"].dropna())
+    free = [x for x in items if x not in on_it]
+    it = a.selectbox("Item", free, index=None,
+                     placeholder=("Choose an item" if free
+                                  else "every item is already on this shipment"),
+                     key=f"s_item_{n}", label_visibility="collapsed",
+                     disabled=not free)
     qt = b.number_input("Qty", min_value=0, step=1, value=0,
                         key=f"s_qty_{n}", label_visibility="collapsed")
     c.markdown('<div style="height:.1rem"></div>', unsafe_allow_html=True)

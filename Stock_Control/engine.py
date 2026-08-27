@@ -181,7 +181,8 @@ def stock_by_item(ship, moves, as_of):
 
 def clearance_by_shipment(ship, moves, as_of, settings):
     hdr = ship.groupby("Shipment ID").agg(
-        Market=("Market","first"), Arrival=("Arrival Date","min")).reset_index()
+        Market=("Market","first"), Arrival=("Arrival Date","min"),
+        Shipped=("Shipped Qty","sum")).reset_index()
     hdr = hdr.rename(columns={"Shipment ID":"Shipment"})
     k = "Shipment"
     g = lambda mt, col: hdr[k].map(_q(moves, mt, k) if col=="Qty" else _o(moves, mt, k)).fillna(0)
@@ -205,7 +206,14 @@ def clearance_by_shipment(ship, moves, as_of, settings):
         hdr["Span"] = (hdr["Shipment"].map(last) - hdr["Arrival"]).dt.days
     else:
         hdr["Span"] = np.nan
-    hdr["Cleared"] = np.where(hdr["Outstanding"] <= 0, "Yes", "No")
+    # a shipment nobody has received yet has nothing outstanding, but it is
+    # plainly not cleared - it has not even arrived. Without this a new
+    # shipment never appears in the entry form.
+    hdr["Cleared"] = np.where(
+        (hdr["Outstanding"] <= 0)
+        & (hdr["Received"] + hdr["NotReceived"] >= hdr["Shipped"] - 0.001)
+        & (hdr["Received"] + hdr["NotReceived"] > 0),
+        "Yes", "No")
     for c_ in ("OrdersAssigned","OrdersHanded","OrdersDelivered","OrdersReturned",
                "OrdersOutstanding","OrdersVsAssigned"):
         hdr[c_] = 0

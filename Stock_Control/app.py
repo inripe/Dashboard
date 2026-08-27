@@ -314,6 +314,29 @@ def build_exceptions():
     sd = stock[stock["ShipDiff"].round(6) != 0]
     a("Shipment quantity unexplained", len(sd),
       ", ".join(f"{r.Shipment} · {nm(r.Item)} · {int(r.ShipDiff):+d}" for r in sd.itertuples()), "High")
+    # typing straight into the workbook bypasses every guard the app applies,
+    # so the codes are checked here instead
+    import re as _re
+    bad_code = sorted({str(x).strip() for x in sf["Shipment ID"].dropna()
+                       if not _re.fullmatch(r"[A-Z]-\d{2}-\d{3,}", str(x).strip())})
+    a("Shipment code not in the Q-26-001 format", len(bad_code),
+      ", ".join(bad_code[:6]), "High")
+    wrong_market = []
+    _letter = {"Qatar":"Q","UAE":"U","KSA":"K","Egypt":"E"}
+    for r in sf[["Shipment ID","Market"]].dropna().drop_duplicates().itertuples():
+        want = _letter.get(str(r.Market).strip())
+        if want and not str(r._1).strip().startswith(want + "-"):
+            wrong_market.append(f"{r._1} is {r.Market}")
+    a("Shipment code does not match its market", len(wrong_market),
+      ", ".join(wrong_market[:6]), "High")
+    orphan = sorted(set(mf["Shipment"].dropna()) - set(sf["Shipment ID"].dropna()))
+    a("Movement points at no shipment", len(orphan), ", ".join(orphan[:6]), "High")
+    two_dates = []
+    for sid_, grp in sf.groupby("Shipment ID")["Arrival Date"]:
+        if grp.dropna().nunique() > 1:
+            two_dates.append(str(sid_))
+    a("Shipment has more than one arrival date", len(two_dates),
+      ", ".join(two_dates[:6]), "Med")
     ov = cour[cour["Flag"]=="Over-delivered"] if len(cour) else cour
     a("Courier over-delivered", len(ov), ", ".join(f"{r.Courier} · {r.Shipment}" for r in ov.itertuples()), "High")
     oc = cour[cour["Flag"]=="Order count error"] if len(cour) else cour
@@ -523,7 +546,11 @@ if ENTRY_ON and MODE == "Record":
                     except Exception:
                         st.session_state["s_next"] = {}
                 try:
-                    entry_ui.render_shipment(ship, cfg, sess, _new_shipment)
+                    entry_ui.render_shipment(
+                        ship, cfg, sess, _new_shipment,
+                        now=entry.market_now(sess.get("market")
+                                             if str(sess.get("market","")).lower() != "all"
+                                             else (cfg.get("markets") or ["Qatar"])[0]))
                 except Exception as ex:
                     st.error(f"This could not be shown: {ex}")
 

@@ -143,15 +143,70 @@ ck("the number comes second", i_no < i_arr)
 ck("then the arrival date, then the source", i_arr < i_src)
 ck("items come last", i_src < i_items)
 ck("every field carries a hint", ui.count("help=") >= 4, ui.count("help="))
-ck("the number hint gives the format", "Q-26-001" in ui)
-ck("it says the next free number is filled in",
-   "next free number is filled in for you" in ui)
+ck("the hint explains when to pick an existing one",
+   "correct or add to a shipment already created" in ui)
+ck("a new number is labelled as new", '"  \u2014  new"' in ui or "—  new" in ui)
 ck("it says which market and year the number belongs to",
    "is the next free number for" in ui)
 ck("the item hint says sent, not arrived",
    "not what arrived" in ui)
 ck("the shipment field waits for a market",
    'choose a market first' in ui)
+
+print("=== I. THE NUMBER IS PICKED, NEVER TYPED ===")
+ui=open("entry_ui.py").read()
+ck("the shipment number is a dropdown",
+   'c2.selectbox(\n        "2 \u00b7 Shipment number' in ui
+   or 'sid = c2.selectbox(' in ui, "")
+ck("it is not a text box any more",
+   'c2.text_input("2 \u00b7 Shipment number' not in ui
+   and 'text_input(\n        "2 \u00b7 Shipment number' not in ui)
+ck("a new number is offered first", '[nxt] if nxt else []' in ui)
+ck("existing ones are labelled with their arrival and item count",
+   "arrived {pd.Timestamp(d):%d %b}" in ui)
+ck("picking an existing one is called out", "already exists" in ui)
+ck("and its arrival date is locked", "The arrival date stays as it was" in ui)
+ck("the field waits for a market", "disabled=not mkt" in ui)
+ck("an item already on the shipment cannot be added twice",
+   "every item is already on this shipment" in ui)
+
+print("=== J. THE NEXT NUMBER IS RIGHT PER MARKET AND YEAR ===")
+import pandas as _pd
+_sh=_pd.DataFrame({"Shipment ID":["Q-26-001","Q-26-002","U-26-001","Q-25-009"],
+                   "Market":["Qatar","Qatar","UAE","Qatar"]})
+def _next(ship_df, mkt, year):
+    letter={"Qatar":"Q","UAE":"U","KSA":"K","Egypt":"E"}.get(mkt,"X")
+    prefix=f"{letter}-{year%100:02d}-"
+    top=0
+    for x in ship_df["Shipment ID"].dropna().astype(str):
+        if x.strip().startswith(prefix):
+            try: top=max(top,int(x.strip().rsplit("-",1)[1]))
+            except (ValueError,IndexError): pass
+    return f"{prefix}{top+1:03d}"
+eq("qatar follows its own series", _next(_sh,"Qatar",2026), "Q-26-003")
+eq("uae has its own", _next(_sh,"UAE",2026), "U-26-002")
+eq("an untouched market starts at 001", _next(_sh,"KSA",2026), "K-26-001")
+eq("a new year restarts", _next(_sh,"Qatar",2027), "Q-27-001")
+ck("last year's numbers do not interfere",
+   _next(_sh,"Qatar",2026) != "Q-26-010")
+
+print("=== K. BAD CODES TYPED INTO EXCEL ARE CAUGHT ===")
+app=open("app.py").read()
+ck("data check looks for the wrong format",
+   "Shipment code not in the Q-26-001 format" in app)
+ck("and for a code that does not match its market",
+   "Shipment code does not match its market" in app)
+ck("and for a movement pointing at no shipment",
+   "Movement points at no shipment" in app)
+ck("and for two arrival dates on one shipment",
+   "Shipment has more than one arrival date" in app)
+import re as _re
+for good in ("Q-26-001","U-26-014","E-27-123","K-26-1000"):
+    ck(f"{good} is accepted",
+       bool(_re.fullmatch(r"[A-Z]-\d{2}-\d{3,}", good)))
+for bad in ("NO. 022","Q-26-1","q-26-001","Q26001","Q-2026-001",""):
+    ck(f"{bad or '(blank)'} is rejected",
+       not _re.fullmatch(r"[A-Z]-\d{2}-\d{3,}", bad))
 
 print()
 for l in F: print(l)
