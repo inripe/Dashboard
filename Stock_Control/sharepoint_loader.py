@@ -250,3 +250,45 @@ def selftest() -> None:
 
 if __name__ == "__main__":
     selftest()
+
+
+PHOTO_FOLDER = "Stock_Scrap"
+
+
+def upload_photo(data: bytes, filename: str, folder: str = PHOTO_FOLDER) -> dict:
+    """Put a photo in the library beside the workbook.
+
+    The workbook itself never holds an image - it would balloon and every save
+    would crawl. The row keeps only the file name, which is built from the
+    entry so a photo always traces back to the movement it belongs to.
+    """
+    hdr = {"Authorization": f"Bearer {_token()}"}
+    if not _item_cache["site"]:
+        _item_cache["site"] = _site_id(hdr)
+    site_id = _item_cache["site"]
+    safe = "".join(c for c in filename
+                   if c.isalnum() or c in "._-") or "photo.jpg"
+    url = (f"{GRAPH}/sites/{site_id}/drive/root:/{folder}/{safe}:/content")
+    put = dict(hdr)
+    put["Content-Type"] = "image/jpeg"
+    r = requests.put(url, headers=put, data=data, timeout=max(TIMEOUT, 120))
+    if r.status_code == 423:
+        raise LockedError("That photo file is locked. Try again in a moment.")
+    if r.status_code in (401, 403):
+        raise RuntimeError(
+            f"SharePoint refused the photo ({r.status_code}). The app can read "
+            f"but not write to the {folder} folder.")
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Could not save the photo: {r.status_code} "
+                           f"{r.text[:160]}")
+    j = r.json()
+    return {"name": j.get("name"), "url": j.get("webUrl"),
+            "size_kb": round((j.get("size") or 0) / 1024, 1)}
+
+
+def photo_name(entry_id, shipment, item, ext="jpg"):
+    """Q-26-001__Mango-Fas__Q-20260827-0004.jpg - built from the row, so
+    nobody types a file name and a photo can always be traced back."""
+    clean = lambda x: "".join(c if c.isalnum() else "-"
+                              for c in str(x).strip()).strip("-")
+    return f"{clean(shipment)}__{clean(item)}__{clean(entry_id)}.{ext}"

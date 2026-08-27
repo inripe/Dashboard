@@ -33,6 +33,7 @@ SUITES = [
     ("balance",    "qa_balance.py",   "shipped always equals received plus missing"),
     ("versioning", "qa_versioning.py","no save goes out without a version tag"),
     ("received",   "qa_received.py",  "sixteen items checked in one pass"),
+    ("photo",      "qa_photo.py",     "a write-off needs evidence"),
 ]
 
 

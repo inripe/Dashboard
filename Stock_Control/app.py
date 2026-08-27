@@ -507,10 +507,22 @@ if ENTRY_ON and MODE == "Record":
                     time.sleep(2 * attempt)
             raise last
 
-        def _save(rows, market):
+        def _save(rows, market, photo=None, photo_ext="jpg"):
+            """Write the rows, then the photo if there is one. The photo is
+            named from the entry it belongs to, so it can always be traced
+            back, and it lives beside the workbook rather than inside it."""
             def make(data):
                 return entry.append_moves(data, rows, sess["user"], market)
-            return _write(make)
+            ids = _write(make)
+            if photo and ids:
+                try:
+                    r0 = rows[0]
+                    name = sp.photo_name(ids[0], r0.get("Shipment No"),
+                                         r0.get("Item Name"), photo_ext)
+                    st.session_state["e_photo_saved"] = sp.upload_photo(photo, name)
+                except Exception as ex:
+                    st.warning(f"The entry saved, but the photo did not: {ex}")
+            return ids
 
         def _void(entry_id, market):
             def make(data):

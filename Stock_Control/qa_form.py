@@ -154,8 +154,11 @@ ck("zero boxes is still missing",
 ck("complete means nothing missing", m("Received","Q-26-001","Fig",48,{})==[])
 ck("scrap also wants a reason",
    any("reason" in x for x in m("Scrap","Q-26-001","Fig",2,{})))
-ck("scrap with a reason is complete",
-   m("Scrap","Q-26-001","Fig",2,{"Reason":"Quality"})==[])
+ck("scrap with a reason is complete, photo or not",
+   m("Scrap","Q-26-001","Fig",2,{"Reason":"Quality"})==[],
+   m("Scrap","Q-26-001","Fig",2,{"Reason":"Quality"}))
+ck("a photo changes nothing about whether it can save",
+   m("Scrap","Q-26-001","Fig",2,{"Reason":"Quality"}, photo=b"x")==[])
 ck("to courier wants a courier",
    any("courier" in x for x in m("To Courier","Q-26-001","Fig",5,{})))
 ck("returned wants an item, a courier and a reason",

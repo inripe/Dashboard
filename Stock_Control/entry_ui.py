@@ -6,6 +6,10 @@ import entry, auth, labels as L
 
 # what a store worker may record. Anything else is admin work.
 WORKER_MOVES = ["Received", "Returned", "Scrap", "To Courier"]
+
+# movements that need evidence. A scrap is a write-off, and a write-off with no
+# photo is a claim nobody can support.
+PHOTO_MOVES = {"Scrap", "Return to Scrap"}
 NEEDS = {  # movement -> which extra fields the form must ask for
     "Received":            {"item": True,  "dir": "In"},
     "Returned":            {"item": True,  "dir": "In",  "courier": True,
@@ -50,7 +54,9 @@ def _nonce():
     return st.session_state.get("e_n", 0)
 
 
-def what_is_missing(mv, sid, item, qty, extras):
+def what_is_missing(mv, sid, item, qty, extras, photo=None, no_photo_why=""):
+    # a photo is welcome on a scrap but never blocks the entry: stock that is
+    # gone must be recorded whether or not somebody had a working camera
     """Everything the chosen movement needs but has not been given.
     Save is off while this is not empty."""
     spec = NEEDS.get(mv, {})
@@ -290,7 +296,8 @@ def render_today(moves, session, cfg, void_fn):
 
 def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
            item_names=None, show_today=True):
-    """save_fn(rows, market) -> list of entry ids.  void_fn(entry_id, market)."""
+    """save_fn(rows, market, photo=None, photo_ext="jpg") -> entry ids.
+    void_fn(entry_id, market)."""
     n = _nonce()
     # every active market, not only those that already have a shipment, so a
     # new market is visible and the reason it cannot be used is explained
@@ -310,6 +317,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
                 f'{market} time</div></div>', unsafe_allow_html=True)
 
     saved = st.session_state.pop("e_saved", None)
+    shot = st.session_state.pop("e_photo_saved", None)
     if saved:
         st.success("Saved  /  تم الحفظ")
         st.markdown(
@@ -317,7 +325,10 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
             f'background:#F2FBF6">{saved["words"]}'
             f'<div class="note">{saved["at"]} &nbsp;&middot;&nbsp; '
             f'{saved["id"]} &nbsp;&middot;&nbsp; it is in the Today list below, '
-            f'with a Void button if it was wrong</div></div>',
+            f'with a Void button if it was wrong'
+            + (f'<br>photo saved as <b>{shot["name"]}</b> '
+               f'({shot["size_kb"]:,.0f} KB)' if shot else "")
+            + f'</div></div>',
             unsafe_allow_html=True)
         _mangoes()
 
@@ -439,6 +450,16 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
                                          placeholder="Choose  ·  اختر",
                                          key=f"e_reason_{n}") if rs
                             else st.text_input(L.t("Why?"), key=f"e_reason_{n}"))
+    photo, no_photo_why = None, ""
+    if mv in PHOTO_MOVES:
+        st.markdown("**Photo (optional)  ·  صورة (اختياري)**")
+        st.markdown('<div class="note" style="margin-top:-.4rem">A photo of what '
+                    'is being thrown away is worth having behind a claim.'
+                    '  &nbsp;·&nbsp;  صورة للتالف</div>',
+                    unsafe_allow_html=True)
+        photo = st.file_uploader("photo", type=["jpg", "jpeg", "png"],
+                                 key=f"e_photo_{n}", label_visibility="collapsed")
+
     note = st.text_input(L.t("Note (optional)"), key=f"e_note_{n}")
 
     # ---------- confirm ----------
@@ -453,7 +474,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
     if note:
         row["Note"] = note
 
-    missing = what_is_missing(mv, sid, item, qty, extras)
+    missing = what_is_missing(mv, sid, item, qty, extras, photo, no_photo_why)
 
     words = _sentence(row, mv, market, session["user"])
     st.markdown(f"**{L.t('Check before saving')}**")
@@ -479,7 +500,10 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
     if c1.button(L.t("Save"), type="primary", key=f"e_save_{n}"):
         try:
             with st.spinner("Saving…"):
-                ids = save_fn([row], market)
+                ids = save_fn([row], market,
+                              photo=(photo.getvalue() if photo else None),
+                              photo_ext=(photo.name.rsplit(".", 1)[-1].lower()
+                                         if photo else "jpg"))
             st.session_state["e_saved"] = {
                 "id": ids[0] if ids else "",
                 "words": words,
