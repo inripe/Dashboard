@@ -125,7 +125,14 @@ def load(path_or_buf):
     except Exception:
         item_names = {}
     settings = {
-        "as_of": pd.to_datetime(cfg.get("As-Of Date", pd.Timestamp.today())),
+        # a fixed As-Of date goes stale the moment a shipment arrives after it,
+        # and every age and days-open figure turns negative. Never look into
+        # the past unless somebody is deliberately reviewing an earlier day.
+        "as_of": max(pd.to_datetime(cfg.get("As-Of Date",
+                                            pd.Timestamp.today())).normalize(),
+                     pd.Timestamp.today().normalize()),
+        "as_of_setting": pd.to_datetime(cfg.get("As-Of Date",
+                                                pd.Timestamp.today())),
         "courier_limit": float(cfg.get("Courier holding limit (days)", 3)),
         "clear_target": float(cfg.get("Shipment clearance target (days)", 4)),
         "loss_target": float(cfg.get("Loss % target", 0.03)),

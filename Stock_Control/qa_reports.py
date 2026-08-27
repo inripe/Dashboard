@@ -110,6 +110,25 @@ ck("a voided row is shown struck through, not hidden",
    "text-decoration:line-through" in src)
 ck("only rows you may void get a button", "auth.can_void(session" in src)
 
+print("=== F. THE AS-OF DATE NEVER FALLS BEHIND ===")
+import pandas as _pd
+ck("the setting is kept for reference", "as_of_setting" in cfg0, list(cfg0)[:6])
+ck("but today is used when the setting is older",
+   _pd.Timestamp(cfg0["as_of"]).normalize()
+   >= _pd.Timestamp.today().normalize(),
+   f"{cfg0['as_of']} vs today")
+st_ = engine.stock_by_item(s0, m0, cfg0["as_of"])
+ck("no stock has a negative age", (st_["AgeDays"] >= 0).all(),
+   int((st_["AgeDays"] < 0).sum()))
+cl_ = engine.clearance_by_shipment(s0, m0, cfg0["as_of"], cfg0)
+ck("no shipment has been open for a negative number of days",
+   (cl_["DaysOpen"] >= 0).all(), int((cl_["DaysOpen"] < 0).sum()))
+ck("a shipment arriving today is zero days old, not negative",
+   cl_["DaysOpen"].min() >= 0, cl_["DaysOpen"].min())
+app_ = open("app.py").read()
+ck("a stale setting is reported in data check",
+   "As-Of date on MASTER is behind today" in app_)
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")

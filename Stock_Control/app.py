@@ -329,6 +329,13 @@ def build_exceptions():
             wrong_market.append(f"{r._1} is {r.Market}")
     a("Shipment code does not match its market", len(wrong_market),
       ", ".join(wrong_market[:6]), "High")
+    stale = (cfg.get("as_of_setting") is not None
+             and pd.Timestamp(cfg["as_of_setting"]).normalize()
+             < pd.Timestamp.today().normalize())
+    a("As-Of date on MASTER is behind today", 1 if stale else 0,
+      (f"MASTER says {pd.Timestamp(cfg['as_of_setting']):%d %b}, today is "
+       f"{pd.Timestamp.today():%d %b}. Today is being used instead."
+       if stale else ""), "Med")
     orphan = sorted(set(mf["Shipment"].dropna()) - set(sf["Shipment ID"].dropna()))
     a("Movement points at no shipment", len(orphan), ", ".join(orphan[:6]), "High")
     two_dates = []
