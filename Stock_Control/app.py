@@ -1290,6 +1290,90 @@ with T6:
 
 # ============================== 7 · GUIDE ==============================
 with T7:
+    # The store staff read this on a phone, at six in the morning, in two
+    # languages. Short sentences, one idea each, no jargon.
+    st.subheader("How to record what happened  ·  كيف تسجل ما حدث")
+
+    steps = [
+        ("1", "Open <b>Record</b>", "افتح <b>Record</b>",
+         "The three buttons at the top: Record, Dispatch, Review. "
+         "Press <b>Record</b>."),
+        ("2", "Sign in", "سجل الدخول",
+         "Choose your name from the list and type the password. "
+         "Your market comes with your name, so you cannot pick the wrong one."),
+        ("3", "Say what happened", "اختر ماذا حدث",
+         "A list appears. Green arrows down mean stock is coming <b>in</b>. "
+         "Orange arrows up mean stock is going <b>out</b>. Press one."),
+        ("4", "Fill only what it asks", "املأ ما يُطلب فقط",
+         "The form shows only the boxes that movement needs. If a box is not "
+         "there, you do not need it."),
+        ("5", "Read the blue card", "اقرأ البطاقة الزرقاء",
+         "Before you save, a card says in plain words what you are about to "
+         "record. Read it. If it is wrong, change the form."),
+        ("6", "Press Save", "اضغط حفظ",
+         "Mangoes fall down the screen and a green line says Saved. "
+         "If you do not see them, it did not save."),
+        ("7", "Check <b>Today</b>", "راجع <b>Today</b>",
+         "Everything you entered today is listed there. Wrong? Press "
+         "<b>Void</b> next to it. The line stays but stops counting."),
+    ]
+    for n, en, ar, why in steps:
+        st.markdown(
+            f'<div class="card" style="display:flex;gap:14px;align-items:start">'
+            f'<div style="font-size:1.6rem;font-weight:600;color:{ACC};'
+            f'min-width:34px;line-height:1">{n}</div>'
+            f'<div><b style="font-size:1.02rem">{en}</b>'
+            f'<span style="float:right;font-size:1.02rem">{ar}</span>'
+            f'<div class="note" style="margin-top:.3rem">{why}</div></div></div>',
+            unsafe_allow_html=True)
+
+    st.subheader("The two that are different  ·  حالتان مختلفتان")
+    st.markdown(f"""<div class="card">
+<b>A shipment arriving.</b> Press <b>Received</b> and choose the shipment. You
+will not type each item. A list appears of everything that was sent. Tick the
+ones that match. Change the number where it does not. One Save records them all.
+<div style="direction:rtl;text-align:right;margin-top:.5rem">
+<b>وصول شحنة.</b> اضغط استلام واختر الشحنة. ستظهر قائمة بكل ما تم إرساله.
+علّم المطابق وعدّل المختلف. حفظ واحد يسجل الكل.
+</div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="card">
+<b>Throwing something away.</b> Press <b>Scrap</b>, say why, and take a photo if
+you can. The photo is not required, but it is the evidence behind a claim.
+<div style="direction:rtl;text-align:right;margin-top:.5rem">
+<b>إتلاف.</b> اضغط إتلاف، اذكر السبب، وصوّر إن أمكن. الصورة اختيارية لكنها
+الدليل عند المطالبة.
+</div></div>""", unsafe_allow_html=True)
+
+    st.subheader("If it will not let you  ·  إذا لم يسمح لك")
+    warn = pd.DataFrame([
+        ["Save is grey", "Something is missing. The amber line says what.",
+         "\u0632\u0631 \u0627\u0644\u062d\u0641\u0638 \u0631\u0645\u0627\u062f\u064a \u2014 \u0627\u0642\u0631\u0623 \u0627\u0644\u0633\u0637\u0631 \u0627\u0644\u0628\u0631\u062a\u0642\u0627\u0644\u064a"],
+        ["It says only 38 in store",
+         "You cannot send out more than is there. Count again.",
+         "\u0644\u0627 \u064a\u0645\u0643\u0646 \u0625\u062e\u0631\u0627\u062c \u0623\u0643\u062b\u0631 \u0645\u0645\u0627 \u0647\u0648 \u0645\u0648\u062c\u0648\u062f"],
+        ["It says everything is accounted for",
+         "That shipment is fully received. Nothing left to record.",
+         "\u0627\u0644\u0634\u062d\u0646\u0629 \u0645\u0633\u062a\u0644\u0645\u0629 \u0628\u0627\u0644\u0643\u0627\u0645\u0644"],
+        ["The file is open in Excel",
+         "Somebody has the workbook open. Ask them to close it.",
+         "\u0627\u0644\u0645\u0644\u0641 \u0645\u0641\u062a\u0648\u062d \u2014 \u0627\u0637\u0644\u0628 \u0625\u063a\u0644\u0627\u0642\u0647"],
+        ["No open shipment",
+         "Nothing has arrived in your market yet. Tell whoever adds shipments.",
+         "\u0644\u0627 \u062a\u0648\u062c\u062f \u0634\u062d\u0646\u0629 \u0645\u0641\u062a\u0648\u062d\u0629"],
+    ], columns=["What you see", "What it means", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"])
+    def _wstyle(d):
+        o = pd.DataFrame("", index=d.index, columns=d.columns)
+        o["\u0627\u0644\u0639\u0631\u0628\u064a\u0629"] = "direction:rtl;text-align:right"
+        return o
+    table(warn.style.apply(_wstyle, axis=None))
+    st.markdown(f'<div class="note">Nothing you do here can break anything. '
+                f'A wrong entry is voided, never deleted, and the numbers go '
+                f'back to what they were.  &nbsp;·&nbsp;  '
+                f'\u0644\u0627 \u0634\u064a\u0621 \u064a\u0641\u0633\u062f: '
+                f'\u0627\u0644\u062e\u0637\u0623 \u064a\u064f\u0644\u063a\u0649 '
+                f'\u0648\u0644\u0627 \u064a\u064f\u062d\u0630\u0641.</div>',
+                unsafe_allow_html=True)
+
     st.subheader("How a shipment flows  ·  كيف تسير الشحنة")
     st.markdown(f"""<div class="card">
 <b>Two people, two jobs.</b> You record what was <b>sent</b>. The store records

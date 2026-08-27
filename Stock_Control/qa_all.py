@@ -34,6 +34,7 @@ SUITES = [
     ("versioning", "qa_versioning.py","no save goes out without a version tag"),
     ("received",   "qa_received.py",  "sixteen items checked in one pass"),
     ("photo",      "qa_photo.py",     "a write-off needs evidence"),
+    ("guide",      "qa_guide.py",     "the guide is plain and matches the app"),
 ]
 
 

@@ -1,0 +1,95 @@
+
+================================================================
+0 · THE COPY
+================================================================
+  INRIPE_Stock_Entry_v1.xlsx · 36 KB · saved 2026-08-27T18:29:08Z
+  working on a copy in memory. The live workbook is never written.
+  starting from 16 shipment lines, 22 movements, 386 boxes
+
+================================================================
+1 · THE LEDGER AS IT STANDS
+================================================================
+  clean
+
+================================================================
+2 · A SEASON OF REAL WORK
+================================================================
+
+  round 1 · UAE
+    U-26-001 sent 330 boxes of 5 items
+    received 220, 110 never arrived
+    88 boxes went out with iFast
+    8 boxes came back
+
+  round 2 · Qatar
+    Q-26-002 sent 404 boxes of 6 items
+    received 400, 4 never arrived
+    181 boxes went out with WareOne
+    13 boxes came back
+
+  round 3 · KSA
+    K-26-001 sent 518 boxes of 6 items
+    received 514, 4 never arrived
+    96 boxes went out with Alnasim
+    9 boxes came back
+
+  round 4 · Egypt
+    E-26-001 sent 413 boxes of 5 items
+    received 318, 95 never arrived
+    111 boxes went out with Egypt
+
+  round 5 · UAE
+    U-26-002 sent 378 boxes of 8 items
+    received 293, 85 never arrived
+    63 boxes went out with iFast
+    5 boxes came back
+
+  round 6 · Qatar
+    Q-26-003 sent 184 boxes of 5 items
+    received 99, 85 never arrived
+    12 boxes went out with WareOne
+    4 boxes came back
+
+  162 actions · 73 legal and accepted · 83 illegal and refused
+
+================================================================
+3 · TWO PEOPLE AT ONCE
+================================================================
+  both entries survive a retry: 111 rows became 113
+  without the retry only 1 of 2 would have landed
+
+================================================================
+4 · WHERE IT ENDED UP
+================================================================
+  51 shipment lines · 113 movements
+  1,671 boxes in store
+  512 with couriers
+  7 shipments still open
+  movement types used: ['Count Adjustment', 'Not received', 'Received', 'Return to Saleable', 'Return to Scrap', 'Returned', 'Scrap', 'To Courier']
+  113 rows carry who entered them
+
+================================================================
+5 · THE SAME SEASON, FIVE MORE TIMES
+================================================================
+  a different order of events each time, to find what one run misses
+  both entries survive a retry: 90 rows became 92
+  without the retry only 1 of 2 would have landed
+  seed 11    clean
+  both entries survive a retry: 68 rows became 70
+  without the retry only 1 of 2 would have landed
+  seed 23    clean
+  both entries survive a retry: 74 rows became 76
+  without the retry only 1 of 2 would have landed
+  seed 42    clean
+  both entries survive a retry: 89 rows became 91
+  without the retry only 1 of 2 would have landed
+  seed 99    clean
+  both entries survive a retry: 70 rows became 72
+  without the retry only 1 of 2 would have landed
+  seed 137   clean
+
+================================================================
+6 · VERDICT
+================================================================
+  Nothing broke. Every legal action was accepted, every illegal
+  one refused, and the ledger held after every single step.
