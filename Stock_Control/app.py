@@ -680,8 +680,24 @@ if MODE == "Dispatch":
                     view["Use it when"] = [
                         f"Same as {same[n]} today" if n in same and names.index(same[n]) < names.index(n)
                         else w for n, w in zip(view["Strategy"], view["Use it when"])]
+                    all_same = len({frozenset(cmpdf.loc[cmpdf.Strategy == n,
+                                                        "_sel"].iloc[0])
+                                    for n in names}) == 1
                     strat = st.radio("Strategy", names, index=1, horizontal=True,
                                      label_visibility="collapsed")
+                    if all_same:
+                        # when there is enough stock for everybody, there is no
+                        # trade to make and all three land on the same orders.
+                        # Say so, or it looks as though the buttons do nothing.
+                        st.markdown(
+                            f'<div class="card" style="border-left:3px solid {GRN};'
+                            f'background:#F2FBF6"><b style="color:{GRN}">'
+                            f'All three pick the same orders today.</b>'
+                            f'<div class="note">There is enough stock to fill '
+                            f'everything worth filling, so there is no trade to '
+                            f'make between more orders and more boxes. The '
+                            f'buttons will differ on a day when stock is '
+                            f'short.</div></div>', unsafe_allow_html=True)
                     def _sstyle(dfx):
                         o = pd.DataFrame("", index=dfx.index, columns=dfx.columns)
                         for i2 in dfx.index:
@@ -1050,7 +1066,13 @@ with T2:
     kpi(k[3],"Oldest",f"{oldest}","days")
 
     st.subheader("Stock aging · oldest first")
-    ag=stock[stock["Store"]>0][["ItemName","Market","Shipment","Arrival Date","AgeDays","Store"]]
+    _show_empty = st.checkbox("Also show items that have gone to zero",
+                              value=False, key="stk_zero",
+                              help="An item that has all been sold or sent out "
+                                   "disappears otherwise, and you cannot see "
+                                   "that it reached zero")
+    _base = stock if _show_empty else stock[stock["Store"]>0]
+    ag=_base[["ItemName","Market","Shipment","Arrival Date","AgeDays","Store"]]
     ag=ag.rename(columns={"ItemName":"Item"})
     ag=ag.sort_values("AgeDays",ascending=False).rename(
         columns={"AgeDays":"Days","Store":"Qty","Arrival Date":"Arrival"})
@@ -1076,13 +1098,23 @@ with T3:
     st.subheader("Shipment status")
     d=clear.copy(); d["Arrival"]=d["Arrival"].dt.strftime("%d %b")
     d["Status"]=np.where(d["Overdue"],"Overdue",np.where(d["Cleared"]=="Yes","Cleared","Open"))
-    cols=["Shipment","Market","Arrival","Received","Scrap","ToCourier","Returned","Outstanding",
-          "DaysOpen","Span","Status","OrdersAssigned","OrdersHanded","OrdersOutstanding","OrdersVsAssigned"]
+    # Sent is the whole point of this tab: it is the only place the difference
+    # between what left Egypt and what arrived is visible
+    cols=["Shipment","Market","Arrival","Shipped","Received","NotReceived",
+          "Scrap","ToCourier","Returned","Outstanding","DaysOpen","Span","Status"]
+    d = d.rename(columns={"Shipped":"Sent","NotReceived":"Never arrived",
+                          "Outstanding":"Left in store"})
+    cols = ["Sent" if c=="Shipped" else "Never arrived" if c=="NotReceived"
+            else "Left in store" if c=="Outstanding" else c for c in cols]
     table(d[cols].style.format({c:"{:,.0f}" for c in
-        ["Received","Scrap","ToCourier","Returned","Outstanding","DaysOpen","Span",
+        ["Sent","Received","Never arrived","Scrap","ToCourier","Returned",
+         "Left in store","DaysOpen","Span",
          "OrdersAssigned","OrdersHanded","OrdersOutstanding","OrdersVsAssigned"]}, na_rep="—")
-        .apply(lambda x: heat_cols(x,["Outstanding"],R_HEAT),axis=None))
-    legend("Boxes still outstanding:", R_HEAT, "few", "many")
+        .apply(lambda x: heat_cols(x,["Left in store"],R_HEAT),axis=None))
+    legend("Boxes still in the store:", R_HEAT, "few", "many")
+    st.markdown(f'<div class="note">Boxes with a courier have left the store, '
+                f'so they are not counted here. See the Couriers tab for those.'
+                f'</div>', unsafe_allow_html=True)
 
     st.subheader("Clearance curve")
     st.markdown(f'<span style="color:{MUT};font-size:.78rem">Cumulative % of received delivered, by day '
@@ -1181,12 +1213,22 @@ with T5:
 
     c1,c2=st.columns(2)
     with c1:
-        st.subheader("Scrap by reason")
-        sr=mf[mf["Movement"].isin(["Scrap","Return to Scrap"])].groupby("Reason")["Qty"].sum().reset_index()
-        if len(sr):
-            st.altair_chart(dark(alt.Chart(sr).mark_bar(color=AMB,cornerRadiusEnd=3).encode(
-                x=alt.X("Qty:Q",title="Boxes"),y=alt.Y("Reason:N",title=None,sort="-x"),
-                tooltip=["Reason","Qty"]), h=max(140,36*len(sr))), use_container_width=True)
+        st.subheader("What was scrapped")
+        _s = mf[mf["Movement"].isin(["Scrap","Return to Scrap"])].copy()
+        if len(_s):
+            _s["ItemName"] = _s["Item"].map(lambda x: cfg.get("item_names",{}).get(x,x)) \
+                if "Item" in _s.columns else _s.get("Item Name","")
+            sr = _s.groupby(["ItemName","Reason"])["Qty"].sum().reset_index()
+            st.altair_chart(dark(alt.Chart(sr).mark_bar(cornerRadiusEnd=3).encode(
+                x=alt.X("Qty:Q",title="Boxes"),
+                y=alt.Y("ItemName:N",title=None,sort="-x"),
+                color=alt.Color("Reason:N",title="Why",
+                                scale=alt.Scale(scheme="oranges")),
+                tooltip=["ItemName","Reason","Qty"]),
+                h=max(140,36*sr["ItemName"].nunique()+40)), use_container_width=True)
+            table(sr.rename(columns={"ItemName":"Item","Qty":"Boxes"})
+                  .sort_values("Boxes",ascending=False)
+                  .style.format({"Boxes":"{:,.0f}"}))
         else: st.markdown(f'<span style="color:{MUT}">No scrap recorded.</span>',unsafe_allow_html=True)
     with c2:
         st.subheader("Returns by reason")

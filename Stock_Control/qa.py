@@ -64,10 +64,23 @@ ck("returned = back to stock + scrapped", q("Returned"),
 
 print("G. CLEARANCE")
 ck("received per shipment ties to the log", cl.Received.sum(), q("Received"))
-ck("outstanding = received - delivered - scrap + count adjustments", cl.Outstanding.sum(),
-   q("Received") - q("Delivered") - q("Scrap") - q("Return to Scrap") + q("Count Adjustment"))
-ck("outstanding = store + with courier", cl.Outstanding.sum(),
-   st.Store.sum() + (cp.Held.sum() if len(cp) else 0))
+# Outstanding is what is still sitting in the store for that shipment: what
+# came in, less what was thrown away, less what has gone out to a courier,
+# plus anything that came back. Boxes with a courier have left the store, so
+# they are not outstanding - they are counted separately as Held.
+ck("outstanding = received - scrap - to courier + returned + adjustments",
+   cl.Outstanding.sum(),
+   q("Received") - q("Scrap") - q("Return to Scrap") - q("To Courier")
+   + q("Returned") + q("Count Adjustment")
+   + q("Count Adjustment - Add") - q("Count Adjustment - Remove"))
+ck("outstanding = what is in the store", cl.Outstanding.sum(), st.Store.sum())
+ck("and what the courier holds is counted on its own",
+   (cp.Held.sum() if len(cp) else 0),
+   q("To Courier") - q("Returned"))
+ck("everything still ours = store + courier",
+   st.Store.sum() + (cp.Held.sum() if len(cp) else 0),
+   q("Received") - q("Scrap") - q("Return to Scrap") + q("Count Adjustment")
+   + q("Count Adjustment - Add") - q("Count Adjustment - Remove"))
 ck0("clearance span before arrival", (cl["Span"].dropna() < 0).sum())
 
 print("H. AGING")

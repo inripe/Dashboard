@@ -47,8 +47,12 @@ ck("a shipment nobody has received is not cleared",
 opens = entry_ui.open_shipments(s1, cl, MKT)
 ck("and it is offered in the entry form",
    made in [x for x, _ in opens], [x for x, _ in opens])
-ck("newest first", opens[0][0] == made if len(opens) > 1 else True,
-   [x for x, _ in opens][:2])
+# newest arrival first, not newest number: two shipments can land on the
+# same day and a later number can have an earlier arrival
+import pandas as _pd
+dates = [_pd.Timestamp(d) for _, d in opens]
+ck("newest arrival first", dates == sorted(dates, reverse=True),
+   [f"{x} {_pd.Timestamp(d):%d %b}" for x, d in opens][:3])
 
 print("=== C. THE CHECKLIST FOR IT ===")
 lines = entry_ui.expected(s1, m1, made)

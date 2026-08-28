@@ -35,6 +35,7 @@ SUITES = [
     ("received",   "qa_received.py",  "sixteen items checked in one pass"),
     ("photo",      "qa_photo.py",     "a write-off needs evidence"),
     ("guide",      "qa_guide.py",     "the guide is plain and matches the app"),
+    ("findings",   "qa_findings.py",  "what a real person found, so it cannot return"),
 ]
 
 

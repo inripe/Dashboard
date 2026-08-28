@@ -620,6 +620,20 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
                    "Markets table with Active = Yes.")
         return
     n = _nonce()
+    saved = st.session_state.pop("s_saved", None)
+    if saved:
+        st.success("Saved  /  تم الحفظ")
+        st.markdown(
+            f'<div class="card" style="border-left:3px solid #1D9E75;'
+            f'background:#F2FBF6"><b>{saved["id"]}</b> created for '
+            f'<b>{saved["market"]}</b> &mdash; <b>{saved["lines"]}</b> item'
+            f'{"s" if saved["lines"] != 1 else ""}, '
+            f'<b>{saved["boxes"]:,.0f}</b> boxes sent'
+            f'<div class="note">{saved["at"]} &nbsp;&middot;&nbsp; now record '
+            f'what arrives under <b>Stock moved</b> &rarr; Received</div></div>',
+            unsafe_allow_html=True)
+        _mangoes()
+
     st.markdown("**New shipment  ·  شحنة جديدة**")
     st.markdown('<div class="note">This records what was <b>sent</b>. The store '
                 'records what <b>arrives</b> as Received, and anything damaged '
@@ -778,9 +792,16 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
                 made = save_fn(rows, mkt)
             st.session_state["s_lines"] = []
             st.session_state.pop("s_no", None)
+            st.session_state.pop("s_next", None)
             st.session_state["e_n"] = _nonce() + 1
-            st.success(f"Saved  ·  {made}")
-            _mangoes()
+            # hand the confirmation to the next run: showing it here and then
+            # rerunning wipes it before anybody sees it
+            st.session_state["s_saved"] = {
+                "id": made,
+                "lines": len(rows),
+                "boxes": sum(x["Shipped Qty"] for x in lines),
+                "market": mkt,
+                "at": pd.Timestamp.now().strftime("%H:%M")}
             st.rerun()
         except Exception as ex:
             st.error(str(ex))
