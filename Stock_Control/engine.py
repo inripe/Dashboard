@@ -10,13 +10,15 @@ MV = ["Received", "Not received", "Scrap", "To Courier", "Returned",
       "Count Adjustment", "Count Adjustment - Add", "Count Adjustment - Remove"]
 
 def _tbl(xl, sheet, header_row, ncols):
-    """Read a sheet's table. Tolerates a file with fewer columns than expected."""
+    """Read a sheet's table. ncols is the minimum expected, not a cap: a
+    column added later must not push the last one out of range."""
     try:
-        df = xl.parse(sheet, header=header_row, usecols=range(ncols))
+        df = xl.parse(sheet, header=header_row)
+        df = df.loc[:, [c for c in df.columns
+                        if not str(c).startswith("Unnamed")]]
     except Exception:
         df = xl.parse(sheet, header=header_row)
-        if df.shape[1] > ncols:
-            df = df.iloc[:, :ncols]
+
     df.columns = [str(c).strip() for c in df.columns]
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
     if df.empty or not len(df.columns):

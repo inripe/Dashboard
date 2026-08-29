@@ -336,6 +336,13 @@ def build_exceptions():
       (f"MASTER says {pd.Timestamp(cfg['as_of_setting']):%d %b}, today is "
        f"{pd.Timestamp.today():%d %b}. Today is being used instead."
        if stale else ""), "Med")
+    # the shipped figure is sometimes typed wrong, so receiving more is
+    # allowed - but it is always reported here rather than passing silently
+    over = stock[stock["Received"] - stock["Shipped Qty"] > 0.001]
+    a("More received than was shipped", len(over),
+      ", ".join(f"{r['ItemName']} on {r['Shipment']}: {r['Received']:,.0f} "
+                f"received against {r['Shipped Qty']:,.0f} shipped"
+                for _, r in over.head(6).iterrows()), "High")
     orphan = sorted(set(mf["Shipment"].dropna()) - set(sf["Shipment ID"].dropna()))
     a("Movement points at no shipment", len(orphan), ", ".join(orphan[:6]), "High")
     two_dates = []
@@ -422,6 +429,208 @@ T4  = _slot("Couriers")
 T5  = _slot("Losses")
 T6  = _slot("Data check")
 T7  = _slot("Guide")
+
+
+def render_guide():
+    # The store staff read this on a phone, at six in the morning, in two
+    # languages. Short sentences, one idea each, no jargon.
+    st.subheader("How to record what happened  ·  كيف تسجل ما حدث")
+
+    steps = [
+        ("1", "Open <b>Record</b>", "افتح <b>Record</b>",
+         "The three buttons at the top: Record, Dispatch, Review. "
+         "Press <b>Record</b>."),
+        ("2", "Sign in", "سجل الدخول",
+         "Choose your name from the list and type the password. "
+         "Your market comes with your name, so you cannot pick the wrong one."),
+        ("3", "Say what happened", "اختر ماذا حدث",
+         "A list appears. Green arrows down mean stock is coming <b>in</b>. "
+         "Orange arrows up mean stock is going <b>out</b>. Press one."),
+        ("4", "Fill only what it asks", "املأ ما يُطلب فقط",
+         "The form shows only the boxes that movement needs. If a box is not "
+         "there, you do not need it."),
+        ("5", "Read the blue card", "اقرأ البطاقة الزرقاء",
+         "Before you save, a card says in plain words what you are about to "
+         "record. Read it. If it is wrong, change the form."),
+        ("6", "Press Save", "اضغط حفظ",
+         "Mangoes fall down the screen and a green line says Saved. "
+         "If you do not see them, it did not save."),
+        ("7", "Check <b>Today</b>", "راجع <b>Today</b>",
+         "Everything you entered today is listed there. Wrong? Press "
+         "<b>Void</b> next to it. The line stays but stops counting."),
+    ]
+    for n, en, ar, why in steps:
+        st.markdown(
+            f'<div class="card" style="display:flex;gap:14px;align-items:start">'
+            f'<div style="font-size:1.6rem;font-weight:600;color:{ACC};'
+            f'min-width:34px;line-height:1">{n}</div>'
+            f'<div><b style="font-size:1.02rem">{en}</b>'
+            f'<span style="float:right;font-size:1.02rem">{ar}</span>'
+            f'<div class="note" style="margin-top:.3rem">{why}</div></div></div>',
+            unsafe_allow_html=True)
+
+    st.subheader("The two that are different  ·  حالتان مختلفتان")
+    st.markdown(f"""<div class="card">
+<b>A shipment arriving.</b> Press <b>Received</b> and choose the shipment. You
+will not type each item. A list appears of everything that was sent. Tick the
+ones that match. Change the number where it does not. One Save records them all.
+<div style="direction:rtl;text-align:right;margin-top:.5rem">
+<b>وصول شحنة.</b> اضغط استلام واختر الشحنة. ستظهر قائمة بكل ما تم إرساله.
+علّم المطابق وعدّل المختلف. حفظ واحد يسجل الكل.
+</div></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div class="card">
+<b>Throwing something away.</b> Press <b>Scrap</b>, say why, and take a photo if
+you can. The photo is not required, but it is the evidence behind a claim.
+<div style="direction:rtl;text-align:right;margin-top:.5rem">
+<b>إتلاف.</b> اضغط إتلاف، اذكر السبب، وصوّر إن أمكن. الصورة اختيارية لكنها
+الدليل عند المطالبة.
+</div></div>""", unsafe_allow_html=True)
+
+    st.subheader("If it will not let you  ·  إذا لم يسمح لك")
+    warn = pd.DataFrame([
+        ["Save is grey", "Something is missing. The amber line says what.",
+         "\u0632\u0631 \u0627\u0644\u062d\u0641\u0638 \u0631\u0645\u0627\u062f\u064a \u2014 \u0627\u0642\u0631\u0623 \u0627\u0644\u0633\u0637\u0631 \u0627\u0644\u0628\u0631\u062a\u0642\u0627\u0644\u064a"],
+        ["It says only 38 in store",
+         "You cannot send out more than is there. Count again.",
+         "\u0644\u0627 \u064a\u0645\u0643\u0646 \u0625\u062e\u0631\u0627\u062c \u0623\u0643\u062b\u0631 \u0645\u0645\u0627 \u0647\u0648 \u0645\u0648\u062c\u0648\u062f"],
+        ["It says everything is accounted for",
+         "That shipment is fully received. Nothing left to record.",
+         "\u0627\u0644\u0634\u062d\u0646\u0629 \u0645\u0633\u062a\u0644\u0645\u0629 \u0628\u0627\u0644\u0643\u0627\u0645\u0644"],
+        ["The file is open in Excel",
+         "Somebody has the workbook open. Ask them to close it.",
+         "\u0627\u0644\u0645\u0644\u0641 \u0645\u0641\u062a\u0648\u062d \u2014 \u0627\u0637\u0644\u0628 \u0625\u063a\u0644\u0627\u0642\u0647"],
+        ["No open shipment",
+         "Nothing has arrived in your market yet. Tell whoever adds shipments.",
+         "\u0644\u0627 \u062a\u0648\u062c\u062f \u0634\u062d\u0646\u0629 \u0645\u0641\u062a\u0648\u062d\u0629"],
+    ], columns=["What you see", "What it means", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"])
+    def _wstyle(d):
+        o = pd.DataFrame("", index=d.index, columns=d.columns)
+        o["\u0627\u0644\u0639\u0631\u0628\u064a\u0629"] = "direction:rtl;text-align:right"
+        return o
+    table(warn.style.apply(_wstyle, axis=None))
+    st.markdown(f'<div class="note">Nothing you do here can break anything. '
+                f'A wrong entry is voided, never deleted, and the numbers go '
+                f'back to what they were.  &nbsp;·&nbsp;  '
+                f'\u0644\u0627 \u0634\u064a\u0621 \u064a\u0641\u0633\u062f: '
+                f'\u0627\u0644\u062e\u0637\u0623 \u064a\u064f\u0644\u063a\u0649 '
+                f'\u0648\u0644\u0627 \u064a\u064f\u062d\u0630\u0641.</div>',
+                unsafe_allow_html=True)
+
+    st.subheader("How a shipment flows  ·  كيف تسير الشحنة")
+    st.markdown(f"""<div class="card">
+<b>Two people, two jobs.</b> You record what was <b>sent</b>. The store records
+what <b>arrived</b>. The difference is your transit loss, and it only stays
+visible because they are entered separately.
+<div style="direction:rtl;text-align:right;margin-top:.5rem">
+<b>شخصان، مهمتان.</b> أنت تسجل ما تم <b>إرساله</b>. المخزن يسجل ما <b>وصل</b>.
+الفرق بينهما هو الفاقد أثناء النقل، ويظل ظاهراً لأن كلاً منهما يُسجَّل على حدة.
+</div></div>""", unsafe_allow_html=True)
+
+    flow = pd.DataFrame([
+        ["1", "Shipment created — 500 shipped", "You", "Entry → New shipment",
+         "\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0634\u062d\u0646\u0629 \u2014 500 \u0645\u0631\u0633\u0644"],
+        ["2", "480 arrive", "Store", "Entry → \u2193 IN Received",
+         "\u0648\u0635\u0644 480 \u2014 \u0627\u0633\u062a\u0644\u0627\u0645"],
+        ["3", "5 damaged", "Store", "Entry → \u2191 OUT Scrap, reason Damage",
+         "5 \u062a\u0627\u0644\u0641 \u2014 \u0625\u062a\u0644\u0627\u0641"],
+        ["4", "15 never arrived", "You", "Entry → \u2191 OUT Not received",
+         "15 \u0644\u0645 \u062a\u0635\u0644 \u2014 \u0641\u0642\u062f \u0641\u064a \u0627\u0644\u062c\u0645\u0627\u0631\u0643"],
+        ["5", "475 sold and handed over", "Store", "Entry → \u2191 OUT To Courier",
+         "\u062a\u0633\u0644\u064a\u0645 \u0644\u0644\u0645\u0646\u062f\u0648\u0628"],
+        ["6", "Customer refuses, it comes back", "Store",
+         "Entry → \u2193 IN Returned",
+         "\u0645\u0631\u062a\u062c\u0639"],
+        ["7", "Everything else the courier took", "nobody",
+         "counted for you, never typed",
+         "\u062a\u0645 \u0627\u0644\u062a\u0648\u0635\u064a\u0644 \u2014 "
+         "\u064a\u064f\u062d\u0633\u0628 \u062a\u0644\u0642\u0627\u0626\u064a\u0627\u064b"],
+    ], columns=["", "What happened", "Who", "Where", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"])
+    def _fstyle(d):
+        o = pd.DataFrame("", index=d.index, columns=d.columns)
+        o["Who"] = [f"color:{ACC};font-weight:600" if v == "You"
+                    else (f"color:{MUT}" if v == "nobody"
+                          else f"color:{GRN};font-weight:600") for v in d["Who"]]
+        o["\u0627\u0644\u0639\u0631\u0628\u064a\u0629"] = "direction:rtl;text-align:right"
+        return o
+    table(flow.style.apply(_fstyle, axis=None))
+    st.markdown(f'<div class="note">Shipped 500, received 480, scrapped 5 → '
+                f'<b>15 lost in transit</b>, <b>475 sellable</b>. If the store '
+                f'had simply entered 480 as the shipment, those 15 would have '
+                f'disappeared without trace.</div>', unsafe_allow_html=True)
+
+    st.subheader("Where things are recorded")
+    st.markdown(f"""<div class="card">
+<b>Nobody types in the Excel any more.</b> Everything goes through the Entry tab,
+and the workbook is the record it writes to.<br><br>
+<span style="color:{MUT}">Entry → New shipment</span> — admin only. What was sent.<br>
+<span style="color:{MUT}">Entry → Movement</span> — the store. What physically happened.<br>
+<span style="color:{MUT}">SHIPMENTS, MOVES, COUNT</span> — written by the app, read by this dashboard.<br><br>
+<b>Golden rule:</b> stock only ever changes through a movement. A count never
+changes stock by itself — post a Count Adjustment instead.
+<div style="direction:rtl;text-align:right;margin-top:.6rem">
+<b>القاعدة الذهبية:</b> المخزون لا يتغير إلا بحركة. الجرد وحده لا يغيّر المخزون —
+سجّل تسوية جرد بدلاً من ذلك.
+</div></div>""", unsafe_allow_html=True)
+
+    st.subheader("The numbers, and how each one is worked out")
+    terms=pd.DataFrame([
+     ["Available to sell","Received − scrap + returns back to stock + count adjustments − sent to courier",
+      "Boxes physically in the store, free to sell today."],
+     ["With couriers","Sent to courier − delivered − returned",
+      "Still your stock. It only stops being yours when it is delivered or scrapped."],
+     ["Total owned","Available + with couriers","Everything Inripe owns in that market."],
+     ["Stock age (days)","Today − the shipment's arrival date",
+      "Returned boxes keep their original age. The clock never resets."],
+     ["Outstanding (shipment)","Received − delivered − scrap",
+      "What is left of that shipment, in the store or on a van."],
+     ["Clearance span","Last handover date − arrival date",
+      "How many days that shipment took to clear. Lower is better."],
+     ["Return %","Boxes returned ÷ boxes handed to that courier",
+      "The courier number that costs you stock and a day of shelf life."],
+     ["Loss %","(customs + QC scrap + return scrap) ÷ received",
+      "Everything that never reached a customer, as a share of what arrived."],
+     ["Count variance","Physical counted − system calculated",
+      "Never overwrites stock. Post a Count Adjustment in MOVES to correct it."],
+    ], columns=["Term","How it is calculated","What it tells you"])
+    table(terms.style)
+
+    st.subheader("The nine movement types")
+    mtypes=pd.DataFrame([
+     ["Received","item, qty","Goods counted in at the store"],
+     ["Not received","item, qty, reason","Never arrived from the supplier."],
+     ["Scrap","item, qty, reason","Thrown away from store stock"],
+     ["To Courier","item, qty, courier","Handed to a courier"],
+     ["Returned","item, qty, courier, reason","Came back from the courier"],
+     ["Return to Saleable","item, qty","Returned goods that passed QC"],
+     ["Return to Scrap","item, qty, reason","Returned goods that failed QC"],
+     ["Count Adjustment","item, qty, reason","Corrects stock after a physical count"],
+    ], columns=["Movement","What you fill in","What it means"])
+    table(mtypes.style)
+
+    st.subheader("Your daily routine")
+    st.markdown(f"""<div class="card">
+<b>1.</b> New shipment landed? Add its lines on SHIPMENTS first — one row per item.<br>
+<b>2.</b> Type today's events on MOVES, one row each. Pick the Movement first; the Check column
+tells you which fields it needs.<br>
+<b>3.</b> Check every new row shows OK in the Check column.<br>
+<b>4.</b> Save the file in SharePoint.<br>
+<b>5.</b> Come here, press Refresh, and read the Overview tab.<br><br>
+<span style="color:{MUT}">If the Data check tab is red, fix the row it names before trusting any number.</span>
+</div>""", unsafe_allow_html=True)
+
+    st.subheader("Settings behind these numbers")
+    settings=pd.DataFrame([
+     ["Courier holding limit", f"{cfg['courier_limit']:.0f} days",
+      "A courier holding stock longer than this is flagged"],
+     ["Shipment clearance target", f"{cfg['clear_target']:.0f} days",
+      "A shipment still open past this is flagged overdue"],
+     ["Loss % target", f"{cfg['loss_target']*100:.1f}%", "The dashed line on the loss chart"],
+     ["Count variance tolerance", f"{cfg['var_tol']*100:.1f}%",
+      "Variance beyond this raises an exception"],
+    ], columns=["Setting","Current value","What it controls"])
+    table(settings.style)
+    st.markdown(f'<div class="note">All four live on the MASTER sheet of the Excel file. '
+                f'Change them there — not in code.</div>', unsafe_allow_html=True)
 
 
 def custom_panel(orders, stock, key="cx"):
@@ -1077,11 +1286,20 @@ if MODE == "Dispatch":
 
 
 if EMPTY and MODE == "Review":
-    if True:
-        for T, name in zip(TABS, _names):
-            with T:
+    nothing_at_all = not len(ship)
+    for T, name in zip(TABS, _names):
+        if name == "Guide":
+            continue          # the guide never depends on data
+        with T:
+            if nothing_at_all:
+                st.info("Nothing has been recorded yet. Once a shipment is "
+                        "entered under Record, everything here fills in. "
+                        "The Guide tab explains how.")
+            else:
                 st.info("No shipments match this filter. Choose another market "
                         "or shipment above.")
+    with _tab.get("Guide", st.container()):
+        render_guide()
     st.stop()
 
 exc = build_exceptions(); open_exc = exc[exc["Count"]>0]
@@ -1449,202 +1667,5 @@ with T6:
 
 # ============================== 7 · GUIDE ==============================
 with T7:
-    # The store staff read this on a phone, at six in the morning, in two
-    # languages. Short sentences, one idea each, no jargon.
-    st.subheader("How to record what happened  ·  كيف تسجل ما حدث")
+    render_guide()
 
-    steps = [
-        ("1", "Open <b>Record</b>", "افتح <b>Record</b>",
-         "The three buttons at the top: Record, Dispatch, Review. "
-         "Press <b>Record</b>."),
-        ("2", "Sign in", "سجل الدخول",
-         "Choose your name from the list and type the password. "
-         "Your market comes with your name, so you cannot pick the wrong one."),
-        ("3", "Say what happened", "اختر ماذا حدث",
-         "A list appears. Green arrows down mean stock is coming <b>in</b>. "
-         "Orange arrows up mean stock is going <b>out</b>. Press one."),
-        ("4", "Fill only what it asks", "املأ ما يُطلب فقط",
-         "The form shows only the boxes that movement needs. If a box is not "
-         "there, you do not need it."),
-        ("5", "Read the blue card", "اقرأ البطاقة الزرقاء",
-         "Before you save, a card says in plain words what you are about to "
-         "record. Read it. If it is wrong, change the form."),
-        ("6", "Press Save", "اضغط حفظ",
-         "Mangoes fall down the screen and a green line says Saved. "
-         "If you do not see them, it did not save."),
-        ("7", "Check <b>Today</b>", "راجع <b>Today</b>",
-         "Everything you entered today is listed there. Wrong? Press "
-         "<b>Void</b> next to it. The line stays but stops counting."),
-    ]
-    for n, en, ar, why in steps:
-        st.markdown(
-            f'<div class="card" style="display:flex;gap:14px;align-items:start">'
-            f'<div style="font-size:1.6rem;font-weight:600;color:{ACC};'
-            f'min-width:34px;line-height:1">{n}</div>'
-            f'<div><b style="font-size:1.02rem">{en}</b>'
-            f'<span style="float:right;font-size:1.02rem">{ar}</span>'
-            f'<div class="note" style="margin-top:.3rem">{why}</div></div></div>',
-            unsafe_allow_html=True)
-
-    st.subheader("The two that are different  ·  حالتان مختلفتان")
-    st.markdown(f"""<div class="card">
-<b>A shipment arriving.</b> Press <b>Received</b> and choose the shipment. You
-will not type each item. A list appears of everything that was sent. Tick the
-ones that match. Change the number where it does not. One Save records them all.
-<div style="direction:rtl;text-align:right;margin-top:.5rem">
-<b>وصول شحنة.</b> اضغط استلام واختر الشحنة. ستظهر قائمة بكل ما تم إرساله.
-علّم المطابق وعدّل المختلف. حفظ واحد يسجل الكل.
-</div></div>""", unsafe_allow_html=True)
-    st.markdown(f"""<div class="card">
-<b>Throwing something away.</b> Press <b>Scrap</b>, say why, and take a photo if
-you can. The photo is not required, but it is the evidence behind a claim.
-<div style="direction:rtl;text-align:right;margin-top:.5rem">
-<b>إتلاف.</b> اضغط إتلاف، اذكر السبب، وصوّر إن أمكن. الصورة اختيارية لكنها
-الدليل عند المطالبة.
-</div></div>""", unsafe_allow_html=True)
-
-    st.subheader("If it will not let you  ·  إذا لم يسمح لك")
-    warn = pd.DataFrame([
-        ["Save is grey", "Something is missing. The amber line says what.",
-         "\u0632\u0631 \u0627\u0644\u062d\u0641\u0638 \u0631\u0645\u0627\u062f\u064a \u2014 \u0627\u0642\u0631\u0623 \u0627\u0644\u0633\u0637\u0631 \u0627\u0644\u0628\u0631\u062a\u0642\u0627\u0644\u064a"],
-        ["It says only 38 in store",
-         "You cannot send out more than is there. Count again.",
-         "\u0644\u0627 \u064a\u0645\u0643\u0646 \u0625\u062e\u0631\u0627\u062c \u0623\u0643\u062b\u0631 \u0645\u0645\u0627 \u0647\u0648 \u0645\u0648\u062c\u0648\u062f"],
-        ["It says everything is accounted for",
-         "That shipment is fully received. Nothing left to record.",
-         "\u0627\u0644\u0634\u062d\u0646\u0629 \u0645\u0633\u062a\u0644\u0645\u0629 \u0628\u0627\u0644\u0643\u0627\u0645\u0644"],
-        ["The file is open in Excel",
-         "Somebody has the workbook open. Ask them to close it.",
-         "\u0627\u0644\u0645\u0644\u0641 \u0645\u0641\u062a\u0648\u062d \u2014 \u0627\u0637\u0644\u0628 \u0625\u063a\u0644\u0627\u0642\u0647"],
-        ["No open shipment",
-         "Nothing has arrived in your market yet. Tell whoever adds shipments.",
-         "\u0644\u0627 \u062a\u0648\u062c\u062f \u0634\u062d\u0646\u0629 \u0645\u0641\u062a\u0648\u062d\u0629"],
-    ], columns=["What you see", "What it means", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"])
-    def _wstyle(d):
-        o = pd.DataFrame("", index=d.index, columns=d.columns)
-        o["\u0627\u0644\u0639\u0631\u0628\u064a\u0629"] = "direction:rtl;text-align:right"
-        return o
-    table(warn.style.apply(_wstyle, axis=None))
-    st.markdown(f'<div class="note">Nothing you do here can break anything. '
-                f'A wrong entry is voided, never deleted, and the numbers go '
-                f'back to what they were.  &nbsp;·&nbsp;  '
-                f'\u0644\u0627 \u0634\u064a\u0621 \u064a\u0641\u0633\u062f: '
-                f'\u0627\u0644\u062e\u0637\u0623 \u064a\u064f\u0644\u063a\u0649 '
-                f'\u0648\u0644\u0627 \u064a\u064f\u062d\u0630\u0641.</div>',
-                unsafe_allow_html=True)
-
-    st.subheader("How a shipment flows  ·  كيف تسير الشحنة")
-    st.markdown(f"""<div class="card">
-<b>Two people, two jobs.</b> You record what was <b>sent</b>. The store records
-what <b>arrived</b>. The difference is your transit loss, and it only stays
-visible because they are entered separately.
-<div style="direction:rtl;text-align:right;margin-top:.5rem">
-<b>شخصان، مهمتان.</b> أنت تسجل ما تم <b>إرساله</b>. المخزن يسجل ما <b>وصل</b>.
-الفرق بينهما هو الفاقد أثناء النقل، ويظل ظاهراً لأن كلاً منهما يُسجَّل على حدة.
-</div></div>""", unsafe_allow_html=True)
-
-    flow = pd.DataFrame([
-        ["1", "Shipment created — 500 shipped", "You", "Entry → New shipment",
-         "\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u0634\u062d\u0646\u0629 \u2014 500 \u0645\u0631\u0633\u0644"],
-        ["2", "480 arrive", "Store", "Entry → \u2193 IN Received",
-         "\u0648\u0635\u0644 480 \u2014 \u0627\u0633\u062a\u0644\u0627\u0645"],
-        ["3", "5 damaged", "Store", "Entry → \u2191 OUT Scrap, reason Damage",
-         "5 \u062a\u0627\u0644\u0641 \u2014 \u0625\u062a\u0644\u0627\u0641"],
-        ["4", "15 never arrived", "You", "Entry → \u2191 OUT Not received",
-         "15 \u0644\u0645 \u062a\u0635\u0644 \u2014 \u0641\u0642\u062f \u0641\u064a \u0627\u0644\u062c\u0645\u0627\u0631\u0643"],
-        ["5", "475 sold and handed over", "Store", "Entry → \u2191 OUT To Courier",
-         "\u062a\u0633\u0644\u064a\u0645 \u0644\u0644\u0645\u0646\u062f\u0648\u0628"],
-        ["6", "Customer refuses, it comes back", "Store",
-         "Entry → \u2193 IN Returned",
-         "\u0645\u0631\u062a\u062c\u0639"],
-        ["7", "Everything else the courier took", "nobody",
-         "counted for you, never typed",
-         "\u062a\u0645 \u0627\u0644\u062a\u0648\u0635\u064a\u0644 \u2014 "
-         "\u064a\u064f\u062d\u0633\u0628 \u062a\u0644\u0642\u0627\u0626\u064a\u0627\u064b"],
-    ], columns=["", "What happened", "Who", "Where", "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"])
-    def _fstyle(d):
-        o = pd.DataFrame("", index=d.index, columns=d.columns)
-        o["Who"] = [f"color:{ACC};font-weight:600" if v == "You"
-                    else (f"color:{MUT}" if v == "nobody"
-                          else f"color:{GRN};font-weight:600") for v in d["Who"]]
-        o["\u0627\u0644\u0639\u0631\u0628\u064a\u0629"] = "direction:rtl;text-align:right"
-        return o
-    table(flow.style.apply(_fstyle, axis=None))
-    st.markdown(f'<div class="note">Shipped 500, received 480, scrapped 5 → '
-                f'<b>15 lost in transit</b>, <b>475 sellable</b>. If the store '
-                f'had simply entered 480 as the shipment, those 15 would have '
-                f'disappeared without trace.</div>', unsafe_allow_html=True)
-
-    st.subheader("Where things are recorded")
-    st.markdown(f"""<div class="card">
-<b>Nobody types in the Excel any more.</b> Everything goes through the Entry tab,
-and the workbook is the record it writes to.<br><br>
-<span style="color:{MUT}">Entry → New shipment</span> — admin only. What was sent.<br>
-<span style="color:{MUT}">Entry → Movement</span> — the store. What physically happened.<br>
-<span style="color:{MUT}">SHIPMENTS, MOVES, COUNT</span> — written by the app, read by this dashboard.<br><br>
-<b>Golden rule:</b> stock only ever changes through a movement. A count never
-changes stock by itself — post a Count Adjustment instead.
-<div style="direction:rtl;text-align:right;margin-top:.6rem">
-<b>القاعدة الذهبية:</b> المخزون لا يتغير إلا بحركة. الجرد وحده لا يغيّر المخزون —
-سجّل تسوية جرد بدلاً من ذلك.
-</div></div>""", unsafe_allow_html=True)
-
-    st.subheader("The numbers, and how each one is worked out")
-    terms=pd.DataFrame([
-     ["Available to sell","Received − scrap + returns back to stock + count adjustments − sent to courier",
-      "Boxes physically in the store, free to sell today."],
-     ["With couriers","Sent to courier − delivered − returned",
-      "Still your stock. It only stops being yours when it is delivered or scrapped."],
-     ["Total owned","Available + with couriers","Everything Inripe owns in that market."],
-     ["Stock age (days)","Today − the shipment's arrival date",
-      "Returned boxes keep their original age. The clock never resets."],
-     ["Outstanding (shipment)","Received − delivered − scrap",
-      "What is left of that shipment, in the store or on a van."],
-     ["Clearance span","Last handover date − arrival date",
-      "How many days that shipment took to clear. Lower is better."],
-     ["Return %","Boxes returned ÷ boxes handed to that courier",
-      "The courier number that costs you stock and a day of shelf life."],
-     ["Loss %","(customs + QC scrap + return scrap) ÷ received",
-      "Everything that never reached a customer, as a share of what arrived."],
-     ["Count variance","Physical counted − system calculated",
-      "Never overwrites stock. Post a Count Adjustment in MOVES to correct it."],
-    ], columns=["Term","How it is calculated","What it tells you"])
-    table(terms.style)
-
-    st.subheader("The nine movement types")
-    mtypes=pd.DataFrame([
-     ["Received","item, qty","Goods counted in at the store"],
-     ["Not received","item, qty, reason","Never arrived from the supplier."],
-     ["Scrap","item, qty, reason","Thrown away from store stock"],
-     ["To Courier","item, qty, courier","Handed to a courier"],
-     ["Returned","item, qty, courier, reason","Came back from the courier"],
-     ["Return to Saleable","item, qty","Returned goods that passed QC"],
-     ["Return to Scrap","item, qty, reason","Returned goods that failed QC"],
-     ["Count Adjustment","item, qty, reason","Corrects stock after a physical count"],
-    ], columns=["Movement","What you fill in","What it means"])
-    table(mtypes.style)
-
-    st.subheader("Your daily routine")
-    st.markdown(f"""<div class="card">
-<b>1.</b> New shipment landed? Add its lines on SHIPMENTS first — one row per item.<br>
-<b>2.</b> Type today's events on MOVES, one row each. Pick the Movement first; the Check column
-tells you which fields it needs.<br>
-<b>3.</b> Check every new row shows OK in the Check column.<br>
-<b>4.</b> Save the file in SharePoint.<br>
-<b>5.</b> Come here, press Refresh, and read the Overview tab.<br><br>
-<span style="color:{MUT}">If the Data check tab is red, fix the row it names before trusting any number.</span>
-</div>""", unsafe_allow_html=True)
-
-    st.subheader("Settings behind these numbers")
-    settings=pd.DataFrame([
-     ["Courier holding limit", f"{cfg['courier_limit']:.0f} days",
-      "A courier holding stock longer than this is flagged"],
-     ["Shipment clearance target", f"{cfg['clear_target']:.0f} days",
-      "A shipment still open past this is flagged overdue"],
-     ["Loss % target", f"{cfg['loss_target']*100:.1f}%", "The dashed line on the loss chart"],
-     ["Count variance tolerance", f"{cfg['var_tol']*100:.1f}%",
-      "Variance beyond this raises an exception"],
-    ], columns=["Setting","Current value","What it controls"])
-    table(settings.style)
-    st.markdown(f'<div class="note">All four live on the MASTER sheet of the Excel file. '
-                f'Change them there — not in code.</div>', unsafe_allow_html=True)

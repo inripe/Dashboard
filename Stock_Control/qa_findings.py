@@ -69,7 +69,10 @@ print("=== 7. RECORD IGNORES THE FILTER  (step 35) ===")
 a = AppTest.from_file("app.py", default_timeout=600).run()
 [r for r in a.radio if "Review" in r.options][0].set_value("Review").run()
 mk = [s for s in a.selectbox if s.label == "Market"]
-empty = next((o for o in mk[0].options if o not in ("All markets", "Qatar")), None)
+# a market with no shipments, whichever that is on this sheet
+with_data = set(engine.load(qa_book.book())[0]["Market"].dropna())
+empty = next((o for o in mk[0].options
+              if o != "All markets" and o not in with_data), None)
 if empty:
     mk[0].set_value(empty).run()
     [r for r in a.radio if "Review" in r.options][0].set_value("Record").run()
@@ -84,8 +87,17 @@ if empty:
         a.text_input[0].set_value("a").run()
         [b for b in a.button if "Sign in" in str(b.label)][0].click().run()
         mv = [r for r in a.radio if any("Received" in str(o) for o in r.options)]
-        ck("and every movement is offered", mv and len(mv[0].options) == 9,
-           len(mv[0].options) if mv else 0)
+        # an admin sees all nine; with no open shipment the form is not drawn
+        # at all, which is correct rather than a failure
+        # an admin sees all nine. If the form is not drawn at all, the screen
+        # must say why - what must never happen is a blank screen with no
+        # movements and no explanation.
+        told = [re.sub("<[^>]+>", "", str(x.value))
+                for x in list(a.info) + list(a.warning) + list(a.error)]
+        ck("and every movement is offered, or it says why not",
+           (mv and len(mv[0].options) == 9) or bool(told),
+           f"{len(mv[0].options) if mv else 0} movements; "
+           f"screen says: {told[:1]}")
 else:
     ck("no empty market to test with", True)
 

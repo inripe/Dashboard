@@ -205,14 +205,10 @@ def check_quantities(row, wb):
             return (f"Only {have:,.0f} boxes of {item} are in the store for "
                     f"{sid}. You cannot take out {qty:,.0f}.")
 
-    if mv == "Received" and item:
-        sent = shipped_qty(wb, sid, item)
-        already = received.get(item, 0.0)
-        if sent and already + qty > sent:
-            room = sent - already
-            return (f"{sid} was sent {sent:,.0f} boxes of {item} and "
-                    f"{already:,.0f} are already recorded. "
-                    f"{'No more can be received' if room <= 0 else f'Only {room:,.0f} left to receive'}.")
+    # Receiving more than was shipped is allowed. The shipped figure is
+    # sometimes typed wrong, and refusing the entry would only hide that -
+    # the store would correct the sheet and the error would vanish. It is
+    # recorded as it happened and reported in Data check instead.
 
     if mv == "Not received" and item:
         sent = shipped_qty(wb, sid, item)

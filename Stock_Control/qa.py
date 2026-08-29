@@ -7,7 +7,7 @@ so it works on the demo file and on your real data.
     python3 qa.py                       # checks INRIPE_Stock_Entry_v1.xlsx
     python3 qa.py OTHER_FILE.xlsx
 """
-import sys, pandas as pd, numpy as np, engine
+import sys, pandas as pd, numpy as np, engine, qa_book
 
 FILE = sys.argv[1] if len(sys.argv) > 1 else "INRIPE_Stock_Entry_v1.xlsx"
 P, F = [], []
@@ -18,7 +18,7 @@ def ck0(name, count):
     ok = int(count) == 0
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {name}: {int(count)} offending rows")
 
-ship, moves, count, cfg, errs = engine.load(FILE)
+ship, moves, count, cfg, errs = engine.load(qa_book.book())
 as_of = cfg["as_of"]
 st = engine.stock_by_item(ship, moves, as_of)
 cl = engine.clearance_by_shipment(ship, moves, as_of, cfg)

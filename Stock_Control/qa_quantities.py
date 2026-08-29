@@ -53,16 +53,30 @@ for mv, extra in [("Scrap", {"Reason":"Damage"}),
 ck("taking one box is fine",
    why("Scrap", **{"Item Name":ITEM,"Out":1,"Reason":"Damage"})=="OK")
 
-print("=== C. YOU CANNOT RECEIVE MORE THAN WAS SENT ===")
+print("=== C. RECEIVING MORE THAN WAS SHIPPED IS ALLOWED ===")
+# the shipped figure is sometimes typed wrong. Refusing the entry would only
+# make the store correct the sheet, and the error would vanish. So it is
+# recorded as it happened and reported in Data check instead.
 already = received.get(ITEM, 0.0)
 w = why("Received", **{"Item Name":ITEM, "In":SENT+1})
-ck("receiving more than shipped is refused", w!="OK", w[:60])
-ck("the message names the shipped figure", f"{SENT:,.0f}" in w, w[:60])
-if already >= SENT:
-    ck("a fully received item accepts nothing more",
-       "No more can be received" in w, w[:60])
-else:
-    ck("it says how many are still to come", "left to receive" in w, w[:60])
+ck("more than shipped is accepted", w=="OK", w[:60])
+b_over, _ = entry.append_moves(base, [row("Received",
+    **{"Item Name":ITEM, "In":SENT+1})], "admin", MKT)
+s_o, m_o, c_o, cfg_o, e_o = engine.load(io.BytesIO(b_over))
+st_o = engine.stock_by_item(s_o, m_o, cfg_o["as_of"])
+eq("and it is written", len(m_o), len(m0)+1)
+eq("with no entry errors", len(e_o), 0)
+ck("data check spots it",
+   int((st_o["Received"] - st_o["Shipped Qty"] > 0.001).sum()) >= 1,
+   int((st_o["Received"] - st_o["Shipped Qty"] > 0.001).sum()))
+ck("the app reports it by name",
+   "More received than was shipped" in open("app.py").read())
+ck("and marks it high priority",
+   'received against' in open("app.py").read())
+ck("the form warns before it is typed",
+   "flagged in Data check" in open("entry_ui.py").read())
+ck("nothing is capped on the form",
+   "return None, note" in open("entry_ui.py").read())
 
 print("=== D. CUSTOMS CANNOT EXCEED THE SHORTFALL ===")
 w = why("Not received", **{"Item Name":ITEM, "Out":SENT+1, "Reason":"Customs"})
@@ -142,7 +156,9 @@ print("=== I. THE FORM SHOWS THE LIMIT BEFORE YOU TYPE ===")
 for mv in ["Received","Scrap","To Courier","Returned",
            "Return to Saleable","Not received"]:
     cap, note = entry_ui.limits(m0, s0, SHIP, ITEM, mv)
-    ck(f"{mv}: a limit is offered", cap is not None, cap)
+    # Received is deliberately uncapped: more than shipped is allowed
+    ck(f"{mv}: a limit is offered where one applies",
+       (cap is None) == (mv == "Received"), f"cap={cap}")
     ck(f"{mv}: it is explained", bool(note), note[:44])
     ck(f"{mv}: never negative", cap is None or cap >= 0, cap)
 cap,_ = entry_ui.limits(m0, s0, SHIP, ITEM, "Scrap")

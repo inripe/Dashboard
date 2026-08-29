@@ -34,10 +34,14 @@ ck("a fully received item is marked done",
 
 print("=== B. A NEW SHIPMENT IS VISIBLE ===")
 sid = entry.next_shipment_no(base, MKT)
-items = sorted(set(s0["Item Name"].dropna()))[:4]
+# from MASTER, not from what happens to be on the sheet - a market with three
+# items in stock still has thirty on the item list
+items = sorted((cfg0.get("item_names") or {}).values())[:4]
+QTY = [40, 25, 60, 15][:len(items)]
+TOTAL = sum(QTY)
 rows = [{"Shipment No": sid, "Market": MKT, "Arrival Date": dt.date(2026,8,27),
          "Source": "Egypt", "Item Name": it, "Shipped Qty": q}
-        for it, q in zip(items, [40, 25, 60, 15])]
+        for it, q in zip(items, QTY)]
 b, made = entry.append_shipment(base, rows, "admin", MKT)
 s1,m1,c1,cfg1,e1 = engine.load(io.BytesIO(b))
 cl = engine.clearance_by_shipment(s1, m1, cfg1["as_of"], cfg1)
@@ -56,10 +60,10 @@ ck("newest arrival first", dates == sorted(dates, reverse=True),
 
 print("=== C. THE CHECKLIST FOR IT ===")
 lines = entry_ui.expected(s1, m1, made)
-eq("four items", len(lines), 4)
+eq("one line per item", len(lines), len(items))
 ck("nothing received yet", all(r["received"] == 0 for r in lines))
 ck("everything still to do", all(not r["done"] for r in lines))
-eq("the totals match what was sent", sum(r["left"] for r in lines), 140)
+eq("the totals match what was sent", sum(r["left"] for r in lines), TOTAL)
 
 print("=== D. SAVING THE WHOLE CHECKLIST ===")
 picked = [{"Date": dt.date(2026,8,27), "Shipment No": made,
@@ -67,12 +71,12 @@ picked = [{"Date": dt.date(2026,8,27), "Shipment No": made,
           for r in lines]
 b2, ids = entry.append_moves(b, picked, "qatar.store", MKT)
 s2,m2,c2,cfg2,e2 = engine.load(io.BytesIO(b2))
-eq("one row per item", len(m2), len(m1) + 4)
-eq("each row has its own id", len(set(ids)), 4)
+eq("one row per item", len(m2), len(m1) + len(items))
+eq("each row has its own id", len(set(ids)), len(items))
 eq("no entry errors", len(e2), 0)
 st2 = engine.stock_by_item(s2, m2, cfg2["as_of"])
-eq("all 140 boxes are in stock",
-   float(st2[st2["Shipment"] == made]["Store"].sum()), 140)
+eq(f"all {TOTAL} boxes are in stock",
+   float(st2[st2["Shipment"] == made]["Store"].sum()), TOTAL)
 lines2 = entry_ui.expected(s2, m2, made)
 ck("the checklist is now empty", all(r["done"] for r in lines2))
 
@@ -95,18 +99,20 @@ import openpyxl
 wb = openpyxl.load_workbook(io.BytesIO(b2))
 over = {"Date": dt.date(2026,8,27), "Shipment No": made, "Movement": "Received",
         "Item Name": lines[0]["item"], "In": 1}
-ck("nothing more can be received once it is all in",
-   entry.check_quantities(over, wb) != "OK",
+# more than shipped is allowed and reported, not refused
+ck("receiving beyond the shipment is allowed",
+   entry.check_quantities(over, wb) == "OK",
    entry.check_quantities(over, wb)[:60])
-try:
-    entry.append_moves(b2, [over], "qatar.store", MKT)
-    ck("and the writer refuses it", False, "it was written")
-except ValueError as ex:
-    ck("and the writer refuses it", True, str(ex)[:50])
+b3, _ = entry.append_moves(b2, [over], "qatar.store", MKT)
+s3, m3, c3, cfg3, e3 = engine.load(io.BytesIO(b3))
+eq("and written", len(m3), len(engine.load(io.BytesIO(b2))[1]) + 1)
+st3 = engine.stock_by_item(s3, m3, cfg3["as_of"])
+ck("and it shows as over-received",
+   int((st3["Received"] - st3["Shipped Qty"] > 0.001).sum()) >= 1)
 before = len(engine.load(io.BytesIO(b))[1])
 try:
-    entry.append_moves(b, picked[:2] + [dict(picked[2], **{"In": 99999})],
-                       "qatar.store", MKT)
+    entry.append_moves(b, picked[:2] + [dict(picked[2],
+                       **{"Movement": "Teleport"})], "qatar.store", MKT)
     ck("one bad line stops the whole checklist", False, "it wrote")
 except ValueError:
     ck("one bad line stops the whole checklist", True)

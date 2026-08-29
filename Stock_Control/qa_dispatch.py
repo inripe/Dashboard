@@ -1,5 +1,5 @@
 """QA for the dispatch engine. Synthetic orders, known answers."""
-import pandas as pd, numpy as np, engine, dispatch, sys
+import pandas as pd, numpy as np, engine, dispatch, sys, qa_book
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
@@ -9,7 +9,7 @@ def eq(n,got,want,tol=1e-6):
     ok = abs(float(got)-float(want)) <= tol
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}: got {got}, want {want}")
 
-ship,moves,count,cfg,errs=engine.load("INRIPE_Stock_Entry_v1.xlsx")
+ship,moves,count,cfg,errs=engine.load(qa_book.book())
 stock=engine.stock_by_item(ship,moves,cfg["as_of"])
 codes=set(cfg["item_names"].keys())
 avail=stock.groupby("Item")["Store"].sum()

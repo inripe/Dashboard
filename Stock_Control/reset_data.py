@@ -38,9 +38,11 @@ def clear(data: bytes):
         ws = wb[sheet]
         before[sheet] = count_rows(wb, sheet)
         last_col = ws.max_column
-        for r in range(FIRST, ws.max_row + 1):
-            for c in range(1, last_col + 1):
-                ws.cell(r, c).value = None
+        # delete the rows rather than blanking them. Blank cells still count
+        # towards the sheet's size, so the next entry would land far below the
+        # table and fall outside it.
+        if ws.max_row >= FIRST:
+            ws.delete_rows(FIRST, ws.max_row - FIRST + 1)
         # a table needs at least one row under its header, so it keeps one
         # empty row rather than being deleted and rebuilt differently
         if tbl in ws.tables:

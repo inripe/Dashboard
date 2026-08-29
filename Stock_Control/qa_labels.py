@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Direction prefix and Arabic on every movement a worker can pick."""
-import sys, qa_book, labels as L, entry_ui, engine
+import sys, qa_book, labels as L, entry_ui, engine, qa_book
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
@@ -50,15 +50,17 @@ ck("arabic can be switched off", L.move("Received", arabic=False)=="\u2193 IN  R
    L.move("Received", arabic=False))
 
 print("=== E. THE CONFIRMATION SHOWS BOTH ===")
-sid=s[s.Market=="Qatar"]["Shipment ID"].iloc[0]
+MKT = s["Market"].dropna().iloc[0]
+USER = qa_book.entry_user(cfg, MKT) or qa_book.entry_user(cfg) or "manual"
+sid=s[s.Market==MKT]["Shipment ID"].iloc[0]
 it=s[s["Shipment ID"]==sid]["Item Name"].iloc[0]
 t=entry_ui._sentence({"Shipment No":sid,"Movement":"Received","Item Name":it,"In":48},
-                     "Received","Qatar","qatar.store")
+                     "Received",MKT,USER)
 ck("english sentence", "48 boxes" in t and it in t)
 ck("arabic line", L.MOVES["Received"][1] in t)
 ck("says which way stock moves", "stock goes up" in t, t[-90:])
 t2=entry_ui._sentence({"Shipment No":sid,"Movement":"Scrap","Item Name":it,"Out":2,
-                       "Reason":"Quality"},"Scrap","Qatar","x")
+                       "Reason":"Quality"},"Scrap",MKT,"x")
 ck("an out movement says stock goes down", "stock goes down" in t2)
 ck("arabic is right to left", 'direction:rtl' in t)
 
@@ -67,14 +69,15 @@ app=open("app.py").read()
 ck("no bilingual helper anywhere in the dashboard", app.count("L.t(")==0, app.count("L.t("))
 import re
 # arabic is allowed on the entry sign-in, in the entry tab, and in the guide
-guide_from = app.index("How a shipment flows")
-guide_to = guide_from + 4000
+# the whole guide, wherever it sits in the file
+guide_from = app.index("def render_guide")
+guide_to = app.index("def custom_panel")
 entry_from = app.index("# ============================= RECORD")
 outside=[]
 for m in re.finditer(r"[\u0600-\u06FF]+", app):
     i=m.start(); line=app[:i].count("\n")+1
     ctx=app[max(0,i-260):i+80]
-    in_guide = guide_from <= i < guide_to
+    in_guide = (guide_from <= i < guide_to) or "render_guide" in ctx
     in_entry = i >= entry_from
     in_modes = "MODE ==" in ctx or "What are you doing" in ctx
     if not (in_guide or in_entry or in_modes or 'tab == "entry"' in ctx):

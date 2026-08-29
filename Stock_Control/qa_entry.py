@@ -11,7 +11,10 @@ SRC=qa_book.book()
 base=open(SRC,"rb").read()
 s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
 st0=engine.stock_by_item(s0,m0,cfg0["as_of"])
-SHIP=s0[s0.Market=="Qatar"]["Shipment ID"].iloc[0]
+# whichever market has data, not always Qatar
+MKT = s0["Market"].dropna().iloc[0]
+USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
+SHIP=s0[s0.Market==MKT]["Shipment ID"].iloc[0]
 ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
 # an item that is genuinely NOT on this shipment, whatever the workbook holds
 NOT_IN=next((x for x in (cfg0.get("item_names") or {}).values()
@@ -19,7 +22,7 @@ NOT_IN=next((x for x in (cfg0.get("item_names") or {}).values()
 # a count adjustment is used as the everyday movement here: this suite is about
 # the writer, and a count adjustment is not limited by what was shipped
 def row(mv="Count Adjustment - Add", qty=5, item=None, **kw):
-    d={"Date":entry.market_now("Qatar").date(),"Shipment No":SHIP,"Movement":mv,
+    d={"Date":entry.market_now(MKT).date(),"Shipment No":SHIP,"Movement":mv,
        "Item Name":item if item is not None else ITEM}
     d["In" if mv in ("Received","Return to Saleable","Returned",
                      "Count Adjustment - Add") else "Out"]=qty
@@ -27,13 +30,14 @@ def row(mv="Count Adjustment - Add", qty=5, item=None, **kw):
     d.update(kw); return d
 
 print("=== A. A ROW LANDS, AND NOTHING ELSE MOVES ===")
-b1,ids=entry.append_moves(base,[row()], "qatar.store","Qatar")
+b1,ids=entry.append_moves(base,[row()], USER, MKT)
 s1,m1,c1,cfg1,e1=engine.load(io.BytesIO(b1))
 eq("one row added", len(m1), len(m0)+1)
 eq("shipments untouched", len(s1), len(s0))
 eq("counts untouched", len(c1), len(c0))
 ck("one id returned", len(ids)==1, ids)
-ck("id looks right", ids[0].startswith("Q-") and len(ids[0])==15, ids[0])
+LET = {"Qatar":"Q","UAE":"U","KSA":"K","Egypt":"E"}.get(MKT, MKT[0].upper())
+ck("id looks right", ids[0].startswith(f"{LET}-") and len(ids[0])==15, ids[0])
 eq("no new entry errors", len(e1), len(e0))
 st1=engine.stock_by_item(s1,m1,cfg1["as_of"])
 eq("stock moved by the quantity", st1.Store.sum(), st0.Store.sum()+5)
@@ -41,10 +45,10 @@ eq("stock moved by the quantity", st1.Store.sum(), st0.Store.sum()+5)
 print("=== B. AUDIT TRAIL ===")
 new=m1.iloc[-1]
 ck("entry id written", new["Entry ID"]==ids[0], new["Entry ID"])
-ck("user written", new["Entered by"]=="qatar.store", new["Entered by"])
+ck("user written", new["Entered by"]==USER, new["Entered by"])
 ck("timestamp written", pd.notna(new["Entered at"]), new["Entered at"])
 ck("timestamp is market time",
-   abs((pd.Timestamp(new["Entered at"])-entry.market_now("Qatar")).total_seconds())<120,
+   abs((pd.Timestamp(new["Entered at"])-entry.market_now(MKT)).total_seconds())<120,
    new["Entered at"])
 
 print("=== C. FORMULAS ON THE NEW ROW ===")
@@ -69,15 +73,15 @@ end0=int("".join(ch for ch in ref0.split(":")[1] if ch.isdigit()))
 end1=int("".join(ch for ch in ref1.split(":")[1] if ch.isdigit()))
 eq("range extended by one", end1, end0+1)
 ck("the new row is inside the table", end1>=r, f"{ref1} vs row {r}")
-b_many,_=entry.append_moves(base,[row() for _ in range(5)],"qatar.store","Qatar")
+b_many,_=entry.append_moves(base,[row() for _ in range(5)],USER, MKT)
 wm=openpyxl.load_workbook(io.BytesIO(b_many))["MOVES"]
 endm=int("".join(ch for ch in wm.tables["tblMoves"].ref.split(":")[1] if ch.isdigit()))
 eq("five rows extend it by five", endm, end0+5)
 
 print("=== E. IDS ARE SEQUENTIAL AND NEVER REUSED ===")
-b2,ids2=entry.append_moves(b1,[row()],"qatar.store","Qatar")
+b2,ids2=entry.append_moves(b1,[row()],USER, MKT)
 ck("second id follows the first", ids2[0]>ids[0], f"{ids[0]} -> {ids2[0]}")
-b3,ids3=entry.append_moves(b2,[row(),row(qty=6)],"qatar.store","Qatar")
+b3,ids3=entry.append_moves(b2,[row(),row(qty=6)],USER, MKT)
 ck("a batch gets distinct ids", len(set(ids3))==2, ids3)
 allids=[i for i in engine.load(io.BytesIO(b3))[1]["Entry ID"].dropna()]
 ck("no id appears twice", len(allids)==len(set(allids)), f"{len(allids)} ids")
@@ -85,21 +89,21 @@ ck("markets get different prefixes",
    entry.next_entry_id(openpyxl.load_workbook(io.BytesIO(base))["MOVES"],"UAE").startswith("U-"))
 
 print("=== F. DOUBLE TAP IS CAUGHT ===")
-dup=entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],row(),"Qatar")
+dup=entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],row(),MKT)
 ck("an identical entry moments ago is found", dup is not None,
    dup["entry_id"] if dup else "none")
 ck("a different quantity is not a duplicate",
    entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],
-                        row(qty=99),"Qatar") is None)
+                        row(qty=99),MKT) is None)
 ck("a different movement is not a duplicate",
    entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],
-                        row(mv="Scrap",qty=5,Reason="Damage"),"Qatar") is None)
+                        row(mv="Scrap",qty=5,Reason="Damage"),MKT) is None)
 ck("nothing matches in an empty window",
    entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b1))["MOVES"],
-                        row(),"Qatar",within_minutes=0) is None)
+                        row(),MKT,within_minutes=0) is None)
 
 print("=== G. VOID ===")
-b4=entry.void_entry(b1,ids[0],"qatar.store","Qatar")
+b4=entry.void_entry(b1,ids[0],USER, MKT)
 s4,m4,c4,cfg4,e4=engine.load(io.BytesIO(b4))
 _raw=lambda b: sum(1 for r in range(7, openpyxl.load_workbook(io.BytesIO(b))["MOVES"].max_row+1)
                    if openpyxl.load_workbook(io.BytesIO(b))["MOVES"].cell(r,1).value not in (None,""))
@@ -110,16 +114,16 @@ eq("stock returns to what it was", st4.Store.sum(), st0.Store.sum())
 wv=openpyxl.load_workbook(io.BytesIO(b4))["MOVES"]
 vr=[r for r in range(7,wv.max_row+1) if wv.cell(r,cmap["Entry ID"]).value==ids[0]][0]
 ck("void flag set", str(wv.cell(vr,cmap["Void"]).value).lower()=="yes")
-ck("who voided it is recorded", "voided by qatar.store" in str(wv.cell(vr,cmap["Note"]).value),
+ck("who voided it is recorded", f"voided by {USER}" in str(wv.cell(vr,cmap["Note"]).value),
    wv.cell(vr,cmap["Note"]).value)
 try:
-    entry.void_entry(b4,ids[0],"x","Qatar"); ck("voiding twice is refused", False)
+    entry.void_entry(b4,ids[0],"x",MKT); ck("voiding twice is refused", False)
 except ValueError as ex: ck("voiding twice is refused", "already" in str(ex))
 try:
-    entry.void_entry(b4,"Q-19990101-0001","x","Qatar"); ck("unknown id is refused", False)
+    entry.void_entry(b4,"Q-19990101-0001","x",MKT); ck("unknown id is refused", False)
 except ValueError as ex: ck("unknown id is refused", "not found" in str(ex))
 ck("a voided row is ignored by the duplicate check",
-   entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b4))["MOVES"],row(),"Qatar") is None)
+   entry.find_duplicate(openpyxl.load_workbook(io.BytesIO(b4))["MOVES"],row(),MKT) is None)
 
 print("=== H. NOTHING IS EVER EDITED OR DELETED ===")
 before=engine.load(io.BytesIO(base))[1]
@@ -143,19 +147,19 @@ bads=[("unknown movement", row(mv="Teleport")),
       ("unknown shipment", dict(row(), **{"Shipment No":"NO. 999"})),
       ("item not in shipment", row(item=NOT_IN)),
       ("zero quantity", row(qty=0)),
-      ("wrong direction", {"Date":entry.market_now("Qatar").date(),
+      ("wrong direction", {"Date":entry.market_now(MKT).date(),
                            "Shipment No":SHIP,"Movement":"Received",
                            "Item Name":ITEM,"Out":5}),
       ("missing reason", row(mv="Scrap",qty=1))]
 bads=[(l,b) for l,b in bads if not (l=="item not in shipment" and NOT_IN is None)]
 for label,bad in bads:
     try:
-        entry.append_moves(base,[bad],"qatar.store","Qatar")
+        entry.append_moves(base,[bad],USER, MKT)
         ck(f"refused: {label}", False, "it was written")
     except ValueError as ex:
         ck(f"refused: {label}", True, str(ex)[:52])
 n_before=len(engine.load(io.BytesIO(base))[1])
-try: entry.append_moves(base,[row(),row(mv="Teleport")],"qatar.store","Qatar")
+try: entry.append_moves(base,[row(),row(mv="Teleport")],USER, MKT)
 except ValueError: pass
 eq("a batch with one bad row writes nothing", len(engine.load(io.BytesIO(base))[1]), n_before)
 

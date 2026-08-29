@@ -1,5 +1,5 @@
 """The SharePoint write path: conflicts, retries, and nothing lost."""
-import sys, qa_book, io, types, engine, entry
+import sys, qa_book, io, types, engine, entry, qa_book
 P,F=[],[]
 def ck(n,ok,note=""):
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}  {note}")
@@ -44,17 +44,22 @@ ck("the clash has its own error type", issubclass(sp.ConflictError, RuntimeError
 print("=== C. RETRY AFTER A CLASH LOSES NOTHING ===")
 base=open(qa_book.book(),"rb").read()
 s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
-SHIP=s0[s0.Market=="Qatar"]["Shipment ID"].iloc[0]
+# whichever market actually has data - the sheet does not always start with
+# Qatar, and a suite that assumes it collapses on a UAE-only workbook
+MKT = s0["Market"].dropna().iloc[0]
+USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
+OTHER = qa_book.entry_user(cfg0) or USER
+SHIP=s0[s0.Market==MKT]["Shipment ID"].iloc[0]
 ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
 # scrap is used here rather than received: this suite is about two people
 # saving at once, not about quantity limits
-mk=lambda q: {"Date":entry.market_now("Qatar").date(),"Shipment No":SHIP,
+mk=lambda q: {"Date":entry.market_now(MKT).date(),"Shipment No":SHIP,
               "Movement":"Scrap","Item Name":ITEM,"Out":q,"Reason":"Damage"}
 # person A and person B both start from the same file
-a,_=entry.append_moves(base,[mk(3)],"qatar.store","Qatar")
-b,_=entry.append_moves(base,[mk(7)],"uae.store","Qatar")
+a,_=entry.append_moves(base,[mk(3)],USER, MKT)
+b,_=entry.append_moves(base,[mk(7)],OTHER, MKT)
 # A wins the race; B is refused and re-appends onto A's file
-b_retry,_=entry.append_moves(a,[mk(7)],"uae.store","Qatar")
+b_retry,_=entry.append_moves(a,[mk(7)],OTHER, MKT)
 sf,mf,cf,cfgf,ef=engine.load(io.BytesIO(b_retry))
 ck("both entries survive the retry", len(mf)==len(m0)+2, f"{len(m0)} -> {len(mf)}")
 qtys=list(mf.tail(2)["Qty"])
@@ -65,9 +70,11 @@ ck("the naive overwrite would have lost one",
    len(engine.load(io.BytesIO(b))[1])==len(m0)+1, "b alone has only one new row")
 
 print("=== D. TWO MARKETS NEVER COLLIDE IN IDS ===")
-q,_=entry.append_moves(base,[mk(1)],"qatar.store","Qatar")
+q,_=entry.append_moves(base,[mk(1)],USER, MKT)
 ids_q=[i for i in engine.load(io.BytesIO(q))[1]["Entry ID"].dropna()]
-ck("qatar ids start with Q", all(str(i).startswith("Q-") for i in ids_q), ids_q[-1:])
+LET = {"Qatar":"Q","UAE":"U","KSA":"K","Egypt":"E"}.get(MKT, MKT[0].upper())
+ck(f"{MKT} ids start with {LET}",
+   all(str(i).startswith(f"{LET}-") for i in ids_q), ids_q[-1:])
 u_id=entry.next_entry_id(__import__("openpyxl").load_workbook(io.BytesIO(q))["MOVES"],"UAE")
 ck("uae ids start with U", u_id.startswith("U-"), u_id)
 ck("a uae id cannot equal a qatar one", u_id not in ids_q)

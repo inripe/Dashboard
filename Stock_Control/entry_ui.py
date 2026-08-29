@@ -153,9 +153,16 @@ def limits(moves, ship, shipment, item, movement):
     if movement in OUT and movement != "Not received":
         return in_store, f"{in_store:,.0f} in store for this item"
     if movement == "Received":
-        room = sent - q("Received", item)
-        return max(room, 0), (f"{sent:,.0f} shipped, {q('Received', item):,.0f} "
-                              f"already received, {max(room,0):,.0f} left")
+        # no cap: more than shipped is allowed, because the shipped figure is
+        # sometimes typed wrong and refusing would only hide it
+        got = q("Received", item)
+        room = sent - got
+        note = f"{sent:,.0f} shipped, {got:,.0f} already received"
+        if room > 0:
+            note += f", {room:,.0f} left"
+        else:
+            note += " - anything more will be flagged in Data check"
+        return None, note
     if movement == "Not received":
         room = sent - q("Received", item) - q("Not received", item)
         return max(room, 0), (f"{sent:,.0f} shipped, {q('Received', item):,.0f} "

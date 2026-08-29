@@ -114,8 +114,6 @@ refuse = [
 ]
 # and the quantity guards, against the shipment built in section C
 qty_refuse = [
-  ("more received than was shipped",
-   {**mv("Received", **{"Item Name":ITEM,"In":9999}), "Shipment No":sid}),
   ("more scrapped than is in the store",
    {**mv("Scrap", **{"Item Name":ITEM,"Out":9999,"Reason":"Damage"}),
     "Shipment No":sid}),
@@ -127,6 +125,12 @@ for label,row in qty_refuse:
     ck("refused: "+label,
        entry.check_quantities(row, wb_now)!="OK",
        entry.check_quantities(row, wb_now)[:50])
+# receiving more than shipped is deliberately allowed: the shipped figure is
+# sometimes typed wrong, and refusing would hide it rather than surface it
+_over = {**mv("Received", **{"Item Name":ITEM,"In":9999}), "Shipment No":sid}
+ck("allowed: more received than was shipped",
+   entry.check_quantities(_over, wb_now)=="OK",
+   entry.check_quantities(_over, wb_now)[:50])
 for label,row in refuse:
     if row is None: continue
     ck("refused: "+label, entry.validate(row, lk)!="OK", entry.validate(row, lk))
@@ -218,6 +222,27 @@ ck("only entry.py writes to the workbook",
 ck("uploads always carry a version",
    "If-Match" in open("sharepoint_loader.py").read())
 ck("a clash is retried, not ignored", "ConflictError" in app)
+
+print("=== M. A NEW COLUMN NEVER PUSHES ANOTHER OUT ===")
+# the reader used to take a fixed number of columns, so adding PO Qty silently
+# dropped Check off the end of SHIPMENTS
+import add_po as _ap
+_p, _heads = _ap.add(base)
+if _p is not None:
+    _s, _m, _c, _cfg, _e = engine.load(io.BytesIO(_p))
+    ck("the new column is read", "PO Qty" in _s.columns, list(_s.columns))
+    ck("and the one after it survives", "Check" in _s.columns, list(_s.columns))
+    ck("nothing else was lost",
+       set(engine.load(io.BytesIO(base))[0].columns) <= set(_s.columns),
+       sorted(set(engine.load(io.BytesIO(base))[0].columns) - set(_s.columns)))
+    eq("the same rows come back", len(_s), len(s0))
+    eq("no entry errors", len(_e), 0)
+else:
+    ck("PO Qty is already there", True)
+src_e = open("engine.py").read()
+ck("the reader no longer caps the columns",
+   "usecols=range(ncols)" not in src_e)
+ck("and says why", "must not push the last one out of range" in src_e)
 
 print()
 for l in F: print(l)

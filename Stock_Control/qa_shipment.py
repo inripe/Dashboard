@@ -112,11 +112,13 @@ for _i,_mk in enumerate(["Qatar","UAE","KSA","Egypt"]):
 _wb.save("/tmp/qa_m4.xlsx")
 _s,_m,_c,_cfg,_e=engine.load("/tmp/qa_m4.xlsx")
 eq("MASTER lists four markets", len(_cfg.get("markets") or []), 4)
-ck("shipments only cover one so far",
-   set(_s["Market"].dropna())=={"Qatar"}, sorted(set(_s["Market"].dropna())))
-_offer=sorted(_cfg.get("markets") or [])
-ck("the form still offers all four", set(_offer)=={"Qatar","UAE","KSA","Egypt"}, _offer)
-ck("a market with no shipment is offered", "UAE" in _offer)
+_have = set(_s["Market"].dropna())
+_offer = sorted(_cfg.get("markets") or [])
+ck("not every market has a shipment yet", len(_have) < 4, sorted(_have))
+ck("the form still offers all four",
+   set(_offer)=={"Qatar","UAE","KSA","Egypt"}, _offer)
+ck("a market with no shipment is still offered",
+   bool(set(_offer) - _have), sorted(set(_offer) - _have))
 ui=open("entry_ui.py").read()
 ck("the list comes from MASTER, not from shipments",
    'cfg.get("markets")' in ui and "otherwise a market can never receive" in ui)
