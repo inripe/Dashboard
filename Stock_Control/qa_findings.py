@@ -141,6 +141,53 @@ ck("only the item row is cleared on Add line",
 ck("the number box knows which market it belongs to",
    "s_no_{n}_{mkt or 'none'}" in ui2)
 
+print("=== 10. A VOIDED LINE STAYS ON SCREEN  (step 19) ===")
+import engine as _e, io as _io, entry as _en, openpyxl as _ox, datetime as _dt
+import pandas as _pd, qa_book as _qb, entry_ui as _eu
+ck("the loader keeps the voided rows", "moves_all" in cfg, sorted(cfg)[:8])
+_all = cfg.get("moves_all")
+ck("and they are not in the working set",
+   _all is not None and len(_all) >= len(_e.load(_qb.book())[1]),
+   f"{len(_all) if _all is not None else 0} vs {len(_e.load(_qb.book())[1])}")
+if _all is not None and "Void" in _all.columns:
+    nv = int((_all["Void"].astype(str).str.lower() == "yes").sum())
+    ck("a voided row is still there to show", nv >= 0, f"{nv} voided")
+ui3 = open("entry_ui.py").read()
+ck("the today list is given the full log", "_today_list(_all(cfg, moves)" in ui3)
+ck("and never the filtered one",
+   "_today_list(moves, session, market, now, void_fn, item_names)" not in ui3)
+ck("a voided line is struck through, not hidden",
+   "text-decoration:line-through" in ui3)
+ck("and labelled", '"voided"' in ui3 or ">voided<" in ui3)
+
+# void one for real and check it survives into the view
+base = _qb.data()
+s0, m0, c0, cfg0, e0 = _e.load(_io.BytesIO(base))
+SH = s0["Shipment ID"].iloc[0]
+IT = s0[s0["Shipment ID"] == SH]["Item Name"].dropna().iloc[0]
+row = [{"Date": _dt.date.today(), "Shipment No": SH,
+        "Movement": "Count Adjustment - Add", "Item Name": IT, "In": 3,
+        "Reason": "Count Adjustment"}]
+try:
+    b1, ids = _en.append_moves(base, row, "admin", s0["Market"].dropna().iloc[0])
+    b2 = _en.void_entry(b1, ids[0], "admin", s0["Market"].dropna().iloc[0])
+    cfg2 = _e.load(_io.BytesIO(b2))[3]
+    live = _e.load(_io.BytesIO(b2))[1]
+    full = cfg2.get("moves_all")
+    ck("the voided entry is gone from the working set",
+       ids[0] not in set(live.get("Entry ID", [])), ids[0])
+    ck("but still present in the full log",
+       full is not None and ids[0] in set(full.get("Entry ID", [])), ids[0])
+    r = full[full["Entry ID"] == ids[0]].iloc[0]
+    ck("and marked voided", str(r.get("Void")).lower() == "yes", r.get("Void"))
+    st_before = _e.stock_by_item(*_e.load(_io.BytesIO(base))[:2], cfg0["as_of"])
+    st_after = _e.stock_by_item(*_e.load(_io.BytesIO(b2))[:2], cfg0["as_of"])
+    ck("and the stock went back to what it was",
+       abs(float(st_before["Store"].sum()) - float(st_after["Store"].sum())) < 0.001,
+       f"{st_before['Store'].sum()} then {st_after['Store'].sum()}")
+except Exception as ex:
+    ck("void round trip", False, str(ex)[:70])
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")

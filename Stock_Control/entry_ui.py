@@ -279,7 +279,15 @@ def render_received(ship, moves, cfg, session, sid, market, now, save_fn,
         st.rerun()
 
 
+def _all(cfg, moves):
+    """The full log, voided rows included. A line that simply disappears when
+    you void it leaves the person unsure whether anything happened at all."""
+    full = cfg.get("moves_all")
+    return full if full is not None and len(full) else moves
+
+
 def render_today(moves, session, cfg, void_fn):
+    moves = _all(cfg, moves)
     """What this person entered today. Its own tab, so nobody has to scroll
     past the whole form to check that a save landed."""
     # a market with entries today comes first, so an admin does not land on a
@@ -343,7 +351,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
              f"create one - movements are always recorded against a shipment.")
             + f"\n\n{market}: لا توجد شحنة مفتوحة")
         if show_today:
-            _today_list(moves, session, market, now, void_fn, item_names)
+            _today_list(_all(cfg, moves), session, market, now, void_fn, item_names)
         return
 
     moves_allowed = (WORKER_MOVES if str(session.get("role", "")).lower() != "admin"
@@ -365,7 +373,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
                     'the form.  &nbsp;·&nbsp;  اختر ماذا حدث</div>',
                     unsafe_allow_html=True)
         if show_today:
-            _today_list(moves, session, market, now, void_fn, item_names)
+            _today_list(_all(cfg, moves), session, market, now, void_fn, item_names)
         return
     spec = NEEDS.get(mv, {})
 
@@ -392,7 +400,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
             render_received(ship, moves, cfg, session, sid, market, now,
                             save_fn, lines, n)
             if show_today:
-                _today_list(moves, session, market, now, void_fn, item_names)
+                _today_list(_all(cfg, moves), session, market, now, void_fn, item_names)
             return
 
     item = None
@@ -490,7 +498,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
             _reset(keep_shipment=False)
             st.rerun()
         if show_today:
-            _today_list(moves, session, market, now, void_fn, item_names)
+            _today_list(_all(cfg, moves), session, market, now, void_fn, item_names)
         return
     st.markdown(f'<div class="card" style="border-left:3px solid #2E75B6;'
                 f'font-size:1.02rem;line-height:1.65">{words}</div>',
@@ -517,7 +525,7 @@ def render(ship, moves, clear, stock, cfg, session, save_fn, void_fn,
         st.rerun()
 
     if show_today:
-        _today_list(moves, session, market, now, void_fn, item_names)
+        _today_list(_all(cfg, moves), session, market, now, void_fn, item_names)
 
 
 def _sentence(row, mv, market, user):

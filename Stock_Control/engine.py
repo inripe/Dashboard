@@ -61,8 +61,13 @@ def load(path_or_buf):
         disp["Date"] = pd.to_datetime(disp["Date"])
     except Exception:
         disp = pd.DataFrame(columns=["Date","Market","Order","Shipment","Item","Qty","Courier"])
+    # a voided row is kept, so the Today list can show it struck through -
+    # a line that simply vanishes leaves the person wondering what happened.
+    # Everything downstream still ignores it.
+    moves_all = moves.copy()
     if "Void" in moves.columns:
-        moves = moves[moves["Void"].astype(str).str.strip().str.lower() != "yes"].reset_index(drop=True)
+        moves = moves[moves["Void"].astype(str).str.strip().str.lower()
+                      != "yes"].reset_index(drop=True)
     if len(disp):
         extra = pd.DataFrame({
             "Date": disp["Date"], "Market": disp["Market"], "Shipment": disp["Shipment"],
@@ -139,6 +144,7 @@ def load(path_or_buf):
         "var_tol": float(cfg.get("Count variance tolerance", 0.02)),
         "markets": market_list,
         "item_names": item_names,
+        "moves_all": moves_all,
         "users": users,
         "reasons": reasons,
         "couriers_by_market": couriers_by_market,
