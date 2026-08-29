@@ -101,6 +101,128 @@ def _can_fill(need, left):
 
 _LAST_PASSED = None
 
+# Every criterion a person can rank. The wording is deliberately plain: these
+# are read by whoever runs dispatch each morning, not by an analyst.
+# the two Shopify list fields a person can rank by. Their values are read
+# live, so anything added in Shopify appears here on its own.
+FIELDS = {
+    "exception":  ("Order Exceptions",  "exceptions"),
+    "additional": ("Additional Info",   "additional"),
+}
+
+CRITERIA = [
+    ("exception",  "Special orders first",
+     "From the order's Exceptions field, in the order you rank the values"),
+    ("additional", "Additional info first",
+     "From the order's Additional Info field, in the order you rank the values"),
+    ("age",        "Who has waited longest",
+     "Older orders count for more"),
+    ("scarce",     "Save what we are short of",
+     "Hold back orders wanting an item there is not enough of"),
+    ("boxes",      "Empty the store faster",
+     "Prefer bigger orders, so more stock leaves"),
+    ("orders",     "Serve more customers",
+     "Prefer smaller orders, so more people get something"),
+    ("oldstock",   "Send the oldest boxes first",
+     "Prefer orders that draw on the oldest shipment"),
+]
+CRITERION_LABEL = {k: lbl for k, lbl, _ in CRITERIA}
+
+
+def field_values(orders, which="exception"):
+    """Every value actually present on the orders for one field, most common
+    first. Read from Shopify rather than listed here, so a value added there
+    appears on its own."""
+    key = FIELDS.get(which, FIELDS["exception"])[1]
+    seen = {}
+    for o in orders:
+        for v in (o.get(key) or []):
+            v = str(v).strip()
+            if v:
+                seen[v] = seen.get(v, 0) + 1
+    return sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def exception_values(orders):
+    """Kept for the older callers."""
+    return field_values(orders, "exception")
+
+
+def _order_flags(o, which="exception"):
+    key = FIELDS.get(which, FIELDS["exception"])[1]
+    v = o.get(key)
+    if v is None and which == "exception":
+        v = [o.get("exception")] if o.get("exception") else []
+    return [str(x).strip() for x in (v or []) if str(x).strip()]
+
+
+def score_order(o, rule, ctx):
+    """What one order is worth under a custom rule, and why.
+
+    Returns (score, reason). The reason is shown next to the order in the
+    dispatch list, so nothing is decided by a number nobody can see.
+    """
+    score, why = 0.0, []
+    w = rule.get("weights", {})
+    on = rule.get("on", {})
+
+    # both list fields work the same way: the values you ranked, in your order
+    for which in ("exception", "additional"):
+        if not (on.get(which) and w.get(which)):
+            continue
+        ranked = (rule.get("value_order") or {}).get(which) \
+            or (rule.get("flag_order") if which == "exception" else []) or []
+        vals = _order_flags(o, which)
+        for i, f in enumerate(ranked):
+            if f in vals:
+                score += w[which] * (len(ranked) - i) / max(len(ranked), 1)
+                why.append(f)
+                break
+    if on.get("age") and w.get("age"):
+        days = ctx["age_of"](o)
+        score += w["age"] * min(days, 14) / 14
+        if days >= 1:
+            why.append(f"waited {days:.0f}d")
+    if on.get("scarce") and w.get("scarce"):
+        short = ctx.get("short_items") or set()
+        wanted = sum(q for sku, q in o["_need"].items() if sku in short)
+        if wanted:
+            score -= w["scarce"] * min(wanted, 10) / 10
+            why.append(f"wants {wanted} short")
+    if on.get("boxes") and w.get("boxes"):
+        score += w["boxes"] * min(o["_boxes"], 20) / 20
+    if on.get("orders") and w.get("orders"):
+        score += w["orders"] * (1 - min(o["_boxes"], 20) / 20)
+    if on.get("oldstock") and w.get("oldstock"):
+        age = ctx.get("stock_age", {})
+        oldest = max((age.get(sku, 0) for sku in o["_need"]), default=0)
+        score += w["oldstock"] * min(oldest, 14) / 14
+        if oldest >= 3:
+            why.append(f"oldest stock {oldest:.0f}d")
+    if not why:
+        why.append(f"{o['_boxes']} boxes")
+    return score, " · ".join(why[:3])
+
+
+def describe(rule):
+    """The rule in a sentence, so it can be read back before it is trusted."""
+    on = [k for k, _, _ in CRITERIA if rule.get("on", {}).get(k)]
+    if not on:
+        return "Nothing is switched on, so orders go oldest first."
+    parts = []
+    for which in ("exception", "additional"):
+        vals = (rule.get("value_order") or {}).get(which) \
+            or (rule.get("flag_order") if which == "exception" else [])
+        if which in on and vals:
+            parts.append(f"{FIELDS[which][0]}: " + ", then ".join(
+                f"<b>{f}</b>" for f in vals))
+    rest = [CRITERION_LABEL[k].lower() for k in on
+            if k not in ("exception", "additional")]
+    if rest:
+        parts.append(("then " if parts else "") + ", ".join(rest))
+    return ". ".join(p[0].upper() + p[1:] for p in parts) + "."
+
+
 STRATEGIES = {
     "Most orders":    {"w": 12, "when": "Backlog of waiting customers"},
     "Balanced":       {"w": 3,  "when": "Normal day"},
@@ -185,7 +307,8 @@ def _optimise(pool, left, w, iters=None, seed=0):
     return [pool[i] for i in best]
 
 
-def allocate(orders, stock, item_codes, strategy="Balanced", cap_days=3, as_of=None):
+def allocate(orders, stock, item_codes, strategy="Balanced", cap_days=3,
+             as_of=None, rule=None):
     """Return (dispatch_df, short_df, excluded_df, pool_after).
 
     Order of business:
@@ -212,19 +335,46 @@ def allocate(orders, stock, item_codes, strategy="Balanced", cap_days=3, as_of=N
         for s, q in o["_need"].items():
             left[s] -= q
 
-    picked, rule = [], {}
+    picked, label, why_of = [], {}, {}
     for o in sorted([o for o in elig if o["_urgent"]], key=lambda o: o["_placed"]):
         if _can_fill(o["_need"], left):
-            take(o); picked.append(o); rule[o["name"]] = "URG"
+            take(o); picked.append(o); label[o["name"]] = "URG"
+            why_of[o["name"]] = "marked urgent"
 
     if cap_days is not None:
         aged = [o for o in elig if o not in picked
                 and (today - o["_placed"].normalize()).days >= cap_days]
         for o in sorted(aged, key=lambda o: o["_placed"]):
             if _can_fill(o["_need"], left):
-                take(o); picked.append(o); rule[o["name"]] = "CAP"
+                take(o); picked.append(o); label[o["name"]] = "CAP"
+            why_of[o["name"]] = f"waited {(today - o['_placed'].normalize()).days:.0f}d"
 
     rest = [o for o in elig if o not in picked]
+
+    if strategy == "Custom" and rule:
+        # A rule the person set themselves. Every remaining order is scored,
+        # the highest first, and the reason is kept so the list can say why
+        # each order is in it.
+        want = {}
+        for o in rest:
+            for sku, q in o["_need"].items():
+                want[sku] = want.get(sku, 0) + q
+        short = {sku for sku, q in want.items() if q > left.get(sku, 0)}
+        ages = {}
+        for _, r in pool.iterrows():
+            a = (today - pd.Timestamp(r["Arrival Date"]).normalize()).days
+            ages[r["Item"]] = max(ages.get(r["Item"], 0), a)
+        ctx = {"age_of": lambda o: (today - o["_placed"].normalize()).days,
+               "short_items": short, "stock_age": ages}
+        scored = [(score_order(o, rule, ctx), o) for o in rest]
+        for (sc, reason), o in sorted(scored,
+                                      key=lambda x: (-x[0][0], x[1]["_placed"])):
+            if _can_fill(o["_need"], left):
+                take(o); picked.append(o)
+                label[o["name"]] = "FIT"
+                why_of[o["name"]] = reason
+        rest = []
+
     w = STRATEGIES.get(strategy, STRATEGIES["Balanced"])["w"]
     def greedy(order_key):
         l2, got = dict(left), []
@@ -250,10 +400,10 @@ def allocate(orders, stock, item_codes, strategy="Balanced", cap_days=3, as_of=N
            else ((lambda g: (len(g), sum(x["_boxes"] for x in g))) if w >= 12
                  else (lambda g: (w * len(g) + sum(x["_boxes"] for x in g), len(g)))))
     for o in max(runs, key=key):
-        take(o); picked.append(o); rule[o["name"]] = "FIT"
+        take(o); picked.append(o); label[o["name"]] = "FIT"
 
     rows, pool = [], pool.copy()
-    for o in sorted(picked, key=lambda o: ({"URG": 0, "CAP": 1, "FIT": 2}[rule[o["name"]]],
+    for o in sorted(picked, key=lambda o: ({"URG": 0, "CAP": 1, "FIT": 2}[label[o["name"]]],
                                            o["_placed"])):
         for sku, qty in o["_need"].items():
             need = qty
@@ -264,7 +414,9 @@ def allocate(orders, stock, item_codes, strategy="Balanced", cap_days=3, as_of=N
                 pool.at[i, "Avail"] -= t
                 need -= t
                 rows.append({"Order": o["name"], "Placed": o["_placed"].date(),
-                             "Rule": rule[o["name"]], "Item": sku, "Qty": t,
+                             "Rule": label[o["name"]],
+                             "Why": why_of.get(o["name"], ""),
+                             "Item": sku, "Qty": t,
                              "Shipment": pool.at[i, "Shipment"],
                              "Arrival": pool.at[i, "Arrival Date"]})
     dispatch = pd.DataFrame(rows)

@@ -22,6 +22,9 @@ API = "2024-10"
 TIMEOUT = 30
 KEY_STAGE  = ("custom", "order_stage")
 KEY_URGENT = ("custom", "5_order_exceptions")
+# both list fields the person can rank dispatch by. Whatever values exist in
+# Shopify show up on their own - nothing is listed here.
+KEY_ADDINFO = ("custom", "2_order_additional_info_for_sales_customer_service")
 MARKETS = ("Qatar", "UAE", "KSA", "Egypt")
 _token_cache = {}
 
@@ -120,6 +123,8 @@ query($cursor: String, $filter: String) {
       displayFulfillmentStatus displayFinancialStatus
       stage: metafield(namespace:"custom", key:"order_stage") { value }
       urgent: metafield(namespace:"custom", key:"5_order_exceptions") { value }
+      addinfo: metafield(namespace:"custom",
+               key:"2_order_additional_info_for_sales_customer_service") { value }
       lineItems(first: 25) { edges { node { title quantity sku } } }
     } }
   }
@@ -158,7 +163,23 @@ def fetch_orders(market=None, limit_pages: int = 40, days: int | None = 30):
         blk = body["data"]["orders"]
         for e in blk["edges"]:
             n = e["node"]
+            def _list(raw):
+                """The field is a list, so keep every value rather than only
+                asking whether it says urgent."""
+                raw = raw or ""
+                try:
+                    import json as _json
+                    out = _json.loads(raw) if raw.strip().startswith("[") \
+                        else raw.replace(";", ",").split(",")
+                except Exception:
+                    out = [raw]
+                return [str(x).strip() for x in out if str(x).strip()]
+
             urgent_raw = (n.get("urgent") or {}).get("value") or ""
+            # the field is a list, so keep every flag rather than only asking
+            # whether it says urgent. New flags then appear on their own.
+            flags = _list(urgent_raw)
+            extra = _list((n.get("addinfo") or {}).get("value"))
             out.append({
                 "name": n["name"],
                 "created": n["createdAt"],
@@ -166,7 +187,9 @@ def fetch_orders(market=None, limit_pages: int = 40, days: int | None = 30):
                 "fulfillment": n.get("displayFulfillmentStatus"),
                 "financial": n.get("displayFinancialStatus"),
                 "stage": (n.get("stage") or {}).get("value"),
-                "urgent": "urgent" in urgent_raw.lower(),
+                "urgent": any("urgent" in f.lower() for f in flags),
+                "exceptions": flags,
+                "additional": extra,
                 "lines": [{"title": li["node"]["title"],
                            "quantity": li["node"]["quantity"],
                            "sku": li["node"].get("sku")}

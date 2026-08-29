@@ -424,6 +424,84 @@ T6  = _slot("Data check")
 T7  = _slot("Guide")
 
 
+def custom_panel(orders, stock, key="cx"):
+    """Let the person build their own rule: pick what matters, rank it, weight
+    it. Everything is on screen - no hidden scoring - and it lasts for this
+    session only, so nobody inherits somebody else's rule tomorrow."""
+    st.markdown("**Your rule**")
+    st.markdown('<div class="note" style="margin-top:-.4rem">Switch on what '
+                'matters and set how much it counts. Anything off is ignored. '
+                'Urgent orders are guaranteed whatever you set here.</div>',
+                unsafe_allow_html=True)
+
+    # equal weights mean nothing dominates, which is where most people want to
+    # start before deciding what matters more than what
+    b1, b2, b3 = st.columns([1, 1, 4])
+    if b1.button("Level all", key=f"{key}_level",
+                 help="Give every criterion the same weight, so none counts "
+                      "for more than another"):
+        for c_, _, _ in dsp.CRITERIA:
+            st.session_state[f"{key}_w_{c_}"] = 5
+        st.rerun()
+    if b2.button("Reset", key=f"{key}_reset",
+                 help="Back to the weights it started with"):
+        for c_, _, _ in dsp.CRITERIA:
+            st.session_state.pop(f"{key}_w_{c_}", None)
+            st.session_state.pop(f"{key}_on_{c_}", None)
+            st.session_state.pop(f"{key}_vals_{c_}", None)
+        st.rerun()
+    on, weights, value_order = {}, {}, {}
+    for code, label, what in dsp.CRITERIA:
+        c1, c2, c3, c4 = st.columns([0.5, 2.4, 2.2, 3])
+        st.session_state.setdefault(f"{key}_on_{code}",
+                                    code in ("exception", "age"))
+        use = c1.checkbox(" ", key=f"{key}_on_{code}",
+                          label_visibility="collapsed")
+        c2.markdown(f'<div style="padding-top:.42rem">{label}</div>',
+                    unsafe_allow_html=True)
+        # seed the value once, then let session state own it, so Level all
+        # and Reset can change it without Streamlit complaining
+        st.session_state.setdefault(
+            f"{key}_w_{code}",
+            {"exception": 10, "additional": 6, "age": 7}.get(code, 5))
+        wt = c3.slider(" ", 0, 10, key=f"{key}_w_{code}",
+                       label_visibility="collapsed", disabled=not use)
+        c4.markdown(f'<div class="note" style="padding-top:.5rem">{what}</div>',
+                    unsafe_allow_html=True)
+        on[code], weights[code] = use, wt
+
+        # a field criterion opens its own list of values, read from Shopify
+        if code in dsp.FIELDS and use:
+            title, _ = dsp.FIELDS[code]
+            vals = dsp.field_values(orders, code)
+            if vals:
+                st.markdown(f'<div class="note" style="margin:-.3rem 0 .2rem 0">'
+                            f'Which <b>{title}</b> values count, most important '
+                            f'first. Anything not chosen is ignored.</div>',
+                            unsafe_allow_html=True)
+                picked = st.multiselect(
+                    title, [v for v, _ in vals],
+                    default=[v for v, _ in vals if "urgent" in v.lower()]
+                    if code == "exception" else [],
+                    key=f"{key}_vals_{code}", label_visibility="collapsed",
+                    format_func=lambda v, d=dict(vals): f"{v}  ({d[v]} orders)")
+                value_order[code] = picked
+            else:
+                st.markdown(f'<div class="note" style="margin-top:-.3rem">'
+                            f'No <b>{title}</b> value on any order today, so '
+                            f'this has nothing to work with.</div>',
+                            unsafe_allow_html=True)
+                value_order[code] = []
+
+    rule = {"on": on, "weights": weights, "value_order": value_order,
+            "flag_order": value_order.get("exception", [])}
+    st.markdown(f'<div class="card" style="border-left:3px solid {ACC}">'
+                f'<b>What your rule does</b><div class="note" '
+                f'style="margin-top:.25rem">{dsp.describe(rule)}</div></div>',
+                unsafe_allow_html=True)
+    return rule
+
+
 def _gate(tab, title):
       """Sign-in for one tab. The other seven stay open to everyone."""
       sess = st.session_state.get("auth")
@@ -683,8 +761,32 @@ if MODE == "Dispatch":
                     all_same = len({frozenset(cmpdf.loc[cmpdf.Strategy == n,
                                                         "_sel"].iloc[0])
                                     for n in names}) == 1
-                    strat = st.radio("Strategy", names, index=1, horizontal=True,
+                    names_all = names + ["Custom"]
+                    strat = st.radio("Strategy", names_all, index=1,
+                                     horizontal=True,
                                      label_visibility="collapsed")
+                    custom_rule = None
+                    if strat == "Custom":
+                        custom_rule = custom_panel(orders, d_stock)
+                        _c, _s2, _x2, _p2 = dsp.allocate(
+                            orders, d_stock, codes, "Custom", cap_days,
+                            rule=custom_rule)
+                        _n = _c["Order"].nunique() if len(_c) else 0
+                        _b = float(_c["Qty"].sum()) if len(_c) else 0.0
+                        _sel = set(_c["Order"]) if len(_c) else set()
+                        _elig, _ = dsp.in_scope(orders), None
+                        _wait = [o for o in dsp.screen_orders(orders, codes)[0]
+                                 if o["name"] not in _sel]
+                        _old = max([(pd.Timestamp.now().normalize()
+                                     - pd.to_datetime(o["created"])
+                                     .tz_localize(None).normalize()).days
+                                    for o in _wait], default=0)
+                        view = pd.concat([view, pd.DataFrame([{
+                            "Strategy": "Custom", "Orders": _n, "Boxes out": _b,
+                            "Left in store": float(d_stock["Store"].sum()) - _b,
+                            "Oldest waiting": _old,
+                            "Use it when": "Your own rule, set below"}])],
+                            ignore_index=True)
                     if all_same:
                         # when there is enough stock for everybody, there is no
                         # trade to make and all three land on the same orders.
@@ -727,7 +829,10 @@ if MODE == "Dispatch":
                         n_cap = int((dd.drop_duplicates("Order")["Rule"] == "CAP").sum())
 
                     # what changes if you switch
-                    cur = cmpdf.loc[cmpdf.Strategy == strat, "_sel"].iloc[0]
+                    if strat == "Custom":
+                        cur = set(dd["Order"]) if len(dd) else set()
+                    else:
+                        cur = cmpdf.loc[cmpdf.Strategy == strat, "_sel"].iloc[0]
                     bits = []
                     for other in names:
                         if other == strat:
@@ -850,16 +955,21 @@ if MODE == "Dispatch":
                                               t["Qty"].astype(int).astype(str))
                                       .groupby("Order")["txt"]
                                       .apply(lambda v: ", ".join(v)))
-                        per = (lines.groupby("Order")
-                                    .agg(Placed=("Placed","first"), Rule=("Rule","first"),
-                                         Boxes=("Qty","sum"),
-                                         From=("Shipment", lambda v: ", ".join(sorted(set(v)))))
-                                    .reset_index())
+                        _agg = dict(Placed=("Placed","first"), Rule=("Rule","first"),
+                                    Boxes=("Qty","sum"),
+                                    From=("Shipment", lambda v: ", ".join(sorted(set(v)))))
+                        if "Why" in lines.columns:
+                            _agg["Why"] = ("Why", "first")
+                        per = lines.groupby("Order").agg(**_agg).reset_index()
                         per["Items"] = per["Order"].map(items)
                         per["Ship. No."] = per["Order"].map(shipno)
                         per["_u"] = (per["Rule"] != "URG")
                         per = per.sort_values(["_u","Placed"]).drop(columns="_u")
-                        dcols = ["Order","Placed","Rule","Items","Boxes","From","Ship. No."]
+                        dcols = ["Order","Placed","Rule"]
+                        if "Why" in per.columns and per["Why"].astype(str).str.strip().any():
+                            per = per.rename(columns={"Why": "Why it is in"})
+                            dcols.append("Why it is in")
+                        dcols += ["Items","Boxes","From","Ship. No."]
                         table(per[dcols].style.format({"Boxes":"{:,.0f}"}), scroll=True)
                         urg_txt = f" \u00b7 {ex['urgent']} urgent first" if ex["urgent"] else ""
                         st.markdown(f'<div class="note">{len(per)} orders{urg_txt} '

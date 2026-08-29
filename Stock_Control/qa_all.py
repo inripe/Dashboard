@@ -36,6 +36,7 @@ SUITES = [
     ("photo",      "qa_photo.py",     "a write-off needs evidence"),
     ("guide",      "qa_guide.py",     "the guide is plain and matches the app"),
     ("findings",   "qa_findings.py",  "what a real person found, so it cannot return"),
+    ("custom",     "qa_custom.py",    "your own dispatch rule, nothing hidden"),
 ]
 
 
