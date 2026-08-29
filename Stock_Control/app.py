@@ -1103,12 +1103,15 @@ with T3:
     cols=["Shipment","Market","Arrival","Shipped","Received","NotReceived",
           "Scrap","ToCourier","Returned","Outstanding","DaysOpen","Span","Status"]
     d = d.rename(columns={"Shipped":"Sent","NotReceived":"Never arrived",
-                          "Outstanding":"Left in store"})
-    cols = ["Sent" if c=="Shipped" else "Never arrived" if c=="NotReceived"
-            else "Left in store" if c=="Outstanding" else c for c in cols]
+                          "Outstanding":"Left in store","ToCourier":"To courier",
+                          "DaysOpen":"Days open"})
+    _rename = {"Shipped":"Sent","NotReceived":"Never arrived",
+               "Outstanding":"Left in store","ToCourier":"To courier",
+               "DaysOpen":"Days open"}
+    cols = [_rename.get(c, c) for c in cols]
     table(d[cols].style.format({c:"{:,.0f}" for c in
-        ["Sent","Received","Never arrived","Scrap","ToCourier","Returned",
-         "Left in store","DaysOpen","Span",
+        ["Sent","Received","Never arrived","Scrap","To courier","Returned",
+         "Left in store","Days open","Span",
          "OrdersAssigned","OrdersHanded","OrdersOutstanding","OrdersVsAssigned"]}, na_rep="—")
         .apply(lambda x: heat_cols(x,["Left in store"],R_HEAT),axis=None))
     legend("Boxes still in the store:", R_HEAT, "few", "many")
@@ -1182,10 +1185,11 @@ with T4:
         with c2:
             st.subheader("Open positions")
             op=cour[cour["Held"]!=0][["Courier","Shipment","Market","ToCourier",
-                                      "Returned","Held","DaysSince"]]
+                                      "Returned","Held","DaysSince"]].rename(
+                columns={"ToCourier":"To courier","DaysSince":"Days since"})
             if len(op):
                 table(op.style.format({c:"{:,.0f}" for c in
-                    ["ToCourier","Returned","Held","DaysSince"]},na_rep="—"))
+                    ["To courier","Returned","Held","Days since"]},na_rep="—"))
             else:
                 st.markdown(f'<span style="color:{MUT}">Every courier is clear.</span>',unsafe_allow_html=True)
 
@@ -1242,11 +1246,14 @@ with T5:
     st.subheader("Loss by item")
     li=stock.groupby("ItemName").agg(Received=("Received","sum"),Customs=("Customs","sum"),
         Scrap=("Scrap","sum"),ReturnScrap=("ReturnScrap","sum")).reset_index()
-    li=li.rename(columns={"ItemName":"Item"}).sort_values("Received",ascending=False)
     li["Total loss"]=li["Customs"]+li["Scrap"]+li["ReturnScrap"]
     li["Loss %"]=np.where(li["Received"]>0,li["Total loss"]/li["Received"]*100,0)
+    li=li.rename(columns={"ItemName":"Item","Customs":"Never arrived",
+                          "ReturnScrap":"Scrapped on return"}) \
+         .sort_values("Received",ascending=False)
     table(li.style.format({c:"{:,.0f}" for c in
-        ["Received","Customs","Scrap","ReturnScrap","Total loss"]} | {"Loss %":"{:.1f}%"})
+        ["Received","Never arrived","Scrap","Scrapped on return","Total loss"]}
+        | {"Loss %":"{:.1f}%"})
         .apply(lambda d: heat_cols(d,["Loss %"],R_RED),axis=None))
     legend("Loss as a share of received:", R_RED, "low", "high")
 
