@@ -682,7 +682,9 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
         index=0 if opts else None,
         format_func=lambda x: label.get(x, x),
         placeholder="choose a market first" if not mkt else "Choose",
-        key=f"s_no_{n}", disabled=not mkt,
+        # the key carries the market: without it the box keeps the empty value
+        # it held before a market was chosen, and never offers the new number
+        key=f"s_no_{n}_{mkt or 'none'}", disabled=not mkt,
         help="A new number is offered first. Pick an existing one only to "
              "correct or add to a shipment already created.")
 
@@ -730,14 +732,18 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
     on_it = set()
     if sid:
         on_it = set(ship[ship["Shipment ID"] == sid]["Item Name"].dropna())
+    # also drop what has already been added in this session, so the same item
+    # cannot be offered twice and then refused
+    on_it |= {x["Item Name"] for x in lines}
     free = [x for x in items if x not in on_it]
+    ln = st.session_state.get("s_ln", 0)     # counts only the item row
     it = a.selectbox("Item", free, index=None,
                      placeholder=("Choose an item" if free
                                   else "every item is already on this shipment"),
-                     key=f"s_item_{n}", label_visibility="collapsed",
+                     key=f"s_item_{n}_{ln}", label_visibility="collapsed",
                      disabled=not free)
     qt = b.number_input("Qty", min_value=0, step=1, value=0,
-                        key=f"s_qty_{n}", label_visibility="collapsed")
+                        key=f"s_qty_{n}_{ln}", label_visibility="collapsed")
     c.markdown('<div style="height:.1rem"></div>', unsafe_allow_html=True)
     if c.button("Add line", key=f"s_add_{n}"):
         if not it or not qt:
@@ -746,8 +752,10 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
             st.warning(f"{it} is already on this shipment.")
         else:
             lines.append({"Item Name": it, "Shipped Qty": int(qt)})
-            st.session_state["s_n"] = n + 1
-            st.session_state["e_n"] = _nonce() + 1
+            # clear the item row only. Bumping the whole form counter here
+            # wiped the market, number, date and source, and the person had to
+            # type the header again for every single line.
+            st.session_state["s_ln"] = ln + 1
             st.rerun()
 
     if lines:
@@ -760,6 +768,7 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
         d1, d2 = st.columns([1, 1])
         if d2.button("Clear the lines", key=f"s_clr_{n}"):
             st.session_state["s_lines"] = []
+            st.session_state["s_ln"] = ln + 1
             st.rerun()
 
     missing = []
@@ -793,6 +802,7 @@ def render_shipment(ship, cfg, session, save_fn, now=None):
             st.session_state["s_lines"] = []
             st.session_state.pop("s_no", None)
             st.session_state.pop("s_next", None)
+            st.session_state["s_ln"] = ln + 1
             st.session_state["e_n"] = _nonce() + 1
             # hand the confirmation to the next run: showing it here and then
             # rerunning wipes it before anybody sees it

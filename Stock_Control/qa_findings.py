@@ -93,6 +93,54 @@ print("=== 8. THE NOT-RECEIVED MESSAGE READS WELL  (step 9) ===")
 ck("it says what was shipped, what arrived, and what is claimed",
    "shipped" in ui and "arrived" in ui and "already" in ui)
 
+print("=== 9. ADDING A LINE KEEPS THE HEADER  (second session, step 3) ===")
+a = AppTest.from_file("app.py", default_timeout=600).run()
+[r for r in a.radio if "Review" in r.options][0].set_value("Record").run()
+us=[s for s in a.selectbox if s.label=="User"]
+us[0].set_value(qa_book.admin_user(cfg)).run()
+a.text_input[0].set_value("a").run()
+[b for b in a.button if "Sign in" in str(b.label)][0].click().run()
+mkt=[s for s in a.selectbox if "1 \u00b7 Market" in str(s.label)]
+ck("the shipment form is there", bool(mkt), [s.label for s in a.selectbox])
+if mkt:
+    mkt[0].set_value("Qatar").run()
+    sn=[s for s in a.selectbox if "Shipment number" in str(s.label)][0]
+    ck("choosing a market offers a number straight away",
+       sn.value not in (None, ""), sn.value)
+    [s for s in a.selectbox if "Source" in str(s.label)][0].set_value("Egypt").run()
+    picked=[]
+    for q in (50, 30, 20):
+        it=[s for s in a.selectbox if s.label=="Item"][0]
+        if not it.options: break
+        picked.append(it.options[0])
+        it.set_value(it.options[0]).run()
+        [n for n in a.number_input if n.label=="Qty"][0].set_value(q).run()
+        [b for b in a.button if str(b.label)=="Add line"][0].click().run()
+    txt=" ".join(re.sub("<[^>]+>"," ",str(m.value)) for m in a.markdown)
+    m3=re.search(r"(\d+) items? \u00b7 ([\d,]+) boxes shipped", txt)
+    ck("all three lines went in", bool(m3) and m3.group(1)=="3",
+       m3.group(0) if m3 else "not shown")
+    ck("and the boxes add up", bool(m3) and m3.group(2)=="100",
+       m3.group(2) if m3 else "")
+    ck("the market survived", [s.value for s in a.selectbox
+                               if "1 \u00b7 Market" in str(s.label)]==["Qatar"])
+    ck("the shipment number survived",
+       [s.value for s in a.selectbox if "Shipment number" in str(s.label)][0]
+       not in (None, ""))
+    ck("the source survived", [s.value for s in a.selectbox
+                               if "Source" in str(s.label)]==["Egypt"])
+    ck("no item was offered twice", len(picked)==len(set(picked)), picked)
+    ck("nothing was refused as a duplicate",
+       not any("already on this shipment" in re.sub("<[^>]+>","",str(w.value))
+               for w in a.warning),
+       [re.sub("<[^>]+>","",str(w.value))[:40] for w in a.warning])
+ui2 = open("entry_ui.py").read()
+ck("only the item row is cleared on Add line",
+   'st.session_state["s_ln"] = ln + 1' in ui2
+   and 'st.session_state["e_n"] = _nonce() + 1\n            st.rerun()' not in ui2)
+ck("the number box knows which market it belongs to",
+   "s_no_{n}_{mkt or 'none'}" in ui2)
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")
