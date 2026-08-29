@@ -121,7 +121,10 @@ def stock_now(wb, shipment, item_name=None):
     ws = wb["MOVES"]
     c = {ws.cell(HEADER_ROW, i).value: i for i in range(1, ws.max_column + 1)
          if ws.cell(HEADER_ROW, i).value}
-    IN = {"Received", "Return to Saleable", "Count Adjustment - Add"}
+    # a box that comes back from a courier is in the store again. Without
+    # Returned here it left the courier and went nowhere, so the store looked
+    # emptier than it was and the next movement was wrongly refused.
+    IN = {"Received", "Returned", "Return to Saleable", "Count Adjustment - Add"}
     OUT = {"Scrap", "To Courier", "Return to Scrap", "Count Adjustment - Remove",
            "Not received"}
     store, with_courier, received = {}, 0.0, {}
@@ -517,7 +520,9 @@ def migrate_to_values(buf):
     return out.getvalue(), changed
 
 
-SHIPMENT_CODE = re.compile(r"^[A-Z]-\d{2}-\d{3,}$")
+# Q-26-001, and the longer form that carries the month: U-26-08-028. Both are
+# in use - the month appears in the numbering the markets already had.
+SHIPMENT_CODE = re.compile(r"^[A-Z]-\d{2}(-\d{2})?-\d{3,}$")
 MARKET_LETTER = {"Qatar": "Q", "UAE": "U", "KSA": "K", "Egypt": "E"}
 
 

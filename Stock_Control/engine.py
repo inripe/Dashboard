@@ -184,14 +184,24 @@ def stock_by_item(ship, moves, as_of):
     m = moves.rename(columns={"Shipment":"Shipment","Item":"Item"})
     for label, mt in [("Received","Received"),("Customs","Not received"),("Scrap","Scrap"),
                       ("ToSaleable","Return to Saleable"),("ReturnScrap","Return to Scrap"),
-                      ("CountAdj","Count Adjustment"),("ToCourier","To Courier")]:
+                      ("CountAdj","Count Adjustment"),("CountAdd","Count Adjustment - Add"),
+                      ("CountRemove","Count Adjustment - Remove"),
+                      ("Returned","Returned"),("ToCourier","To Courier")]:
         base[label] = base.set_index(k).index.map(_q(m, mt, k)).fillna(0) if len(m) else 0
-    base = base.fillna({c:0 for c in ["Received","Customs","Scrap","ToSaleable","ReturnScrap","CountAdj","ToCourier"]})
-    base["Store"] = base["Received"] - base["Scrap"] + base["ToSaleable"] + base["CountAdj"] - base["ToCourier"]
+    base = base.fillna({c:0 for c in ["Received","Customs","Scrap","ToSaleable",
+                                      "ReturnScrap","CountAdj","CountAdd",
+                                      "CountRemove","Returned","ToCourier"]})
+    # the two count adjustments were only being read under the old single name
+    base["CountAdj"] = base["CountAdj"] + base["CountAdd"] - base["CountRemove"]
+    # a box that comes back from a courier is in the store again. Without
+    # Returned here the store looked emptier than it was.
+    base["Store"] = (base["Received"] - base["Scrap"] + base["ToSaleable"]
+                     + base["Returned"] + base["CountAdj"] - base["ToCourier"])
     base["ShipDiff"] = base["Shipped Qty"] - base["Customs"] - base["Received"]
     base["AgeDays"] = (as_of - base["Arrival Date"]).dt.days
     base["QA"] = (base["Received"] - base["Scrap"] + base["ToSaleable"]
-                  + base["CountAdj"] - base["ToCourier"] - base["Store"])
+                  + base["Returned"] + base["CountAdj"] - base["ToCourier"]
+                  - base["Store"])
     return base
 
 def clearance_by_shipment(ship, moves, as_of, settings):

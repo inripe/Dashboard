@@ -318,8 +318,8 @@ def build_exceptions():
     # so the codes are checked here instead
     import re as _re
     bad_code = sorted({str(x).strip() for x in sf["Shipment ID"].dropna()
-                       if not _re.fullmatch(r"[A-Z]-\d{2}-\d{3,}", str(x).strip())})
-    a("Shipment code not in the Q-26-001 format", len(bad_code),
+                       if not _re.fullmatch(r"[A-Z]-\d{2}(-\d{2})?-\d{3,}", str(x).strip())})
+    a("Shipment code not in the Q-26-001 or U-26-08-028 format", len(bad_code),
       ", ".join(bad_code[:6]), "High")
     wrong_market = []
     _letter = {"Qatar":"Q","UAE":"U","KSA":"K","Egypt":"E"}

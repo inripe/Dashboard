@@ -195,7 +195,16 @@ ck("last year's numbers do not interfere",
 print("=== K. BAD CODES TYPED INTO EXCEL ARE CAUGHT ===")
 app=open("app.py").read()
 ck("data check looks for the wrong format",
-   "Shipment code not in the Q-26-001 format" in app)
+   "Shipment code not in the" in app and "format" in app)
+import re as _re2
+_PAT = r"[A-Z]-\d{2}(-\d{2})?-\d{3,}"
+for good in ("Q-26-001", "U-26-08-028", "K-26-07-001"):
+    ck(f"{good} is accepted", bool(_re2.fullmatch(_PAT, good)))
+for bad in ("Q-2026-001", "q-26-001", "NO. 022", "Q-26-1"):
+    ck(f"{bad} is rejected", not _re2.fullmatch(_PAT, bad))
+ck("the app and the writer agree on the format",
+   _PAT.replace("\\", "\\") in open("app.py").read()
+   or "(-\\d{2})?" in open("app.py").read())
 ck("and for a code that does not match its market",
    "Shipment code does not match its market" in app)
 ck("and for a movement pointing at no shipment",
@@ -208,7 +217,7 @@ for good in ("Q-26-001","U-26-014","E-27-123","K-26-1000"):
        bool(_re.fullmatch(r"[A-Z]-\d{2}-\d{3,}", good)))
 for bad in ("NO. 022","Q-26-1","q-26-001","Q26001","Q-2026-001",""):
     ck(f"{bad or '(blank)'} is rejected",
-       not _re.fullmatch(r"[A-Z]-\d{2}-\d{3,}", bad))
+       not _re.fullmatch(r"[A-Z]-\d{2}(-\d{2})?-\d{3,}", bad))
 
 print()
 for l in F: print(l)

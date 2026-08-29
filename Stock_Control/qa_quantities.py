@@ -213,6 +213,47 @@ ck("it counts what is already recorded as missing",
    "already" in note, note)
 ck("the limit never goes below zero", cap>=0, cap)
 
+print("=== M. A RETURN GOES BACK INTO THE STORE ===")
+# it used to come off the courier and go nowhere, so the store looked emptier
+# than it was and the next movement out was wrongly refused
+import openpyxl as _ox
+_c = (cfg0.get("couriers_by_market") or {}).get(MKT, [None])[0]
+if _c:
+    _wb0 = _ox.load_workbook(io.BytesIO(base))
+    _st0, _cr0, _ = entry.stock_now(_wb0, SHIP)
+    _have = _st0.get(ITEM, 0)
+    _n = min(5, int(_have)) or 1
+    _b, _ = entry.append_moves(base, [row("To Courier",
+        **{"Item Name": ITEM, "Out": _n, "Courier": _c})], "admin", MKT)
+    _wb1 = _ox.load_workbook(io.BytesIO(_b))
+    _st1, _cr1, _ = entry.stock_now(_wb1, SHIP)
+    eq("sending out takes it off the shelf", _st1.get(ITEM, 0), _have - _n)
+    eq("and puts it with the courier", _cr1, _cr0 + _n)
+    _b2, _ = entry.append_moves(_b, [row("Returned",
+        **{"Item Name": ITEM, "In": _n, "Courier": _c,
+           "Reason": "Cancelled"})], "admin", MKT)
+    _wb2 = _ox.load_workbook(io.BytesIO(_b2))
+    _st2, _cr2, _ = entry.stock_now(_wb2, SHIP)
+    eq("coming back puts it on the shelf again", _st2.get(ITEM, 0), _have)
+    eq("and off the courier", _cr2, _cr0)
+    ck("so it can go out again",
+       entry.check_quantities(row("To Courier",
+           **{"Item Name": ITEM, "Out": _n, "Courier": _c}),
+           _ox.load_workbook(io.BytesIO(_b2))) == "OK",
+       entry.check_quantities(row("To Courier",
+           **{"Item Name": ITEM, "Out": _n, "Courier": _c}),
+           _ox.load_workbook(io.BytesIO(_b2)))[:60])
+    _s3, _m3, _c3, _cfg3, _e3 = engine.load(io.BytesIO(_b2))
+    _st3 = engine.stock_by_item(_s3, _m3, _cfg3["as_of"])
+    _s0, _m0b, _c0b, _cfg0b, _ = engine.load(io.BytesIO(base))
+    eq("and the whole ledger is back where it started",
+       float(_st3["Store"].sum()),
+       float(engine.stock_by_item(_s0, _m0b, _cfg0b["as_of"])["Store"].sum()))
+else:
+    ck("no courier on this market to test with", True)
+ck("Returned counts as stock in",
+   '"Returned"' in open("entry.py").read().split("IN = {")[1].split("}")[0])
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")
