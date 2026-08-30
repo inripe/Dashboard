@@ -17,8 +17,11 @@ base=qa_book.data()
 s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
 AS=cfg0["as_of"]
 MKT=s0["Market"].dropna().iloc[0]
-SHIP=s0[s0.Market==MKT]["Shipment ID"].iloc[0]
-ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
+# a shipment with stock to push against, built if the sheet has none
+base, SHIP, ITEM, MKT = qa_book.workbench()
+s0, m0, c0, cfg0, e0 = engine.load(io.BytesIO(base))
+USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
+OTHER = qa_book.entry_user(cfg0) or USER
 COUR=(cfg0.get("couriers_by_market") or {}).get(MKT,[None])[0]
 
 print("=== A. WHAT THE COURIER IS HOLDING ===")
@@ -73,14 +76,18 @@ ck("an empty count sheet gives an empty table",
 
 print("=== C. STOCK ADDS UP, ITEM BY ITEM ===")
 for r in st0.itertuples():
-    lhs = r.Received - r.Scrap + r.ToSaleable - r.ToCourier
+    # what is on the shelf: what arrived, less what was thrown away or sent
+    # out, plus what came back and any count adjustment
+    lhs = (r.Received - r.Scrap - getattr(r, "ReturnScrap", 0)
+           + getattr(r, "Returned", 0) + r.ToSaleable - r.ToCourier
+           + getattr(r, "CountAdj", 0))
     ck(f"{r.Shipment} {getattr(r,'ItemName',r.Item)}: store is what came in less what went out",
-       abs(lhs + getattr(r,"Adjust",0) - r.Store) < 1.001,
-       f"{lhs} vs {r.Store}")
+       abs(lhs - r.Store) < 1.001, f"{lhs} vs {r.Store}")
     break   # the identity holds for every row; one is shown, all are checked below
 bad=[r for r in st0.itertuples()
-     if abs((r.Received - r.Scrap + r.ToSaleable - r.ToCourier
-             + getattr(r,"Adjust",0)) - r.Store) > 1.001]
+     if abs((r.Received - r.Scrap - getattr(r, "ReturnScrap", 0)
+             + getattr(r, "Returned", 0) + r.ToSaleable - r.ToCourier
+             + getattr(r, "CountAdj", 0)) - r.Store) > 1.001]
 ck("every row balances", not bad, [ (r.Shipment, r.Store) for r in bad[:3] ])
 ck("nothing is negative", (st0["Store"]>=0).all(),
    int((st0["Store"]<0).sum()))

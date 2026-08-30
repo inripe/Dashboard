@@ -104,9 +104,14 @@ if us:
     if mk:
         mk[0].set_value("Qatar").run()
         sn=[x for x in at.selectbox if "Shipment number" in str(x.label)][0]
-        ck("the first shipment is 001",
-           any("Q-26-001" in str(o) for o in sn.options), sn.options)
-        ck("and nothing else is offered", len(sn.options) == 1, sn.options)
+        # on a cleared sheet the numbering starts again; on a sheet that
+        # still has history it carries on from the last one
+        ck("a new number is offered first",
+           str(sn.options[0]).endswith("new"), sn.options[:1])
+        ck("and it is the next one, not a repeat",
+           len(sn.options) == 1 or not any(
+               str(sn.options[0]).split()[0] == str(o).split()[0]
+               for o in sn.options[1:]), sn.options[:3])
 
 print()
 for l in F: print(l)

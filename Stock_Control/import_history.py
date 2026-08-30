@@ -165,109 +165,125 @@ def read(path, names):
 def build(rows, courier_of):
     """Turn her rows into shipment lines and movements.
 
-    Her sheet tracks stock per item: Old Stock carries from day to day, and a
-    movement is filed under whichever shipment was open that day. Ours tracks
-    it per shipment. Rather than guessing which shipment a box came from, each
-    movement keeps the code she gave it - and where her book had stock ours
-    has not seen, the difference is written as a count adjustment, in the
-    open, before the movement that needs it.
+    Her sheet tracks stock per item: what is left when a new shipment lands
+    shows up as that day's Old Stock. Ours tracks it per shipment. So an
+    outward movement is drawn from whichever shipments actually hold the item,
+    oldest first - which is also how the fruit really moves, and it stops the
+    leftover being counted twice when the shipment number changes.
     """
     rows = sorted(rows, key=lambda r: (r["date"] or dt.date(1900, 1, 1),
                                        r["code"], r["their_item"]))
     ships, moves, notes = {}, [], []
-    store = {}          # (code, item) -> boxes we have accounted for
-    courier = {}        # (code, item) -> boxes with the courier
+    lots = {}        # item -> [[shipment, in store], …] oldest first
+    held = {}        # item -> [[shipment, with courier], …]
     seen_item = set()
     adjust = 0
 
-    def top_up(key, need, date, why):
-        """Make sure the shipment holds enough, and say so if it did not."""
-        nonlocal adjust
-        have = store.get(key, 0.0)
-        if have >= need - 0.001:
-            return
-        short = round(need - have, 3)
-        moves.append({"Date": date, "Shipment No": key[0],
-                      "Movement": "Count Adjustment - Add",
-                      "Item Name": key[1], "In": short,
-                      "Reason": "Count Adjustment", "Note": why})
-        store[key] = have + short
-        adjust += 1
+    def add(book, item, shipment, qty):
+        row = book.setdefault(item, [])
+        for lot in row:
+            if lot[0] == shipment:
+                lot[1] += qty
+                return
+        row.append([shipment, qty])
+
+    def draw(book, item, qty, fallback):
+        """Take qty from the oldest lots. Returns [(shipment, n), …]."""
+        out, left = [], qty
+        for lot in book.get(item, []):
+            if left <= 0.001:
+                break
+            n = min(lot[1], left)
+            if n > 0.001:
+                out.append((lot[0], n))
+                lot[1] -= n
+                left -= n
+        if left > 0.001:
+            out.append((fallback, left))
+        return out, left
 
     for r in rows:
         if not r["item"] or not r["market"] or not r["date"]:
             continue
-        key = (r["code"], r["item"])
+        item, code = r["item"], r["code"]
 
-        if r["received"] and key not in ships:
-            ships[key] = {"Shipment No": r["code"], "Market": r["market"],
-                          "Arrival Date": r["date"], "Source": r["source"],
-                          "Item Name": r["item"],
-                          "Shipped Qty": r["received"], "PO Qty": r["po"]}
+        if r["received"] and (code, item) not in ships:
+            ships[(code, item)] = {
+                "Shipment No": code, "Market": r["market"],
+                "Arrival Date": r["date"], "Source": r["source"],
+                "Item Name": item, "Shipped Qty": r["received"],
+                "PO Qty": r["po"]}
             if r["po"] and r["po"] != r["received"]:
-                notes.append(f"{r['code']} {r['item']}: ordered {r['po']:.0f}, "
+                notes.append(f"{code} {item}: ordered {r['po']:.0f}, "
                              f"{r['received']:.0f} arrived")
 
-        # her opening stock, once per item
-        if r["item"] not in seen_item and r["old"]:
-            moves.append({"Date": r["date"], "Shipment No": r["code"],
+        # her opening stock, only for the very first day this item appears -
+        # after that, what is left carries in the lots below
+        if item not in seen_item and r["old"]:
+            moves.append({"Date": r["date"], "Shipment No": code,
                           "Movement": "Count Adjustment - Add",
-                          "Item Name": r["item"], "In": r["old"],
+                          "Item Name": item, "In": r["old"],
                           "Reason": "Count Adjustment",
                           "Note": "opening balance, not tracked before"})
-            store[key] = store.get(key, 0.0) + r["old"]
-        seen_item.add(r["item"])
+            add(lots, item, code, r["old"])
+            adjust += 1
+        seen_item.add(item)
 
         if r["received"]:
-            moves.append({"Date": r["date"], "Shipment No": r["code"],
-                          "Movement": "Received", "Item Name": r["item"],
+            moves.append({"Date": r["date"], "Shipment No": code,
+                          "Movement": "Received", "Item Name": item,
                           "In": r["received"]})
-            store[key] = store.get(key, 0.0) + r["received"]
+            add(lots, item, code, r["received"])
 
-        if r["scrap"]:
-            top_up(key, r["scrap"], r["date"],
-                   "stock her sheet held that ours had not seen")
-            moves.append({"Date": r["date"], "Shipment No": r["code"],
-                          "Movement": "Scrap", "Item Name": r["item"],
-                          "Out": r["scrap"], "Reason": "Quality"})
-            store[key] -= r["scrap"]
-
-        if r["ofd"]:
-            top_up(key, r["ofd"], r["date"],
-                   "stock her sheet held that ours had not seen")
-            moves.append({"Date": r["date"], "Shipment No": r["code"],
-                          "Movement": "To Courier", "Item Name": r["item"],
-                          "Out": r["ofd"],
-                          "Courier": courier_of.get(r["market"])})
-            store[key] -= r["ofd"]
-            courier[key] = courier.get(key, 0.0) + r["ofd"]
-
+        # a return comes back during the day, before that day's dispatch -
+        # her figures are the net of the day, not a sequence
         if r["ret"]:
-            # by now the day's handover has been recorded, so the courier
-            # usually holds enough. Only where it does not - a return from a
-            # handover before her file begins - is one reconstructed.
-            top_up_courier = r["ret"] - courier.get(key, 0.0)
-            if top_up_courier > 0.001:
-                top_up(key, top_up_courier, r["date"],
-                       "sent out before this sheet begins")
-                moves.append({"Date": r["date"], "Shipment No": r["code"],
-                              "Movement": "To Courier", "Item Name": r["item"],
-                              "Out": round(top_up_courier, 3),
+            back, short = draw(held, item, r["ret"], code)
+            if short > 0.001:
+                # a return from a handover before her file begins
+                moves.append({"Date": r["date"], "Shipment No": code,
+                              "Movement": "Count Adjustment - Add",
+                              "Item Name": item, "In": round(short, 3),
+                              "Reason": "Count Adjustment",
+                              "Note": "sent out before this sheet begins"})
+                moves.append({"Date": r["date"], "Shipment No": code,
+                              "Movement": "To Courier", "Item Name": item,
+                              "Out": round(short, 3),
                               "Courier": courier_of.get(r["market"]),
                               "Note": "reconstructed: a return needs a handover"})
-                store[key] -= top_up_courier
-                courier[key] = courier.get(key, 0.0) + top_up_courier
-            moves.append({"Date": r["date"], "Shipment No": r["code"],
-                          "Movement": "Returned", "Item Name": r["item"],
-                          "In": r["ret"],
-                          "Courier": courier_of.get(r["market"]),
-                          "Reason": "Other Return"})
-            courier[key] = courier.get(key, 0.0) - r["ret"]
-            store[key] = store.get(key, 0.0) + r["ret"]
+                adjust += 1
+            for sid, n in back:
+                moves.append({"Date": r["date"], "Shipment No": sid,
+                              "Movement": "Returned", "Item Name": item,
+                              "In": round(n, 3),
+                              "Courier": courier_of.get(r["market"]),
+                              "Reason": "Other Return"})
+                add(lots, item, sid, n)
+
+        for qty, mv, extra in ((r["scrap"], "Scrap", {"Reason": "Quality"}),
+                               (r["ofd"], "To Courier",
+                                {"Courier": courier_of.get(r["market"])})):
+            if not qty:
+                continue
+            taken, short = draw(lots, item, qty, code)
+            if short > 0.001:
+                moves.append({"Date": r["date"], "Shipment No": code,
+                              "Movement": "Count Adjustment - Add",
+                              "Item Name": item, "In": round(short, 3),
+                              "Reason": "Count Adjustment",
+                              "Note": "stock her book held that this one "
+                                      "had not seen"})
+                adjust += 1
+            for sid, n in taken:
+                row = {"Date": r["date"], "Shipment No": sid,
+                       "Movement": mv, "Item Name": item, "Out": round(n, 3)}
+                row.update(extra)
+                moves.append(row)
+                if mv == "To Courier":
+                    add(held, item, sid, n)
 
     if adjust:
-        notes.append(f"{adjust} count adjustments were needed where her book "
-                     f"held stock this one had not seen")
+        notes.append(f"{adjust} count adjustments were needed")
     return list(ships.values()), moves, notes
 
 
@@ -402,6 +418,33 @@ def main():
     if len(e1):
         print("  refusing to save - the workbook would not be clean")
         return 1
+    # her book is the source of truth for the history, so the import is
+    # judged against it item by item rather than on its own say-so
+    import datetime as _dt
+    last = {}
+    for r in sorted(rows, key=lambda r: (r["date"] or _dt.date(1900, 1, 1))):
+        if r["item"]:
+            last[r["item"]] = r["allstock"]
+    nm = cfg1.get("item_names") or {}
+    mine = {}
+    for row in st[st["Market"] == ships[0]["Market"]].itertuples():
+        n = nm.get(row.Item, row.Item)
+        mine[n] = mine.get(n, 0) + row.Store
+    diff = [(i, last.get(i, 0), mine.get(i, 0))
+            for i in sorted(set(last) | set(mine))
+            if abs(last.get(i, 0) - mine.get(i, 0)) > 0.001]
+    print(f"\nAGAINST HER OWN CLOSING FIGURES")
+    print(f"  her book {sum(last.values()):,.0f} boxes · "
+          f"this one {sum(mine.values()):,.0f}")
+    if diff:
+        print(f"  {len(diff)} items differ:")
+        print(f"    {'ITEM':<24}{'HERS':>7}{'OURS':>7}")
+        for i, h, o in diff[:12]:
+            print(f"    {i[:23]:<24}{h:>7,.0f}{o:>7,.0f}")
+        print("\n  refusing to save - it does not match her book")
+        return 1
+    print("  every item matches exactly")
+
     sp.upload_workbook(out, etag=meta.get("etag"))
     print("\nSaved to SharePoint. Now run:  python3 validate.py")
     return 0

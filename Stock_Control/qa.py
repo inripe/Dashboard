@@ -45,8 +45,13 @@ ck("customs + received equals shipped", q("Not received") + q("Received"),
 ck0("no shipment line with an unexplained gap", (st["ShipDiff"].round(6) != 0).sum())
 
 print("C. STORE BALANCE")
+# a box that comes back from a courier is in the store again, and both count
+# adjustments are counted, not just the old single name
 ck("store stock equals the raw movement maths", st.Store.sum(),
-   q("Received") - q("Scrap") + q("Return to Saleable") + q("Count Adjustment") - q("To Courier"))
+   q("Received") - q("Scrap") - q("Return to Scrap") + q("Returned")
+   + q("Return to Saleable") + q("Count Adjustment")
+   + q("Count Adjustment - Add") - q("Count Adjustment - Remove")
+   - q("To Courier"))
 ck0("QA column non-zero on any row", (st["QA"].round(6) != 0).sum())
 ck0("negative store stock", (st["Store"] < 0).sum())
 
@@ -59,8 +64,11 @@ ck("held = out - delivered - returned", cp.Held.sum() if len(cp) else 0,
 ck0("negative courier holding", (cp["Held"] < 0).sum() if len(cp) else 0)
 
 print("E. RETURN LOOP")
-ck("returned = back to stock + scrapped", q("Returned"),
-   q("Return to Saleable") + q("Return to Scrap"))
+# a return goes straight back on the shelf. Sorting it afterwards - to
+# saleable or to scrap - is a separate decision that may never be made, so
+# the two no longer have to match
+ck0("more sorted than ever came back",
+    max(0, q("Return to Saleable") + q("Return to Scrap") - q("Returned")))
 
 print("G. CLEARANCE")
 ck("received per shipment ties to the log", cl.Received.sum(), q("Received"))

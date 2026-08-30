@@ -49,8 +49,11 @@ s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
 MKT = s0["Market"].dropna().iloc[0]
 USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
 OTHER = qa_book.entry_user(cfg0) or USER
-SHIP=s0[s0.Market==MKT]["Shipment ID"].iloc[0]
-ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
+# a shipment with stock to push against, built if the sheet has none
+base, SHIP, ITEM, MKT = qa_book.workbench()
+s0, m0, c0, cfg0, e0 = engine.load(io.BytesIO(base))
+USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
+OTHER = qa_book.entry_user(cfg0) or USER
 # scrap is used here rather than received: this suite is about two people
 # saving at once, not about quantity limits
 mk=lambda q: {"Date":entry.market_now(MKT).date(),"Shipment No":SHIP,

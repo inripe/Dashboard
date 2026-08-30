@@ -66,8 +66,10 @@ def audit(data, where):
             bad(where, f"{len(off)} settled lines do not balance",
                 off[["Shipment", "Item", "Shipped Qty", "Received", "Customs"]]
                 .head(2).to_dict("records"))
-        idn = st["Received"] - st["Scrap"] + st["ToSaleable"] - st["ToCourier"] \
-            + st.get("CountAdj", 0) - st["Store"]
+        # a return is back on the shelf, and both count adjustments count
+        idn = (st["Received"] - st["Scrap"] - st.get("ReturnScrap", 0)
+               + st.get("Returned", 0) + st["ToSaleable"] - st["ToCourier"]
+               + st.get("CountAdj", 0) - st["Store"])
         if (idn.abs() > 0.001).any():
             bad(where, "store is not what came in less what went out")
     if len(cp) and (cp["Held"] < -0.001).any():
@@ -182,12 +184,20 @@ def season(data, cfg, s0, rounds=6, seed=7, quiet=False):
         _say(f"    received {sum(got.values()):,}, "
             f"{sum(missing.values()):,} never arrived")
 
-        # receiving more than was sent must be refused
+        # receiving more than was sent is allowed: the shipped figure is
+        # sometimes typed wrong, and refusing would hide it. It must be
+        # accepted and reported, not turned away.
         over = [{"Date": arrival, "Shipment No": sid, "Movement": "Received",
                  "Item Name": pick[0], "In": sent[pick[0]] + 10}]
-        try_write(lambda: entry.append_moves(data, over, "store", mkt)[0],
-                  f"round {rd} · received more than sent", expect="refused")
-        refused += 1; steps += 1
+        new = try_write(lambda: entry.append_moves(data, over, "store", mkt)[0],
+                        f"round {rd} · received more than sent")
+        steps += 1
+        if new:
+            legal += 1
+            s_, m_, c_, cfg_, e_ = engine.load(io.BytesIO(new))
+            st_ = engine.stock_by_item(s_, m_, cfg_["as_of"])
+            if not (st_["Received"] - st_["Shipped Qty"] > 0.001).any():
+                bad(f"round {rd}", "over-receiving was not flagged anywhere")
 
         # --- the shortfall is explained --------------------------------
         miss = [{"Date": arrival, "Shipment No": sid, "Movement": "Not received",

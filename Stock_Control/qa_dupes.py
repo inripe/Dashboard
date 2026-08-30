@@ -10,12 +10,12 @@ def eq(n,got,want,tol=1e-6):
     except (TypeError,ValueError): ok=str(got)==str(want)
     (P if ok else F).append(f"{'PASS' if ok else 'FAIL'}  {n}: got {got}, want {want}")
 
-base=qa_book.data()
-s0,m0,c0,cfg0,e0=engine.load(io.BytesIO(base))
-st0=engine.stock_by_item(s0,m0,cfg0["as_of"])
-MKT=s0["Market"].dropna().iloc[0]
-SHIP=s0[s0.Market==MKT]["Shipment ID"].iloc[0]
-ITEM=s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
+# a shipment with stock to push against, built if the sheet has none
+base, SHIP, ITEM, MKT = qa_book.workbench()
+s0, m0, c0, cfg0, e0 = engine.load(io.BytesIO(base))
+st0 = engine.stock_by_item(s0, m0, cfg0["as_of"])
+USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
+OTHER = qa_book.entry_user(cfg0) or USER
 row=lambda: {"Date":dt.date(2026,8,26),"Shipment No":SHIP,"Movement":"Scrap",
              "Item Name":ITEM,"Out":1,"Reason":"Quality"}
 

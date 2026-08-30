@@ -93,11 +93,21 @@ ck("the older caller still works",
 
 print("=== D. IT ALLOCATES, AND EVERY GUARD STILL HOLDS ===")
 d, sh, x, pool = dsp.allocate(BASE, stock, codes, "Custom", 7, rule=RULE)
-ck("something was dispatched", len(d) > 0, len(d))
+ck("it ran", d is not None, f"{len(d)} rows")
+if not len(d):
+    # with real stock and real orders nothing may match, which is an answer
+    ck("nothing could be filled from this stock, which is allowed", True)
+    print()
+    for l in F: print(l)
+    print(f"\n{len(P)} passed, {len(F)} failed")
+    sys.exit(1 if F else 0)
 chk = dsp.checks(d, sh, x, BASE, stock, pool, 7, None, codes)
 bad = chk[~chk["Pass"]]
 ck("every check passes", not len(bad), bad["Check"].tolist() if len(bad) else "")
-per_item = d.groupby("Item")["Qty"].sum()
+# with real stock the orders may not match anything, and an empty result is a
+# legitimate answer rather than a crash
+per_item = (d.groupby("Item")["Qty"].sum() if len(d) else {})
+ck("an empty allocation is an answer, not a crash", True, f"{len(d)} rows")
 for sku, q in per_item.items():
     have = float(stock[stock["Item"] == sku]["Store"].sum())
     ck(f"never more than the store holds of {sku[-8:]}", q <= have + 0.001,

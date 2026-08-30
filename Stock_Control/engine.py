@@ -195,13 +195,16 @@ def stock_by_item(ship, moves, as_of):
     base["CountAdj"] = base["CountAdj"] + base["CountAdd"] - base["CountRemove"]
     # a box that comes back from a courier is in the store again. Without
     # Returned here the store looked emptier than it was.
-    base["Store"] = (base["Received"] - base["Scrap"] + base["ToSaleable"]
-                     + base["Returned"] + base["CountAdj"] - base["ToCourier"])
+    # a return that is then scrapped leaves the store too. Without ReturnScrap
+    # here the entry guard and this disagreed, and stock read high.
+    base["Store"] = (base["Received"] - base["Scrap"] - base["ReturnScrap"]
+                     + base["ToSaleable"] + base["Returned"] + base["CountAdj"]
+                     - base["ToCourier"])
     base["ShipDiff"] = base["Shipped Qty"] - base["Customs"] - base["Received"]
     base["AgeDays"] = (as_of - base["Arrival Date"]).dt.days
-    base["QA"] = (base["Received"] - base["Scrap"] + base["ToSaleable"]
-                  + base["Returned"] + base["CountAdj"] - base["ToCourier"]
-                  - base["Store"])
+    base["QA"] = (base["Received"] - base["Scrap"] - base["ReturnScrap"]
+                  + base["ToSaleable"] + base["Returned"] + base["CountAdj"]
+                  - base["ToCourier"] - base["Store"])
     return base
 
 def clearance_by_shipment(ship, moves, as_of, settings):

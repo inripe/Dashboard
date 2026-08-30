@@ -69,7 +69,17 @@ def main():
         env["QA_BOOK"] = book
         import shutil
         shutil.copy(book, "INRIPE_Stock_Entry_v1.xlsx")
-        print(f"testing against {book}\n")
+        print(f"testing against {book}")
+        import qa_book as _qb
+        _used = _qb.book()
+        if _used != book:
+            _n = len(open(_used, "rb").read()) / 1024
+            print(f"  the sheet is large, so the rule suites use its last few "
+                  f"shipments ({_n:,.0f} KB).")
+            print(f"  MASTER is whole, and the workbook itself is still "
+                  f"checked in full by the first suite.")
+            print(f"  QA_FULL=1 to test against all of it.")
+        print()
 
     width = max(len(n) for n, _, _ in SUITES) + 2
     total_p = total_f = 0

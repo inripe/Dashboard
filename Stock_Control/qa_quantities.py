@@ -16,8 +16,11 @@ def eq(n,got,want,tol=1e-6):
 base = qa_book.data()
 s0,m0,c0,cfg0,e0 = engine.load(io.BytesIO(base))
 MKT  = s0["Market"].dropna().iloc[0]
-SHIP = s0[s0.Market==MKT]["Shipment ID"].iloc[0]
-ITEM = s0[s0["Shipment ID"]==SHIP]["Item Name"].iloc[0]
+# a shipment with stock to push against, built if the sheet has none
+base, SHIP, ITEM, MKT = qa_book.workbench()
+s0, m0, c0, cfg0, e0 = engine.load(io.BytesIO(base))
+USER = qa_book.entry_user(cfg0, MKT) or qa_book.entry_user(cfg0) or "manual"
+OTHER = qa_book.entry_user(cfg0) or USER
 COUR = (cfg0.get("couriers_by_market") or {}).get(MKT,[None])[0]
 wb   = openpyxl.load_workbook(io.BytesIO(base))
 store, with_courier, received = entry.stock_now(wb, SHIP)
@@ -253,6 +256,35 @@ else:
     ck("no courier on this market to test with", True)
 ck("Returned counts as stock in",
    '"Returned"' in open("entry.py").read().split("IN = {")[1].split("}")[0])
+
+print("=== N. A SCRAPPED RETURN LEAVES THE STORE ===")
+# the entry guard subtracted it and the engine did not, so stock read high
+import openpyxl as _o
+_c2 = (cfg0.get("couriers_by_market") or {}).get(MKT, [None])[0]
+if _c2:
+    _b0, _ = entry.append_moves(base, [row("To Courier",
+        **{"Item Name": ITEM, "Out": 4, "Courier": _c2})], "admin", MKT)
+    _b1, _ = entry.append_moves(_b0, [row("Returned",
+        **{"Item Name": ITEM, "In": 4, "Courier": _c2,
+           "Reason": "Cancelled"})], "admin", MKT)
+    _s1, _m1, _c1, _cf1, _ = engine.load(io.BytesIO(_b1))
+    _before = float(engine.stock_by_item(_s1, _m1, _cf1["as_of"])["Store"].sum())
+    _b2, _ = entry.append_moves(_b1, [row("Return to Scrap",
+        **{"Item Name": ITEM, "Out": 4, "Reason": "Quality"})], "admin", MKT)
+    _s2, _m2, _c2b, _cf2, _ = engine.load(io.BytesIO(_b2))
+    _after = float(engine.stock_by_item(_s2, _m2, _cf2["as_of"])["Store"].sum())
+    eq("scrapping the return takes it off the shelf", _after, _before - 4)
+    _wb = _o.load_workbook(io.BytesIO(_b2))
+    _st, _, _ = entry.stock_now(_wb, SHIP)
+    _sub = engine.stock_by_item(_s2, _m2, _cf2["as_of"])
+    _nm2 = {v: k for k, v in (_cf2.get("item_names") or {}).items()}
+    _row = _sub[(_sub["Shipment"] == SHIP) & (_sub["Item"] == _nm2.get(ITEM))]
+    ck("and the form and the reports agree on what is left",
+       not len(_row) or abs(_st.get(ITEM, 0) - float(_row["Store"].iloc[0])) < 0.001,
+       f"form {_st.get(ITEM, 0)} vs reports "
+       f"{float(_row['Store'].iloc[0]) if len(_row) else 'n/a'}")
+else:
+    ck("no courier on this market to test with", True)
 
 print()
 for l in F: print(l)
