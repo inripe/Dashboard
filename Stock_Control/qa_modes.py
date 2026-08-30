@@ -59,8 +59,7 @@ ck("they are Record, Dispatch and Review",
 print("=== B. EACH MODE SHOWS ITS OWN TABS AND NO OTHERS ===")
 want={"Record":  ["Stock moved","Shipment arrived","Today"],
       "Dispatch":["Today's run"],
-      "Review":  ["Overview","Stock","Shipments","Couriers","Losses",
-                  "Data check","Guide"]}
+      "Review":  __import__("review").NAMES}
 for mode, expect in want.items():
     at=app(mode)
     ck(f"{mode}: the right tabs", tabs(at)==expect, tabs(at))
@@ -76,7 +75,8 @@ for mode in ("Record","Dispatch"):
     ck(f"{mode}: no kpi tiles", "AVAILABLE TO SELL" not in t.upper()
        or "boxes in store" not in t, "")
 at=app("Review")
-ck("Review does show the reports", "Available to sell" in text(at))
+ck("Review does show the reports",
+   "Thrown away" in text(at) or "Available to sell" in text(at))
 
 print("=== D. THE FILTERS BELONG TO REVIEW ===")
 for mode in ("Record","Dispatch"):

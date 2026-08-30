@@ -84,7 +84,8 @@ mock.fetch_orders=lambda *a,**k: ([], False)
 mock.MARKETS=("Qatar","UAE","KSA","Egypt")
 sys.modules["shopify_reader"]=mock
 from streamlit.testing.v1 import AppTest
-for mode, tabs in (("Record",3), ("Dispatch",1), ("Review",7)):
+import review as _rv
+for mode, tabs in (("Record", 3), ("Dispatch", 1), ("Review", len(_rv.NAMES))):
     at=AppTest.from_file("app.py",default_timeout=600).run()
     md=[r for r in at.radio if "Review" in r.options]
     if md: md[0].set_value(mode).run()

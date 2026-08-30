@@ -329,6 +329,23 @@ def build_exceptions():
             wrong_market.append(f"{r._1} is {r.Market}")
     a("Shipment code does not match its market", len(wrong_market),
       ", ".join(wrong_market[:6]), "High")
+    # a missed return is silent: after a day those boxes count as delivered
+    # and the return rate reads better than it is. So a handover with nothing
+    # coming back the next day is named here.
+    if len(mf):
+        _mv = mf.copy()
+        _mv["Date"] = pd.to_datetime(_mv["Date"], errors="coerce")
+        _cut = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
+        _out = _mv[(_mv["Movement"] == "To Courier") & (_mv["Date"] == _cut)]
+        _back = _mv[(_mv["Movement"] == "Returned")
+                    & (_mv["Date"] >= _cut)]
+        _sent = _out.groupby("Courier")["Qty"].sum() if len(_out) else {}
+        _came = _back.groupby("Courier")["Qty"].sum() if len(_back) else {}
+        _silent = [f"{c}: {v:,.0f} boxes out, none came back"
+                   for c, v in dict(_sent).items()
+                   if float(dict(_came).get(c, 0)) == 0]
+        a("Courier sent out but nothing returned", len(_silent),
+          ", ".join(_silent[:4]), "High")
     stale = (cfg.get("as_of_setting") is not None
              and pd.Timestamp(cfg["as_of_setting"]).normalize()
              < pd.Timestamp.today().normalize())
@@ -400,8 +417,8 @@ def delta(df,col,unit=""):
     return f"{(now-prev)/abs(prev)*100:+.0f}%" if not unit else f"{now-prev:+.1f}{unit}"
 
 EMPTY = len(sf)==0
-REVIEW_TABS = ["Overview","Stock","Shipments","Couriers","Losses",
-               "Data check","Guide"]
+import review
+REVIEW_TABS = review.NAMES
 if MODE == "Record":
     _names = ["Stock moved","Shipment arrived","Today"]
 elif MODE == "Dispatch":
@@ -422,13 +439,6 @@ TE  = _slot("Stock moved")
 TSH = _slot("Shipment arrived")
 TTD = _slot("Today")
 TD  = _slot("Today's run")
-T1  = _slot("Overview")
-T2  = _slot("Stock")
-T3  = _slot("Shipments")
-T4  = _slot("Couriers")
-T5  = _slot("Losses")
-T6  = _slot("Data check")
-T7  = _slot("Guide")
 
 
 def render_guide():
@@ -1305,10 +1315,12 @@ if EMPTY and MODE == "Review":
 exc = build_exceptions(); open_exc = exc[exc["Count"]>0]
 hist = history()
 held_total = cour["Held"].sum() if len(cour) else 0
+delivered_total = cour["Delivered"].sum() if len(cour) else 0
 oldest = int(stock.loc[stock["Store"]>0,"AgeDays"].max()) if (stock["Store"]>0).any() else 0
 
 # ============================ 1 · OVERVIEW ============================
-with T1:
+
+def _overview_body(x):
     if len(open_exc):
         n=int(open_exc["Count"].sum())
         kinds=" · ".join(f'{r.Exception} ({r.Count})' for r in open_exc.head(3).itertuples())
@@ -1322,7 +1334,7 @@ with T1:
     st.write("")
     k=st.columns(6)
     kpi(k[0],"Available to sell",f"{stock['Store'].sum():,.0f}","boxes in store")
-    kpi(k[1],"With couriers",f"{held_total:,.0f}","still Inripe stock")
+    kpi(k[1],"With couriers",f"{held_total:,.0f}","out today")
     kpi(k[2],"Open shipments",f"{int((clear['Cleared']=='No').sum())}","not fully cleared")
     kpi(k[3],"Oldest stock",f"{oldest}","days since arrival")
     kpi(k[4],"Orders outstanding",f"{clear['OrdersOutstanding'].sum():,.0f}","with couriers")
@@ -1385,8 +1397,10 @@ with T1:
         st.markdown(f'<div class="card" style="border-left:3px solid {GRN}">'
                     f'<b style="color:{GRN}">Nothing needs action</b></div>', unsafe_allow_html=True)
 
-# ============================== 2 · STOCK ==============================
-with T2:
+    # ============================== 2 · STOCK ==============================
+
+
+def _stock_body(x):
     k=st.columns(4)
     kpi(k[0],"Store stock",f"{stock['Store'].sum():,.0f}")
     kpi(k[1],"With couriers",f"{held_total:,.0f}")
@@ -1421,8 +1435,10 @@ with T2:
     if len(mv): table(mv.style.format({"Qty":"{:,.0f}"}))
     else: st.markdown(f'<span style="color:{MUT}">No movements on this date.</span>',unsafe_allow_html=True)
 
-# ============================ 3 · SHIPMENTS ============================
-with T3:
+    # ============================ 3 · SHIPMENTS ============================
+
+
+def _shipments_body(x):
     st.subheader("Shipment status")
     d=clear.copy(); d["Arrival"]=d["Arrival"].dt.strftime("%d %b")
     d["Status"]=np.where(d["Overdue"],"Overdue",np.where(d["Cleared"]=="Yes","Cleared","Open"))
@@ -1477,8 +1493,10 @@ with T3:
                             "ToCourier":"To courier","Store":"In store","AgeDays":"Days"})
         table(b.style.format({c:"{:,.0f}" for c in b.columns if c not in ("Item","Source")}))
 
-# ============================ 4 · COURIERS ============================
-with T4:
+    # ============================ 4 · COURIERS ============================
+
+
+def _couriers_body(x):
     if not len(cour):
         st.markdown(f'<span style="color:{MUT}">No courier activity in this filter.</span>',unsafe_allow_html=True)
     else:
@@ -1512,17 +1530,21 @@ with T4:
                 use_container_width=True)
         with c2:
             st.subheader("Open positions")
-            op=cour[cour["Held"]!=0][["Courier","Shipment","Market","ToCourier",
-                                      "Returned","Held","DaysSince"]].rename(
+            op=cour[(cour["Held"]!=0)|(cour["Out"]!=0)][
+                ["Courier","Shipment","Market","ToCourier","Returned",
+                 "Delivered","Held","DaysSince"]].rename(
                 columns={"ToCourier":"To courier","DaysSince":"Days since"})
             if len(op):
                 table(op.style.format({c:"{:,.0f}" for c in
-                    ["To courier","Returned","Held","Days since"]},na_rep="—"))
+                    ["To courier","Returned","Delivered","Held",
+                     "Days since"]},na_rep="—"))
             else:
                 st.markdown(f'<span style="color:{MUT}">Every courier is clear.</span>',unsafe_allow_html=True)
 
-# ============================= 5 · LOSSES =============================
-with T5:
+    # ============================= 5 · LOSSES =============================
+
+
+def _losses_body(x):
     rec=stock["Received"].sum(); customs=stock["Customs"].sum()
     scrap=stock["Scrap"].sum(); rscrap=stock["ReturnScrap"].sum()
     total_loss=customs+scrap+rscrap; loss_pct=total_loss/rec*100 if rec else 0
@@ -1585,8 +1607,10 @@ with T5:
         .apply(lambda d: heat_cols(d,["Loss %"],R_RED),axis=None))
     legend("Loss as a share of received:", R_RED, "low", "high")
 
-# =========================== 6 · DATA CHECK ===========================
-with T6:
+    # =========================== 6 · DATA CHECK ===========================
+
+
+def _datacheck_body(x):
     st.subheader("Is this data trustworthy?")
     trust_ok = len(errs)==0 and abs(stock["QA"]).sum()<1e-6 and abs(stock["ShipDiff"]).sum()==0
     if trust_ok:
@@ -1665,7 +1689,27 @@ with T6:
     else:
         st.markdown(f'<span style="color:{MUT}">No counts recorded in this filter.</span>',unsafe_allow_html=True)
 
-# ============================== 7 · GUIDE ==============================
-with T7:
+    # ============================== 7 · GUIDE ==============================
+
+
+def _guide_body(x):
     render_guide()
 
+
+# every tab is a function now: adding a report is one function and one line in
+# review.TABS, with nothing existing touched
+_ctx = {
+    "stock": stock, "moves": mf, "ship": sf, "cfg": cfg,
+    "clear": clear, "cour": cour, "count": cf,
+    "table": table, "kpi": kpi, "legend": legend,
+    "today_body": _overview_body,
+    "stock_body": _stock_body,
+    "shipments_body": _shipments_body,
+    "couriers_body": _couriers_body,
+    "losses_body": _losses_body,
+    "datacheck_body": _datacheck_body,
+    "guide_body": _guide_body,
+}
+for _name, _fn, _ in review.TABS:
+    with _tab.get(_name, st.container()):
+        _fn(_ctx)

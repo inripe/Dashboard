@@ -57,10 +57,14 @@ ck0("negative store stock", (st["Store"] < 0).sum())
 
 print("D. COURIER BALANCE")
 ck("to courier", cp.ToCourier.sum() if len(cp) else 0, q("To Courier"))
-ck("delivered", cp.Delivered.sum() if len(cp) else 0, q("Delivered"))
 ck("returned", cp.Returned.sum() if len(cp) else 0, q("Returned"))
-ck("held = out - delivered - returned", cp.Held.sum() if len(cp) else 0,
-   q("To Courier") - q("Delivered") - q("Returned"))
+# a courier holds what it took today; anything older has been delivered,
+# because whatever did not sell comes back the next morning
+ck("held plus delivered is everything that went out and stayed out",
+   (cp.Held.sum() + cp.Delivered.sum()) if len(cp) else 0,
+   q("To Courier") - q("Returned"))
+ck0("delivered is never negative",
+    (cp["Delivered"] < 0).sum() if len(cp) else 0)
 ck0("negative courier holding", (cp["Held"] < 0).sum() if len(cp) else 0)
 
 print("E. RETURN LOOP")
@@ -82,13 +86,12 @@ ck("outstanding = received - scrap - to courier + returned + adjustments",
    + q("Returned") + q("Count Adjustment")
    + q("Count Adjustment - Add") - q("Count Adjustment - Remove"))
 ck("outstanding = what is in the store", cl.Outstanding.sum(), st.Store.sum())
-ck("and what the courier holds is counted on its own",
-   (cp.Held.sum() if len(cp) else 0),
+ck("what went out and stayed out is held plus delivered",
+   (cp.Held.sum() + cp.Delivered.sum()) if len(cp) else 0,
    q("To Courier") - q("Returned"))
-ck("everything still ours = store + courier",
-   st.Store.sum() + (cp.Held.sum() if len(cp) else 0),
-   q("Received") - q("Scrap") - q("Return to Scrap") + q("Count Adjustment")
-   + q("Count Adjustment - Add") - q("Count Adjustment - Remove"))
+ck0("nothing is held for longer than a day",
+    ((cp["Held"] > 0) & (cp["DaysSince"] > engine.COURIER_DAY)).sum()
+    if len(cp) else 0)
 ck0("clearance span before arrival", (cl["Span"].dropna() < 0).sum())
 
 print("H. AGING")

@@ -1,6 +1,10 @@
 """INRIPE stock control - calculation engine. Single source of truth."""
 import pandas as pd, numpy as np
 
+# a courier holds what it took today. What it took earlier has been
+# delivered, because anything unsold comes back the next morning.
+COURIER_DAY = 1
+
 SHEETS = {"MASTER": None, "SHIPMENTS": 5, "MOVES": 5, "COUNT": 5}
 # every movement the sheet may contain. Delivered, Orders Assigned and Courier
 # Handover were retired: the store cannot observe a delivery, and order counts
@@ -260,24 +264,33 @@ def courier_positions(ship, moves, as_of, settings):
         (_q(d, mt, k) if col=="Qty" else _o(d, mt, k))).fillna(0)
     idx["ToCourier"] = mp("To Courier","Qty")
     idx["Returned"]  = mp("Returned","Qty")
-    # Nobody records a delivery - the store never meets the customer. So what
-    # the courier is accountable for is what it took less what it brought back.
-    # Anything not returned was delivered, which is why there is no separate
-    # Delivered figure here.
-    idx["Held"] = idx["ToCourier"] - idx["Returned"]
-    idx["Delivered"] = 0
+    # Boxes go out each morning and whatever did not sell comes back the next
+    # day. So a courier genuinely holds what it took today; anything older has
+    # been delivered, because a return would have arrived by now.
+    idx["Out"] = idx["ToCourier"] - idx["Returned"]
     for c_ in ("OrdersHanded", "OrdersDelivered", "OrdersReturned"):
         idx[c_] = 0
-    idx["OrdersOutstanding"] = idx["OrdersHanded"] - idx["OrdersDelivered"] - idx["OrdersReturned"]
-    tc = d[d["Movement"]=="To Courier"].groupby(k)["Date"].min()
+    idx["OrdersOutstanding"] = 0
+    # the most recent handover, not the first: a courier is judged on what it
+    # took today, not on when this shipment started going out
+    tc = d[d["Movement"]=="To Courier"].groupby(k)["Date"].max()
     idx["DaysSince"] = (as_of - idx.set_index(k).index.map(tc)).days if len(tc) else np.nan
+    # what a courier is holding is what it took in the last day less what it
+    # has already brought back in that time. Anything older has been
+    # delivered, because a return would have arrived by now.
+    recent = d[d["Date"] >= (as_of - pd.Timedelta(days=COURIER_DAY))]
+    out_now = recent[recent["Movement"] == "To Courier"].groupby(k)["Qty"].sum()
+    back_now = recent[recent["Movement"] == "Returned"].groupby(k)["Qty"].sum()
+    held = (idx.set_index(k).index.map(out_now).fillna(0)
+            - idx.set_index(k).index.map(back_now).fillna(0))
+    idx["Held"] = np.clip(np.minimum(held, idx["Out"]), 0, None)
+    idx["Delivered"] = idx["Out"] - idx["Held"]
     mk = ship.drop_duplicates("Shipment ID").set_index("Shipment ID")["Market"]
     idx["Market"] = idx["Shipment"].map(mk)
     idx["Flag"] = np.select(
-        [idx["Held"] < 0,
-         (idx["Held"] > 0) & (idx["DaysSince"] > settings["courier_limit"]),
-         idx["OrdersOutstanding"] < 0],
-        ["Over-delivered","Holding too long","Order count error"], default="OK")
+        [idx["Out"] < 0,
+         (idx["Held"] > 0) & (idx["DaysSince"] > settings["courier_limit"])],
+        ["More back than went out", "Holding too long"], default="OK")
     return idx
 
 def variance(stock, count):

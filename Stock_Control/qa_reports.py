@@ -25,6 +25,8 @@ OTHER = qa_book.entry_user(cfg0) or USER
 COUR=(cfg0.get("couriers_by_market") or {}).get(MKT,[None])[0]
 
 print("=== A. WHAT THE COURIER IS HOLDING ===")
+# a courier holds what it took today; anything older has been delivered,
+# because whatever did not sell comes back the next morning
 cp=engine.courier_positions(s0,m0,AS,cfg0)
 ck("it returns a table", isinstance(cp,pd.DataFrame))
 if len(cp):
@@ -135,6 +137,65 @@ ck("a shipment arriving today is zero days old, not negative",
 app_ = open("app.py").read()
 ck("a stale setting is reported in data check",
    "As-Of date on MASTER is behind today" in app_)
+
+print("=== G. A COURIER HOLDS ONLY TODAY'S HANDOVER ===")
+# boxes go out each morning and whatever did not sell comes back the next day,
+# so anything older than that has reached a customer
+import datetime as _dt, io as _io
+_raw, _sid, _item, _mkt = qa_book.workbench()
+_cf = engine.load(_io.BytesIO(_raw))[3]
+_cr = (_cf.get("couriers_by_market") or {}).get(_mkt, [None])[0]
+if _cr:
+    _s0, _m0b, _c0b, _cfg0b, _ = engine.load(_io.BytesIO(_raw))
+    _cp0 = engine.courier_positions(_s0, _m0b, _cfg0b["as_of"], _cfg0b)
+    _pre = _cp0[(_cp0["Courier"] == _cr) & (_cp0["Shipment"] == _sid)]
+    _before_out = float(_pre["Out"].iloc[0]) if len(_pre) else 0.0
+    _t = _dt.date.today()
+    for _d, _mv, _q in ((_t - _dt.timedelta(days=5), "To Courier", 60),
+                        (_t - _dt.timedelta(days=4), "Returned", 20),
+                        (_t, "To Courier", 50)):
+        _row = {"Date": _d, "Shipment No": _sid, "Movement": _mv,
+                "Item Name": _item, "Courier": _cr,
+                ("In" if _mv == "Returned" else "Out"): _q}
+        if _mv == "Returned":
+            _row["Reason"] = "Other Return"
+        _raw, _ = entry.append_moves(_raw, [_row], "qa", _mkt)
+    _s, _m, _c, _cfg, _e = engine.load(_io.BytesIO(_raw))
+    _cp = engine.courier_positions(_s, _m, _cfg["as_of"], _cfg)
+    # the sheet may already carry courier history, so the three movements just
+    # added are measured against what was there before
+    _r = _cp[(_cp["Courier"] == _cr) & (_cp["Shipment"] == _sid)]
+    _r = _r.iloc[0] if len(_r) else None
+    ck("the shipment shows on the courier view", _r is not None)
+    if _r is not None:
+        eq("everything that went out and stayed out",
+           float(_r["Out"]), float(_before_out) + 90)
+        eq("holding only today's 50", float(_r["Held"]), 50)
+        eq("the rest are delivered",
+           float(_r["Delivered"]), float(_r["Out"]) - 50)
+    ck("held and delivered together are what went out",
+       abs(_r["Held"] + _r["Delivered"] - _r["Out"]) < 0.001)
+    ck("nothing is held for longer than a day",
+       not ((_cp["Held"] > 0) & (_cp["DaysSince"] > engine.COURIER_DAY)).any())
+    ck("the rule is written down", "comes back the next" in open("engine.py").read())
+else:
+    ck("no courier on this market to test with", True)
+
+print("=== H. A MISSED RETURN IS NAMED ===")
+# after a day, unreturned boxes count as delivered. If nobody records the
+# returns, that is silent - so a handover with nothing coming back is flagged
+app_ = open("app.py").read()
+ck("data check looks for it",
+   "Courier sent out but nothing returned" in app_)
+ck("it looks at yesterday, not today",
+   'pd.Timedelta(days=1)' in app_ and '_cut' in app_)
+ck("it names the courier and the boxes",
+   "boxes out, none came back" in app_)
+ck("and it is high priority",
+   '"Courier sent out but nothing returned", len(_silent)' in app_
+   and app_.split("Courier sent out but nothing returned")[1][:200]
+       .find('"High"') > 0)
+ck("the reason is written down", "a missed return is silent" in app_)
 
 print()
 for l in F: print(l)

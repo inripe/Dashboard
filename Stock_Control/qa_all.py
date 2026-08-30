@@ -27,6 +27,7 @@ SUITES = [
     ("quantities", "qa_quantities.py","nothing goes out that is not there"),
     ("isolation",  "qa_isolation.py", "entry ignores the dashboard filters"),
     ("modes",      "qa_modes.py",     "each mode shows its own screen and no other"),
+    ("review",     "qa_review.py",    "one function per tab, a comparison on every number"),
     ("reports",    "qa_reports.py",   "couriers, counts, clearance and today"),
     ("duplicates", "qa_dupes.py",     "the same entry twice is caught and voided"),
     ("names",      "qa_names.py",     "no retired movement name survives anywhere"),
