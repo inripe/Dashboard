@@ -111,10 +111,20 @@ def executive(x):
     tile(k[2], "Came back", f"{r_now[2]:.1f}%",
          f"{label}" + (f" · was {r_bef[2]:.1f}%" if r_bef else ""),
          "bad" if tone2 == "bad" else "")
-    late = int((x["clear"]["DaysOpen"] > TARGET_DAYS).sum()) if len(x["clear"]) else 0
-    med = float(x["clear"]["DaysOpen"].median()) if len(x["clear"]) else 0
-    tile(k[3], "Clears in", f"{med:.0f} days",
-         f"target {TARGET_DAYS} · {late} over", "bad" if late else "")
+    # how long a shipment took to empty, measured on the ones that did. Days
+    # open counts the age of everything including shipments long since
+    # finished, which is not the same question.
+    cl = x["clear"]
+    done = cl[cl["Cleared"] == "Yes"] if len(cl) else cl
+    open_now = cl[cl["Cleared"] == "No"] if len(cl) else cl
+    med = float(done["Span"].dropna().median()) if len(done) and \
+        done["Span"].notna().any() else float("nan")
+    late = int((open_now["DaysOpen"] > TARGET_DAYS).sum()) if len(open_now) else 0
+    tile(k[3], "Clears in",
+         f"{med:.0f} days" if med == med else "—",
+         f"target {TARGET_DAYS} · {late} still open past it"
+         if late else f"target {TARGET_DAYS} · none overdue",
+         "bad" if late else "good")
 
     st.subheader("Month by month")
     rows = []

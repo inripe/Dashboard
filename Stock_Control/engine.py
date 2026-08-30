@@ -255,9 +255,13 @@ def clearance_by_shipment(ship, moves, as_of, settings):
 def courier_positions(ship, moves, as_of, settings):
     d = moves[moves["Courier"].notna()].copy()
     if d.empty:
-        return pd.DataFrame(columns=["Shipment","Courier","ToCourier","Delivered","Returned",
-                                     "Held","OrdersHanded","OrdersDelivered","OrdersReturned",
-                                     "OrdersOutstanding","DaysSince","Flag","Market"])
+        # the same columns the real path produces, so a screen written against
+        # one never breaks on the other
+        return pd.DataFrame(columns=["Shipment","Courier","ToCourier","Returned",
+                                     "Out","Held","Delivered","OrdersHanded",
+                                     "OrdersDelivered","OrdersReturned",
+                                     "OrdersOutstanding","DaysSince","Market",
+                                     "Flag"])
     k = ["Shipment","Courier"]
     idx = d[k].drop_duplicates().reset_index(drop=True)
     mp = lambda mt, col: idx.set_index(k).index.map(

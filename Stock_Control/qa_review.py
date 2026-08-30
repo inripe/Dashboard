@@ -119,6 +119,33 @@ else:
     ck("the app is reading SharePoint, so the empty file is not what it shows",
        True)
 
+print("=== I. THE CLEARANCE TILE ASKS THE RIGHT QUESTION ===")
+rv = open("review.py").read()
+ck("it measures the ones that cleared",
+   'done = cl[cl["Cleared"] == "Yes"]' in rv)
+ck("and counts only the ones still open past the target",
+   'open_now["DaysOpen"] > TARGET_DAYS' in rv)
+ck("it does not count a finished shipment as late",
+   'cl["DaysOpen"] > TARGET_DAYS).sum()) if len(cl)' not in rv)
+ck("and says so when nothing is overdue", "none overdue" in rv)
+ck("the reason is written down", "not the same question" in rv)
+
+print("=== J. THE COURIER VIEW HAS THE SAME COLUMNS EITHER WAY ===")
+# a screen written against a sheet with couriers must not break on one without
+import engine as _e, qa_book as _qb, io as _io
+_s, _m, _c, _cfg, _ = _e.load(_qb.book())
+_full = _e.courier_positions(_s, _m, _cfg["as_of"], _cfg)
+_empty = _e.courier_positions(_s, _m.iloc[0:0], _cfg["as_of"], _cfg)
+# the same columns, not necessarily in the same order - a screen asks for a
+# column by name
+eq("same columns", sorted(_empty.columns), sorted(_full.columns))
+for _col in ("Out", "Held", "Delivered", "DaysSince", "Flag"):
+    ck(f"{_col} is there either way", _col in _empty.columns, list(_empty.columns))
+_app = open("app.py").read()
+for _col in ("Out", "Held", "Delivered"):
+    if f'cour["{_col}"]' in _app:
+        ck(f"the screen uses {_col}, and it exists", _col in _full.columns)
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")
