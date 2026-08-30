@@ -301,6 +301,11 @@ def build_exceptions():
     held = cour[cour["Flag"]=="Holding too long"] if len(cour) else cour
     a("Courier holding beyond limit", len(held),
       ", ".join(f"{r.Courier} · {r.Shipment} · {int(r.DaysSince)}d" for r in held.itertuples()), "High")
+    _future = mf[pd.to_datetime(mf["Date"], errors="coerce")
+                 > pd.Timestamp.today().normalize()] if len(mf) else mf
+    a("Movement dated in the future", len(_future),
+      ", ".join(f"{r.Shipment} {r.Movement} {pd.Timestamp(r.Date):%d %b}"
+                for r in _future.head(4).itertuples()), "High")
     od = clear[clear["Overdue"]]
     a("Shipment overdue to clear", len(od),
       ", ".join(f"{r.Shipment} · {int(r.Outstanding)} boxes" for r in od.itertuples()), "High")
@@ -1497,49 +1502,84 @@ def _shipments_body(x):
 
 
 def _couriers_body(x):
+    """Who is bringing stock back. Order counts were retired, so everything
+    here is boxes - what went out, what came back, and how that is trending."""
     if not len(cour):
-        st.markdown(f'<span style="color:{MUT}">No courier activity in this filter.</span>',unsafe_allow_html=True)
+        st.markdown(f'<span style="color:{MUT}">No courier activity in this '
+                    f'filter.</span>', unsafe_allow_html=True)
+        return
+
+    sc = cour.groupby(["Courier", "Market"]).agg(
+        Out=("ToCourier", "sum"), Back=("Returned", "sum"),
+        Delivered=("Delivered", "sum"), Held=("Held", "sum"),
+        Days=("DaysSince", "max")).reset_index()
+    sc["Return %"] = np.where(sc["Out"] > 0, sc["Back"] / sc["Out"] * 100, 0)
+    sc = sc.sort_values("Return %", ascending=False)
+
+    out_all = float(sc["Out"].sum()); back_all = float(sc["Back"].sum())
+    k = st.columns(4)
+    kpi(k[0], "Handed over", f"{out_all:,.0f}", "boxes")
+    kpi(k[1], "Came back", f"{back_all:,.0f}",
+        f"{back_all/max(out_all,1)*100:.1f}% of what went out")
+    kpi(k[2], "Delivered", f"{sc['Delivered'].sum():,.0f}", "out and not returned")
+    kpi(k[3], "With couriers now", f"{sc['Held'].sum():,.0f}", "handed over today")
+
+    st.subheader("Return rate by courier")
+    table(sc.rename(columns={"Out": "Handed over", "Back": "Came back",
+                             "Days": "Days since last"})
+          .style.format({c: "{:,.0f}" for c in
+                         ["Handed over", "Came back", "Delivered", "Held",
+                          "Days since last"]} | {"Return %": "{:.1f}%"},
+                        na_rep="—")
+          .apply(lambda d: heat_cols(d, ["Return %"], R_RED), axis=None))
+    legend("Return rate:", R_RED, "low", "high")
+
+    # month on month, because a single figure cannot say whether it is getting
+    # worse - and on this data it has been rising since June
+    mv = mf[mf["Courier"].notna()].copy()
+    if len(mv):
+        mv["Month"] = pd.to_datetime(mv["Date"], errors="coerce").dt.to_period("M")
+        g = mv.pivot_table(index=["Courier", "Month"], columns="Movement",
+                           values="Qty", aggfunc="sum").fillna(0)
+        for c_ in ("To Courier", "Returned"):
+            if c_ not in g.columns:
+                g[c_] = 0
+        g = g.reset_index()
+        g["Return %"] = np.where(g["To Courier"] > 0,
+                                 g["Returned"] / g["To Courier"] * 100, 0)
+        g["Month"] = g["Month"].astype(str)
+        wide = g.pivot(index="Courier", columns="Month",
+                       values="Return %").round(1)
+        if len(wide.columns):
+            st.subheader("Return rate, month by month")
+            table(wide.reset_index().style.format(
+                {c: "{:.1f}%" for c in wide.columns}, na_rep="—")
+                .apply(lambda d: heat_cols(d, list(wide.columns), R_RED),
+                       axis=None))
+            legend("Return rate:", R_RED, "low", "high")
+
+    st.subheader("Why boxes come back")
+    rr = mf[(mf["Movement"] == "Returned") & mf["Courier"].notna()]
+    if len(rr) and rr["Reason"].notna().any():
+        by = (rr.groupby(["Courier", "Reason"])["Qty"].sum()
+                .reset_index().pivot(index="Courier", columns="Reason",
+                                     values="Qty").fillna(0))
+        table(by.reset_index().style.format(
+            {c: "{:,.0f}" for c in by.columns}, na_rep="—"))
+        st.markdown('<div class="note">A refusal is the fruit. An unavailable '
+                    'customer is the schedule. A wrong address is the data.'
+                    '</div>', unsafe_allow_html=True)
     else:
-        sc=cour.groupby(["Courier","Market"]).agg(
-            OrdersHanded=("OrdersHanded","sum"),OrdersDelivered=("OrdersDelivered","sum"),
-            OrdersReturned=("OrdersReturned","sum"),OrdersOutstanding=("OrdersOutstanding","sum"),
-            QtyOut=("ToCourier","sum"),QtyHeld=("Held","sum"),MaxDays=("DaysSince","max")).reset_index()
-        sc["Return %"]=np.where(sc["OrdersHanded"]>0,sc["OrdersReturned"]/sc["OrdersHanded"]*100,0)
-        sc["Flag"]=np.where(sc["QtyHeld"]<0,"Over-delivered",
-                    np.where((sc["QtyHeld"]>0)&(sc["MaxDays"]>cfg["courier_limit"]),"Holding too long","OK"))
-        k=st.columns(4)
-        kpi(k[0],"Orders handed",f"{sc['OrdersHanded'].sum():,.0f}")
-        kpi(k[1],"Orders outstanding",f"{sc['OrdersOutstanding'].sum():,.0f}")
-        kpi(k[2],"Boxes held",f"{sc['QtyHeld'].sum():,.0f}")
-        kpi(k[3],"Return rate",f"{sc['OrdersReturned'].sum()/max(sc['OrdersHanded'].sum(),1)*100:.1f}%")
+        st.markdown(f'<span style="color:{MUT}">No reasons recorded on '
+                    f'returns yet.</span>', unsafe_allow_html=True)
 
-        st.subheader("Scorecard")
-        table(sc.style.format({"OrdersHanded":"{:,.0f}","OrdersDelivered":"{:,.0f}",
-            "OrdersReturned":"{:,.0f}","OrdersOutstanding":"{:,.0f}","QtyOut":"{:,.0f}",
-            "QtyHeld":"{:,.0f}","MaxDays":"{:,.0f}","Return %":"{:.1f}%"}, na_rep="—")
-            .apply(lambda d: heat_cols(d,["Return %"],R_RED),axis=None))
-        legend("Return rate:", R_RED, "low", "high")
-
-        c1,c2=st.columns(2)
-        with c1:
-            st.subheader("Boxes held now")
-            st.altair_chart(dark(alt.Chart(sc).mark_bar(cornerRadiusEnd=3).encode(
-                x=alt.X("QtyHeld:Q",title="Boxes"), y=alt.Y("Courier:N",title=None,sort="-x"),
-                color=alt.condition(alt.datum.MaxDays>cfg["courier_limit"],alt.value(RED),alt.value(ACC)),
-                tooltip=["Courier","QtyHeld","MaxDays"]), h=max(140,42*len(sc))),
-                use_container_width=True)
-        with c2:
-            st.subheader("Open positions")
-            op=cour[(cour["Held"]!=0)|(cour["Out"]!=0)][
-                ["Courier","Shipment","Market","ToCourier","Returned",
-                 "Delivered","Held","DaysSince"]].rename(
-                columns={"ToCourier":"To courier","DaysSince":"Days since"})
-            if len(op):
-                table(op.style.format({c:"{:,.0f}" for c in
-                    ["To courier","Returned","Delivered","Held",
-                     "Days since"]},na_rep="—"))
-            else:
-                st.markdown(f'<span style="color:{MUT}">Every courier is clear.</span>',unsafe_allow_html=True)
+    held_now = cour[cour["Held"] > 0]
+    if len(held_now):
+        st.subheader("Still with a courier")
+        table(held_now[["Courier", "Shipment", "Market", "Held", "DaysSince"]]
+              .rename(columns={"DaysSince": "Days since"})
+              .style.format({"Held": "{:,.0f}", "Days since": "{:,.0f}"},
+                            na_rep="—"))
 
     # ============================= 5 · LOSSES =============================
 

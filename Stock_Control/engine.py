@@ -279,10 +279,14 @@ def courier_positions(ship, moves, as_of, settings):
     # took today, not on when this shipment started going out
     tc = d[d["Movement"]=="To Courier"].groupby(k)["Date"].max()
     idx["DaysSince"] = (as_of - idx.set_index(k).index.map(tc)).days if len(tc) else np.nan
+    idx["DaysSince"] = idx["DaysSince"].clip(lower=0)
     # what a courier is holding is what it took in the last day less what it
     # has already brought back in that time. Anything older has been
     # delivered, because a return would have arrived by now.
-    recent = d[d["Date"] >= (as_of - pd.Timedelta(days=COURIER_DAY))]
+    # only what has actually happened: a row dated ahead of today is a typo,
+    # and must not make a courier look like it is holding stock
+    recent = d[(d["Date"] >= (as_of - pd.Timedelta(days=COURIER_DAY)))
+               & (d["Date"] <= as_of)]
     out_now = recent[recent["Movement"] == "To Courier"].groupby(k)["Qty"].sum()
     back_now = recent[recent["Movement"] == "Returned"].groupby(k)["Qty"].sum()
     held = (idx.set_index(k).index.map(out_now).fillna(0)

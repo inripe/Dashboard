@@ -197,6 +197,39 @@ ck("and it is high priority",
        .find('"High"') > 0)
 ck("the reason is written down", "a missed return is silent" in app_)
 
+print("=== I. THE COURIER TAB IS ABOUT BOXES, NOT ORDERS ===")
+app2 = open("app.py").read()
+body = app2.split("def _couriers_body")[1].split("\ndef ")[0]
+for gone in ("OrdersHanded=(", "OrdersDelivered=(", "Orders handed",
+             "Orders outstanding"):
+    ck(f"'{gone}' is gone from it", gone not in body, "")
+for want in ("Handed over", "Came back", "Delivered", "With couriers now",
+             "Return rate by courier", "Return rate, month by month",
+             "Why boxes come back"):
+    ck(f"it shows '{want}'", want in body, "")
+ck("the return rate is boxes back over boxes out",
+   'sc["Back"] / sc["Out"] * 100' in body)
+ck("worst courier first", 'sort_values("Return %", ascending=False)' in body)
+ck("reasons are named for what they tell you",
+   "A refusal is the fruit" in body)
+
+print("=== J. A DATE IN THE FUTURE CANNOT DISTORT IT ===")
+eng = open("engine.py").read()
+ck("held ignores anything dated ahead of today",
+   'd["Date"] <= as_of' in eng)
+ck("and days since is never negative", 'clip(lower=0)' in eng)
+ck("data check names a future-dated row",
+   "Movement dated in the future" in app2)
+cp_ = engine.courier_positions(s0, m0, cfg0["as_of"], cfg0)
+if len(cp_):
+    ck("no courier shows a negative age",
+       bool((cp_["DaysSince"].fillna(0) >= 0).all()),
+       float(cp_["DaysSince"].min()))
+    ck("held is never more than what went out and stayed out",
+       bool((cp_["Held"] <= cp_["Out"] + 0.001).all()))
+else:
+    ck("no courier movements to check", True)
+
 print()
 for l in F: print(l)
 print(f"\n{len(P)} passed, {len(F)} failed")
